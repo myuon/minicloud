@@ -388,6 +388,45 @@ match sql.query("SELECT title FROM books WHERE pages > ? ORDER BY pages DESC", [
   held and not yielded: it is 20 ms by default for that reason, and a query
   that needs longer wants an index.
 
+### An answer written as it goes
+
+A run answered once, at its end, with the whole body in a `web.Response`.
+That is right for a page and impossible for the things that are not pages.
+With `stream` granted a run can answer **while it is still going**:
+
+```cove
+use stream
+
+export fn handle(request: web.Request) -> web.Response {
+  stream.open(200, Map.of(MapEntry(key: "content-type", value: "text/event-stream")))
+  stream.send("data: one\n\n")
+  stream.send("data: two\n\n")
+  web.Response(status: 200, headers: Map.of(), body: "")   // not the answer
+}
+```
+
+- `open` sends the status and the headers at once; every `send` is a chunk
+  on the connection. The `web.Response` the handler returns afterwards is
+  **not** the answer — the answer has been going out since `open` — but
+  returning one is still how a handler ends. The stream ends when the run
+  does.
+- **`send` parks.** The run gives up its worker until the client has taken
+  the chunks before it, so a slow reader costs a parked run and no worker,
+  and a run that is faster than its reader waits instead of filling memory.
+- A client that goes away is an `Err` from `send`, so the run is told and
+  can stop.
+- Everything that bounds a run still bounds it: the `deadline` ends the
+  stream (an app that means to hold one open sets a deadline that says so),
+  `max_host_calls` bounds how many chunks there may be, and each chunk is
+  held to `max_response_bytes` — the one limit that cannot mean the whole
+  body any more.
+- A streamed answer carries no `x-cove-run-*` headers: they say what a run
+  cost, and the head goes out before the run has cost it. It is not
+  gzipped either, which is what server-sent events want.
+
+WebSocket is not this: it needs the connection upgraded, and is
+[#51](https://github.com/myuon/minicloud/issues/51)'s remainder.
+
 ### Queues
 
 `defer` is work the host will do in a moment and forget if it fails. A
@@ -511,6 +550,7 @@ path = "/cron/rollup"
 | `log` | `log` | `info`, `warn`, `error`: a line on stdout (`[app] level: line`) and in the app's log |
 | `timer` | `timer` | `sleep(millis)`: parks the run, at most 60 s |
 | `kv` | `kv` | the app's own SQLite store: `get`, `put`, `delete`, `increment`, `list`, `listDesc`; a `put` past a quota is the app's `Err` |
+| `stream` | `stream` | `open(status, headers)`, `send(chunk)`: an answer written as the run goes ([An answer written as it goes](#an-answer-written-as-it-goes)) |
 | `queue` | `queue` | `send(name, body)`, `depth(name)`: a durable queue the host delivers from ([Queues](#queues)) |
 | `defer` | `defer` | `run(path, body)`: the host runs this app at `path` after this answer ([Work that outlives a request](#work-that-outlives-a-request)) |
 | `sql` | `sql` | the app's own SQL store, beside its `kv`: `query`, `exec`, one statement a call, parameters bound as text ([The SQL store](#the-sql-store)) |
@@ -544,7 +584,7 @@ error[minicloud::spawn]: `spawner.handle` can spawn a task, which minicloud does
   rule: A spawned task runs outside the host's worker pool and keeps its parent from parking or yielding; minicloud refuses an app that can spawn.
 greedy     requires [log]  granted [-]  REFUSED: `greedy.handle` requires `log`, which app.toml does not grant
 spawner    requires [-]  granted [-]  REFUSED: `spawner.handle` can spawn a task, which minicloud does not run
-checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, fetch, time, random, auth, host); 0 warning(s), 2 refused
+checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, stream, fetch, time, random, auth, host); 0 warning(s), 2 refused
 ```
 
 `test` runs every `test fn` the way `cove test` does, with the app's grant,
@@ -879,7 +919,10 @@ Every answer from a run carries what it cost:
 | `x-cove-stop` | on a run a limit stopped: the error kind, below |
 
 A static file ([Static files](#static-files)) is not a run: it carries
-`x-cove-app-version` and none of the others.
+`x-cove-app-version` and none of the others. An answer a run wrote as it
+went ([An answer written as it goes](#an-answer-written-as-it-goes))
+carries none of them either: its head was sent before the run had cost
+anything.
 
 ### Limits and what they answer
 

@@ -243,6 +243,7 @@ impl App {
             defer: self.defer.clone(),
             defer_to: defer_to.cloned(),
             queues: self.queues.clone(),
+            max_response_bytes: self.limits.max_response_bytes,
             fetch: self.fetch.clone(),
             secrets: self.secrets.clone(),
             access: self.access.clone(),

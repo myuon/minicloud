@@ -100,7 +100,7 @@ fn the_list_shows_every_app_its_state_and_its_capabilities() {
     let capabilities = op(&host, "/capabilities").body;
     assert_eq!(
         capabilities.trim(),
-        "admin,auth,defer,fetch,kv,log,queue,random,sql,time,timer"
+        "admin,auth,defer,fetch,kv,log,queue,random,sql,stream,time,timer"
     );
     // And the grant shows where every listing shows grants.
     assert_eq!(app_stats(&host, "admin")["granted"], "admin");

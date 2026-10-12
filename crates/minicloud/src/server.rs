@@ -860,7 +860,7 @@ impl Front {
                 app: index,
                 version: Arc::clone(&app),
                 accepted: Instant::now(),
-                reply,
+                reply: crate::stream::Answering::new(reply),
                 cancel: cancel.clone(),
                 tally: Default::default(),
             },
@@ -941,6 +941,7 @@ impl Front {
                     "text/plain; version=0.0.4; charset=utf-8".into(),
                 )],
                 body: Bytes::from(ops::metrics(&self.ops())),
+                stream: None,
             };
         }
         if path == "/_host/series" {
@@ -962,6 +963,7 @@ impl Front {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
                 body: Bytes::from(ops::page(&self.ops())),
+                stream: None,
             };
         }
         if let Some(name) = path
@@ -1289,6 +1291,7 @@ pub(crate) fn json_reply(value: &Json) -> Reply {
         status: 200,
         headers: vec![("content-type".into(), "application/json".into())],
         body: Bytes::from(body),
+        stream: None,
     }
 }
 
@@ -1333,6 +1336,7 @@ fn asset_reply(asset: &crate::assets::Asset, if_none_match: Option<&str>, app: &
             ("x-cove-app-version".to_string(), app.version.clone()),
         ],
         body: Bytes::new(),
+        stream: None,
     };
     if modified {
         reply
@@ -1396,6 +1400,16 @@ pub(crate) fn to_streamed(
 
 /// A reply as the hyper response.
 pub(crate) fn to_response(reply: Reply) -> Response<OutBody> {
+    // An answer a run is still writing ([`crate::stream`]): the head now,
+    // the chunks as they are sent.
+    if let Some(chunks) = reply.stream {
+        let headers: Vec<(&str, &str)> = reply
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        return to_streamed(reply.status, &headers, chunks);
+    }
     let mut builder = Response::builder().status(reply.status);
     for (name, value) in &reply.headers {
         builder = builder.header(name.as_str(), value.as_str());
