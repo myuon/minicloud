@@ -18,6 +18,13 @@
 //! max_bytes = 8388608             # the files of `assets/` together
 //! cache_control = "no-cache"      # what every one of them is answered with
 //!
+//! [sql]                           # the app's SQL store, with `sql` granted
+//! max_bytes = 67108864            # the database
+//! max_rows = 1000                 # rows one query may answer
+//! max_result_bytes = 4194304      # the values of one answer, summed
+//! max_statement_ms = 20           # how long one statement may run
+//! max_statement_bytes = 65536     # how long its text may be
+//!
 //! [[triggers]]                   # the host runs the app itself, on a schedule
 //! cron = "0 * * * *"             # UTC, to the minute; or @hourly, @daily, …
 //! path = "/cron/hourly"          # the path the run is given; `/` by default
@@ -101,6 +108,8 @@ pub struct AppFile {
     pub fetch: FetchFile,
     #[serde(default)]
     pub assets: AssetsFile,
+    #[serde(default)]
+    pub sql: SqlFile,
     /// Named secrets the app may check a presented credential against
     /// (`auth.check`), or the host sends as a header (`[fetch.headers]`);
     /// never read.
@@ -402,6 +411,17 @@ pub struct KvFile {
     pub max_value_bytes: Option<usize>,
     pub max_keys: Option<u64>,
     pub max_bytes: Option<u64>,
+}
+
+/// `[sql]` as written.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlFile {
+    pub max_bytes: Option<u64>,
+    pub max_rows: Option<u64>,
+    pub max_result_bytes: Option<u64>,
+    pub max_statement_ms: Option<u64>,
+    pub max_statement_bytes: Option<u64>,
 }
 
 /// `[assets]` as written.
@@ -892,6 +912,19 @@ impl AppLimits {
     }
 }
 
+/// A limit that is a count of something, which 0 never is: a limit of 0
+/// would mean an app that may do nothing at all, which is what not granting
+/// the capability says, and says better.
+fn positive(section: &str, key: &str, written: Option<u64>, fallback: u64) -> Result<u64, String> {
+    match written {
+        Some(0) => Err(format!(
+            "`[{section}] {key}` is 0; leave the capability out of `grant` to take it away"
+        )),
+        Some(value) => Ok(value),
+        None => Ok(fallback),
+    }
+}
+
 /// `[assets]`: how the host answers the files in the app's `assets/`
 /// directory.
 ///
@@ -925,6 +958,45 @@ impl Default for AssetPolicy {
     }
 }
 
+/// `[sql]`: what the app's SQL store may hold and what one statement may
+/// cost ([`crate::sql`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqlLimits {
+    /// The database, in bytes. 64 MiB by default, as `[kv] max_bytes` is:
+    /// it is the same disk and the same reason, that one app's store should
+    /// not be able to fill it.
+    pub max_bytes: u64,
+    /// Rows one query may answer. A query past it is the app's `Err` rather
+    /// than a truncated answer, because a page that silently showed the
+    /// first thousand of something would be wrong rather than short.
+    pub max_rows: u64,
+    /// The values of one answer, summed. The run's `max_response_bytes`
+    /// bounds what it may then send; this bounds what it may hold.
+    pub max_result_bytes: u64,
+    /// How long one statement may run.
+    ///
+    /// SQLite answers on the worker, as `kv` does, so this is a worker held
+    /// and not yielded: well above the 2 ms slice, and deliberately small
+    /// for that reason. A statement that runs past it is stopped where it
+    /// is (SQLite's progress handler) and is the app's `Err`; an app whose
+    /// query needs longer wants an index, not a larger number here.
+    pub max_statement_ms: u64,
+    /// How long a statement's text may be.
+    pub max_statement_bytes: u64,
+}
+
+impl Default for SqlLimits {
+    fn default() -> SqlLimits {
+        SqlLimits {
+            max_bytes: 64 << 20,
+            max_rows: 1000,
+            max_result_bytes: 4 << 20,
+            max_statement_ms: 20,
+            max_statement_bytes: 64 << 10,
+        }
+    }
+}
+
 /// An app's configuration, read and validated.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -933,6 +1005,7 @@ pub struct AppConfig {
     pub limits: AppLimits,
     pub kv: KvLimits,
     pub assets: AssetPolicy,
+    pub sql: SqlLimits,
     /// `[[triggers]]`: when the host runs this app itself.
     pub triggers: Vec<Trigger>,
     pub fetch: FetchPolicy,
@@ -1184,6 +1257,34 @@ pub fn parse_app_with(
         max_keys: file.kv.max_keys.unwrap_or(kv_defaults.max_keys),
         max_bytes: file.kv.max_bytes.unwrap_or(kv_defaults.max_bytes),
     };
+    let sql_defaults = SqlLimits::default();
+    let sql = SqlLimits {
+        max_bytes: positive(
+            "sql",
+            "max_bytes",
+            file.sql.max_bytes,
+            sql_defaults.max_bytes,
+        )?,
+        max_rows: positive("sql", "max_rows", file.sql.max_rows, sql_defaults.max_rows)?,
+        max_result_bytes: positive(
+            "sql",
+            "max_result_bytes",
+            file.sql.max_result_bytes,
+            sql_defaults.max_result_bytes,
+        )?,
+        max_statement_ms: positive(
+            "sql",
+            "max_statement_ms",
+            file.sql.max_statement_ms,
+            sql_defaults.max_statement_ms,
+        )?,
+        max_statement_bytes: positive(
+            "sql",
+            "max_statement_bytes",
+            file.sql.max_statement_bytes,
+            sql_defaults.max_statement_bytes,
+        )?,
+    };
     let asset_defaults = AssetPolicy::default();
     // No more than a deploy's archive can carry: a larger allowance could
     // never be used.
@@ -1255,6 +1356,7 @@ pub fn parse_app_with(
         limits,
         kv,
         assets,
+        sql,
         triggers,
         fetch,
         secrets,

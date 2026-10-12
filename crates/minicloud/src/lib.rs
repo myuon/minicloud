@@ -48,6 +48,7 @@ pub mod router;
 pub mod sched;
 pub mod secrets;
 pub mod server;
+pub mod sql;
 pub mod stats;
 pub mod sys;
 pub mod toolchain;

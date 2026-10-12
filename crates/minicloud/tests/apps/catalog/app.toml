@@ -1,0 +1,5 @@
+# The app the `sql` tests are run on (issue #50): a table, an index and an
+# aggregate, which is what the store is for and what `kv` cannot do. The
+# tests that hold a limit write their own `app.toml` with a `[sql]` of
+# their own; this one is what `minicloud check` and `test` see.
+grant = ["sql"]

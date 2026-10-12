@@ -537,6 +537,52 @@ threads: a call into a local SQLite is cheaper than parking, and a worker
 held for a `put` is far inside a 2 ms slice
 ([measurements.md](measurements.md#the-cost-of-a-kv-call-against-a-park)).
 
+## `sql`: the app's relational store
+
+`kv` answers "what is under this key" and "what keys start with this", and
+an app that wants "the ten longest, by author, since Tuesday" has to read
+everything and sort it in Cove. `sql` is a second store for that question —
+`<data>/<app>/sql.sqlite3`, its own file beside `kv.sqlite3`, in WAL mode,
+for the reasons [`kv`](#kv-the-apps-persistent-store) gives — and it does
+not replace the first: a counter or a blob of state is still `kv`'s.
+
+**Values are text, because the schema cannot say otherwise.** A host type is
+a struct, an array or a named type whose `TypeSchema` carries the *names* of
+an enum's cases and not their payloads (`cove-schema`), so a value that is
+sometimes an `Int` and sometimes a `String` cannot be declared at all. Every
+value an app reads is therefore `Option<String>` — `NULL` is `None`,
+`INTEGER` and `REAL` are decimal text, a `BLOB` is the app's `Err` rather
+than a mangled string — and every parameter is a `String`, **bound** and
+never pasted, which SQLite's type affinity turns back into a number where
+the column is one. The one thing text cannot say is `NULL`: `nullif(?1, '')`
+says it.
+
+**The app writes the SQL, so the connection is what is locked down.** An
+authorizer, which SQLite consults while a statement is prepared, refuses
+`ATTACH` and `DETACH` (they name other files on the disk), `PRAGMA` (the
+host set the ones it needs: `foreign_keys`, and the `max_page_count` that is
+`[sql] max_bytes`), transactions and savepoints, and virtual tables.
+Everything else, `CREATE TABLE` and `ALTER TABLE` included, is the app's.
+**Transactions are the interesting refusal**: one held open across host
+calls would keep the connection locked if the run hit its deadline in
+between, and nothing in the host could tell that from a slow app. A single
+statement is atomic by itself, which is what an ordinary write needs;
+several that must be atomic together are an operation this module does not
+have yet rather than one it fakes.
+
+**One statement a call.** `sqlite3_prepare_v2` compiles the first statement
+and hands back the rest, and rusqlite drops the rest silently: an app that
+wrote two would see the first run and the second vanish. The host asks
+SQLite whether a second statement follows and refuses the call if one does.
+
+**On the worker, with a bound.** A call answers at once on the worker, as
+`kv`'s does, rather than parking — but a query, unlike a `get`, can be
+arbitrarily slow, and a worker held is a worker not yielded. So every
+statement runs under SQLite's progress handler with `[sql]
+max_statement_ms` (20 ms by default, ten slices) as its bound, and one that
+runs past it is stopped where it is and is the app's `Err`. The number is
+deliberately small: a query that needs longer wants an index.
+
 ## `fetch`: outbound HTTP to an allowlist
 
 `[fetch] allow` in `app.toml` lists where the app may call:
