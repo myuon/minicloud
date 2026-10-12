@@ -60,6 +60,23 @@ impl Certificates {
         })
     }
 
+    /// A listener with no certificate yet: every connection is refused
+    /// until [`Certificates::reload`] reads one.
+    ///
+    /// This is what `--acme-domain` starts with on a host that has never
+    /// had a certificate. Refusing a handshake is the honest answer — the
+    /// host has nothing to prove who it is with — and the first order is
+    /// usually seconds away.
+    pub fn none(pair: Pair) -> Certificates {
+        let empty = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(NoCertificate));
+        Certificates {
+            config: std::sync::RwLock::new(Arc::new(empty)),
+            pair,
+        }
+    }
+
     /// Reads the files again and serves the new pair from the next
     /// connection on. The pair that is serving is kept if the new one does
     /// not read, because half a renewal is worse than an old certificate.
@@ -97,6 +114,20 @@ fn read(pair: &Pair) -> Result<ServerConfig, String> {
     // The order is the host's preference: h2 where the client can.
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(config)
+}
+
+/// A resolver with nothing to offer, for a host whose certificate has not
+/// been ordered yet.
+#[derive(Debug)]
+struct NoCertificate;
+
+impl rustls::server::ResolvesServerCert for NoCertificate {
+    fn resolve(
+        &self,
+        _hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        None
+    }
 }
 
 fn certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {

@@ -142,6 +142,9 @@ error[cove::runtime]: execution stopped: wall-clock deadline of 2s exceeded
 | `--backend auto\|vm\|native` | `auto` | the native tier where the machine has one (Unix x86-64), else the VM |
 | `--ops-listener public\|admin` | `public` | which listener serves `/_host/` |
 | `--tls-cert FILE` / `--tls-key FILE` | — | the certificate chain and key the public listener serves; with them the host terminates TLS itself and speaks HTTP/2 |
+| `--acme-domain NAME` | — | get a certificate for this name from an ACME authority and renew it, instead of being given one. Repeatable; needs `--acme-http` reachable on port 80 |
+| `--acme-email ADDRESS` / `--acme-staging` | — | what the authority is told, and whether it is Let's Encrypt's staging one |
+| `--acme-http ADDR` | `0.0.0.0:80` | the plain listener that answers challenges and redirects everything else to `https://` |
 | `--public-origin URL` | — | the origin clients reach the host at, behind a TLS-terminating proxy |
 | `--trust-proxy` | off | believe `X-Forwarded-Proto` and `X-Forwarded-Host` instead |
 | `--shutdown-grace SECONDS` | `10` | on SIGTERM or Ctrl-C, how long to wait for requests in flight |
@@ -1068,10 +1071,22 @@ $ minicloud serve --apps apps --addr 0.0.0.0:443 \
   is never served. A reload that does not read keeps the pair that is
   serving and says why; a host whose pair does not read at start does not
   start.
-- **Getting the certificate is not the host's** (yet): certbot, lego or
-  anything else renews it on disk and runs `systemctl reload` or
-  `kill -HUP`. ACME is an account, a challenge and a clock, and is
-  [#52](https://github.com/myuon/minicloud/issues/52)'s remainder.
+- **Or the host gets its own.** `--acme-domain tools.example` makes it an
+  account with Let's Encrypt, orders a certificate, answers the HTTP-01
+  challenge on `--acme-http` (port 80, in the clear, which is the one thing
+  a host with no certificate can do), writes the pair under
+  `<data>/_host/acme/` and renews it 30 days before it runs out. A start
+  that finds a certificate with more than 30 days left serves it and orders
+  nothing, because a host that ordered on every start would be rate-limited
+  by any authority worth using.
+
+  The plain listener redirects everything that is not a challenge to
+  `https://`, so it is the http-to-https every deployment wants anyway.
+
+  **Use `--acme-staging` first.** Its certificates are not trusted and its
+  rate limits are kind, which is what a first run wants; the exchange with
+  a real authority is the one part of this host that no test covers, for
+  want of an authority, a public name and port 80.
 
 **Answers are gzipped** where it is worth it: a body over 1 KiB, of a text
 or text-shaped type, for a client that said `Accept-Encoding: gzip` — with
