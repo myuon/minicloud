@@ -162,6 +162,10 @@ pub struct AppCounters {
     pub trigger_runs: AtomicU64,
     pub trigger_skipped: AtomicU64,
     pub trigger_failed: AtomicU64,
+    /// How long this app's answered requests took, admission to answer
+    /// ([`crate::histogram`]). A run's own headers say what one cost; this
+    /// is what they all cost.
+    pub latency: crate::histogram::Latency,
     /// Updates installed, and updates refused (the current version kept).
     pub updates: AtomicU64,
     pub updates_refused: AtomicU64,
@@ -261,6 +265,13 @@ impl AppCounters {
                 "calls": read(&self.fetches),
                 "refused": read(&self.fetch_refused),
                 "errors": read(&self.fetch_errors),
+            },
+            "latency_us": {
+                "count": self.latency.count(),
+                "mean": self.latency.mean_us(),
+                "p50": self.latency.quantile_us(0.50),
+                "p90": self.latency.quantile_us(0.90),
+                "p99": self.latency.quantile_us(0.99),
             },
             "assets_served": read(&self.assets),
             "assets_not_modified": read(&self.assets_not_modified),

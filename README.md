@@ -749,6 +749,8 @@ token` secret is the way in. See
 | --- | --- |
 | `GET /_host/ui` | one HTML page, refreshed every 5 s: every app's version, state, tier, counters, queues, errors, KV usage and fetch counts, and its recent errors and log lines |
 | `GET /_host/stats` | every app's counters as JSON, with the server's totals |
+| `GET /_host/metrics` | the same, in the text format Prometheus scrapes (`version=0.0.4`), with the request times as a histogram |
+| `GET /_host/series?app=&over=hour\|day\|month` | what each app did minute by minute (or, for a month, hour by hour) |
 | `GET /_host/apps/<app>` | one app as JSON: its limits, every version it has had, its last 50 errors, and on the native tier which functions stayed on the VM and why |
 | `GET /_host/apps/<app>/logs?n=200` | its recent log lines, as text |
 | `GET /_host/apps/<app>/logs?follow=1` | those, and then every line as it is written: server-sent events, until the client goes away |
@@ -765,6 +767,8 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `errors` by kind, `rejected` by reason, `in_flight`, `queued`, `parked`,
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms`, `heap_peak_words`,
+`latency_us` (how long its answered requests took: the count, the mean and
+p50, p90 and p99, estimated from a histogram),
 `fetch`, `kv` and `sql` usage against their quotas, `assets` (how many files and how many
 bytes) with `assets_served` and `assets_not_modified`, `triggers` (each
 schedule and when it is next due) with `trigger_runs`, `trigger_skipped` and
@@ -813,6 +817,33 @@ A static file ([Static files](#static-files)) is not a run: it carries
 429 is one app at its own limit — its neighbours are unaffected; 503 with
 `Retry-After` is the whole host. A run's 500 or 504 body is the runtime's
 diagnostic, with the source line.
+
+### What happened an hour ago
+
+The counters are running totals, which say what an app has done and not
+when. Once a minute the host writes **what changed over that minute** to
+`<data>/_host/series.sqlite3` — requests, errors, rejections, worker time,
+and p50 and p99 from the request-time histogram — so a rate can be read off
+afterwards. The minutes are kept for 48 hours; at the top of each hour the
+hour that ended is rolled up (counts summed, the percentiles kept at their
+worst) into a second table kept for 90 days.
+
+- `GET /_host/series?app=hello&over=hour` is the last hour minute by minute;
+  `over=day` is 24 hours of minutes and `over=month` 30 days of hours.
+- The operations page draws each app's last hour beside its counters.
+- A host with no data directory keeps nothing and says so (`"kept": false`);
+  every current value is still answered.
+
+The first sample after a start writes nothing — there is nothing to take a
+difference from, and a host that counted its running totals as one minute's
+work would show a spike at every restart.
+
+**Prometheus** scrapes `GET /_host/metrics`: `minicloud_requests_total`,
+`_requests_ok_total`, `_errors_total` by kind, `_rejected_total` by reason,
+`_worker_seconds_total`, `_in_flight`, `_queued`, `_assets_served_total`,
+`_trigger_runs_total` and `minicloud_request_duration_seconds` as a
+histogram, each labelled by app. With `--ops-listener admin` (as deployed)
+that is on the admin listener, where a scraper on the machine reaches it.
 
 ### Logs
 

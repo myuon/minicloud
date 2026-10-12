@@ -116,6 +116,17 @@ so, and what it asserts is counted.
   stats. `cron.rs` holds the parser and the calendar to 32 cases of their
   own — the epoch, leap days, negative seconds, the day-or-weekday rule,
   the aliases, and every way a field can be wrong;
+- metrics (`metrics.rs`, and `histogram.rs`'s and `series.rs`'s unit
+  tests): the time every request took is a distribution with its quantiles
+  in order, and an app that answered nothing has none; `/_host/metrics` is
+  the exposition format, with the counters, the per-kind errors, the
+  per-reason rejections and the histogram, and every line is a comment or a
+  name and a value; a minute is kept as what changed *over* it and not as a
+  running total, the first sample keeps nothing, and a quiet minute is kept
+  as a quiet minute; the operations page draws the last hour. The
+  histogram's own tests hold the bucketing, the interpolation and the
+  difference; the series' hold the upsert, the roll-up (summed counts,
+  worst percentiles), the pruning and that sweeping twice does not double;
 - `[rate]` (`rate.rs`, and `rate.rs`'s unit tests): a caller past its
   allowance is 429 with a `Retry-After` and the app does not run, while its
   neighbour answers; a burst larger than the rate is allowed and then is
