@@ -52,7 +52,7 @@ some of those names ([Names kept from cove-tools](#names-kept-from-cove-tools)).
 $ cargo build --profile checked
 $ ./target/checked/minicloud serve --apps examples
 minicloud: loading apps from examples
-minicloud 0.16.0 (cove 2af2d11c5fe02ea3f8f4a057e24cb4f2cc297dc2)
+minicloud 0.17.0 (cove 2af2d11c5fe02ea3f8f4a057e24cb4f2cc297dc2)
   algo       v1-cb6c97f3  requires [time] (lower bound)  granted [time]  ok: 456 fn on native, checked in 37.1 ms, prepared in 83.5 ms
   crunch     v1-c4b9d04b  requires [-]  granted [-]  ok: 227 fn on native, checked in 16.9 ms, prepared in 1.6 ms
   hello      v1-e421b416  requires [-]  granted [-]  ok: 234 fn on native, checked in 10.7 ms, prepared in 2.3 ms
@@ -809,8 +809,8 @@ it, `apps/admin`, `deploy/` and this README — not `examples/`), its
 On the server, as the user the service runs as:
 
 ```console
-$ curl -fsSLO https://github.com/myuon/minicloud/releases/download/v0.16.0/install.sh
-$ bash install.sh v0.16.0
+$ curl -fsSLO https://github.com/myuon/minicloud/releases/download/v0.17.0/install.sh
+$ bash install.sh v0.17.0
 ```
 
 `install.sh` downloads the release and checks its sha256, unpacks it into
