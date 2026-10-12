@@ -116,6 +116,14 @@ so, and what it asserts is counted.
   stats. `cron.rs` holds the parser and the calendar to 32 cases of their
   own — the epoch, leap days, negative seconds, the day-or-weekday rule,
   the aliases, and every way a field can be wrong;
+- `[rate]` (`rate.rs`, and `rate.rs`'s unit tests): a caller past its
+  allowance is 429 with a `Retry-After` and the app does not run, while its
+  neighbour answers; a burst larger than the rate is allowed and then is
+  not; a header may be the caller instead of the address, and two keys have
+  two allowances; `app` is one bucket for everybody; an app's files are
+  behind it too; five ways of writing it wrong refuse that app alone; and
+  the buckets refill, are swept when there are too many, and are forgotten
+  with the app;
 - following a log (`logs.rs`): the answer is server-sent events, it opens
   with the lines the ring already has and says how many, a line written
   while the connection is open reaches it, an app that is not there is 404,

@@ -27,7 +27,7 @@ use cove_sema::{Compiler, HostSchemas};
 use crate::assets::Assets;
 use crate::config::{
     read_app_with, AppConfig, AppLimits, AppOverride, AssetPolicy, FetchPolicy, KvLimits,
-    RemovedKeys, SecretSource, Secrets, Trigger, ADMIN_APP,
+    RatePolicy, RemovedKeys, SecretSource, Secrets, Trigger, ADMIN_APP,
 };
 use crate::hosts::{AppContext, HostModules};
 use crate::logs::LogRing;
@@ -129,6 +129,9 @@ pub struct App {
     /// `[route] hosts`: the hostnames that reach this app, and the only
     /// way to it when there are any.
     pub hosts: Vec<String>,
+    /// `[rate]`: how often one caller may reach this app, `None` for no
+    /// limit of its own ([`crate::rate`]).
+    pub rate: Option<RatePolicy>,
     /// `[[triggers]]`: when the host runs this app itself
     /// ([`crate::triggers`]). Of this version, like everything else here: a
     /// schedule changed by an update takes effect with the version.
@@ -386,6 +389,7 @@ pub fn describe_as(
         secrets: Secrets::default(),
         access: crate::access::Access::default(),
         hosts: Vec::new(),
+        rate: None,
         triggers: Vec::new(),
         fetch_allow: Vec::new(),
         overridden: over.filter(|over| over.changes_config()).cloned(),
@@ -411,6 +415,7 @@ pub fn describe_as(
             app.access = config.access.clone();
             app.asset_policy = config.assets.clone();
             app.triggers = config.triggers.clone();
+            app.rate = config.rate.clone();
             // The files are read here, with the config that bounds them, so
             // that an `assets/` directory the host will not answer — a
             // symbolic link, more than `[assets] max_bytes` — refuses the

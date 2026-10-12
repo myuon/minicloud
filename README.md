@@ -189,7 +189,7 @@ entry = "hello.handle"          # `<app>.handle` by default
 grant = ["log", "timer"]        # the capabilities granted; none by default
 
 [limits]
-deadline = "10s"                # per request, parked time included ("ms" or "s")
+deadline = "10s"                # per request, parked time included ("ms", "s", "m", "h")
 max_host_calls = 1000           # per request
 # max_call_depth = 512          # per request; no default but the runtime's own bound
 # max_heap_words = 4194304      # per request; the runtime's default, 32 MiB
@@ -203,6 +203,12 @@ max_key_bytes = 1024
 max_value_bytes = 1048576
 max_keys = 100000
 max_bytes = 67108864            # keys and values, summed
+
+[rate]                          # how often one caller may reach the app
+requests = 60                   # over `per`; without it there is no limit at all
+per = "1m"                      # "300ms", "5s", "1m", "2h"
+burst = 60                      # the most it may hold at once; `requests` by default
+key = "address"                 # or "app", or "header:cf-connecting-ip"
 
 [sql]                           # the app's SQL store, with `sql` granted
 max_bytes = 67108864            # the database
@@ -294,6 +300,36 @@ it; every other app serves. The load line says what an app has:
 ```console
   admin      v1-17e8cb08  requires [admin, auth]  granted [admin, auth]  ok: 329 fn on native, checked in 24.1 ms, prepared in 19.9 ms, 3 file(s) in assets/ (10182 bytes)
 ```
+
+### How often one caller may ask
+
+An app's `max_queued` says how many requests may wait for it, and
+`--max-in-flight` how many the host holds at once; neither stops **one**
+caller filling an app's queue by itself. `[rate]` does, at the door:
+
+```toml
+[rate]
+requests = 60      # a minute, by default
+key = "address"
+```
+
+- A caller past its allowance is **429** with `Retry-After`, counted in
+  `rejected.rate_limited`, and the app does not run. The request costs the
+  host a map lookup.
+- It is a **token bucket**: `requests` tokens are added over `per`, a bucket
+  holds at most `burst` of them (`requests` by default), so a quiet caller
+  may spend a burst at once and a busy one settles at the rate.
+- `key` says who a caller is. `address` is the connection's, which behind a
+  proxy is the proxy — there use `header:cf-connecting-ip` (or whatever
+  your proxy sets), remembering that a header is only as good as whoever is
+  allowed to set it. `app` is one bucket for everybody, which is how an app
+  says "no more than this, from anyone".
+- The app's static files are behind it too: a file is cheap, a flood of
+  them is not.
+
+Buckets are the host's, not the app's: they are kept across an update and
+dropped when the app is removed, and the host keeps at most ten thousand of
+them, sweeping the ones that are back to full first.
 
 ### The SQL store
 
@@ -760,6 +796,7 @@ A static file ([Static files](#static-files)) is not a run: it carries
 | the app is disabled | 503 | `rejected.disabled` |
 | request body over `max_request_bytes` | 413 | `rejected.too_large` |
 | request body not UTF-8 | 400 | `rejected.bad_request` |
+| the caller is past the app's `[rate]` | **429**, `Retry-After: <n>` | `rejected.rate_limited` |
 | the app already has `max_queued` requests waiting | **429**, `Retry-After: 1` | `rejected.queue_full` |
 | the server has `--max-in-flight` requests admitted | **503**, `Retry-After: 1` | `rejected.server_busy` |
 | `--max-connections` open | 503, `Retry-After: 1`, connection closed | |

@@ -18,6 +18,12 @@
 //! max_bytes = 8388608             # the files of `assets/` together
 //! cache_control = "no-cache"      # what every one of them is answered with
 //!
+//! [rate]                          # how often one caller may reach the app
+//! requests = 60                   # over `per`; without it there is no limit
+//! per = "1m"
+//! burst = 60                      # the most it may hold; `requests` by default
+//! key = "address"                 # or "app", or "header:cf-connecting-ip"
+//!
 //! [sql]                           # the app's SQL store, with `sql` granted
 //! max_bytes = 67108864            # the database
 //! max_rows = 1000                 # rows one query may answer
@@ -110,6 +116,8 @@ pub struct AppFile {
     pub assets: AssetsFile,
     #[serde(default)]
     pub sql: SqlFile,
+    #[serde(default)]
+    pub rate: RateFile,
     /// Named secrets the app may check a presented credential against
     /// (`auth.check`), or the host sends as a header (`[fetch.headers]`);
     /// never read.
@@ -411,6 +419,16 @@ pub struct KvFile {
     pub max_value_bytes: Option<usize>,
     pub max_keys: Option<u64>,
     pub max_bytes: Option<u64>,
+}
+
+/// `[rate]` as written.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateFile {
+    pub requests: Option<u32>,
+    pub per: Option<String>,
+    pub burst: Option<u32>,
+    pub key: Option<String>,
 }
 
 /// `[sql]` as written.
@@ -912,6 +930,14 @@ impl AppLimits {
     }
 }
 
+/// Whether `name` is a header name a proxy could set.
+fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// A limit that is a count of something, which 0 never is: a limit of 0
 /// would mean an app that may do nothing at all, which is what not granting
 /// the capability says, and says better.
@@ -997,6 +1023,30 @@ impl Default for SqlLimits {
     }
 }
 
+/// What a `[rate]` counts: who the tokens are spent by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RateKey {
+    /// The address the connection came from. Behind a proxy that is the
+    /// proxy, which is why there is a header to name instead.
+    Address,
+    /// A header the proxy in front sets, such as `cf-connecting-ip`. The
+    /// host does not verify it — a header is only as good as whoever is
+    /// allowed to set it — so this is for a host that is behind something
+    /// that overwrites it.
+    Header(String),
+    /// The app as a whole: one bucket for everyone.
+    App,
+}
+
+/// `[rate]`: how often one caller may reach an app ([`crate::rate`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RatePolicy {
+    pub requests: u32,
+    pub per: Duration,
+    pub burst: u32,
+    pub key: RateKey,
+}
+
 /// An app's configuration, read and validated.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -1006,6 +1056,9 @@ pub struct AppConfig {
     pub kv: KvLimits,
     pub assets: AssetPolicy,
     pub sql: SqlLimits,
+    /// `[rate]`: how often one caller may reach this app; `None` for no
+    /// limit of its own, which is the default.
+    pub rate: Option<RatePolicy>,
     /// `[[triggers]]`: when the host runs this app itself.
     pub triggers: Vec<Trigger>,
     pub fetch: FetchPolicy,
@@ -1257,6 +1310,60 @@ pub fn parse_app_with(
         max_keys: file.kv.max_keys.unwrap_or(kv_defaults.max_keys),
         max_bytes: file.kv.max_bytes.unwrap_or(kv_defaults.max_bytes),
     };
+    // `[rate]` is off unless `requests` says how many: a window and a burst
+    // with no count is not half a limit, it is a mistake.
+    let rate = match (
+        file.rate.requests,
+        &file.rate.per,
+        file.rate.burst,
+        &file.rate.key,
+    ) {
+        (None, None, None, None) => None,
+        (None, ..) => {
+            return Err(
+                "`[rate]` needs `requests`: how many a caller may make over `per`".to_string(),
+            )
+        }
+        (Some(0), ..) => {
+            return Err(
+                "`[rate] requests` is 0; disable the app instead of refusing every caller"
+                    .to_string(),
+            )
+        }
+        (Some(requests), per, burst, key) => {
+            let per = match per {
+                Some(text) => {
+                    let per = parse_duration(text).map_err(|why| format!("`[rate] per`: {why}"))?;
+                    if per.is_zero() {
+                        return Err("`[rate] per` is 0; a window has a length".to_string());
+                    }
+                    per
+                }
+                None => Duration::from_secs(60),
+            };
+            let key = match key.as_deref() {
+                None | Some("address") => RateKey::Address,
+                Some("app") => RateKey::App,
+                Some(named) => match named.strip_prefix("header:") {
+                    Some(header) if is_header_name(header) => {
+                        RateKey::Header(header.to_ascii_lowercase())
+                    }
+                    _ => {
+                        return Err(format!(
+                            "`[rate] key = \"{named}\"` is not a key: `address`, `app`, or \
+                             `header:<name>`"
+                        ))
+                    }
+                },
+            };
+            Some(RatePolicy {
+                requests,
+                per,
+                burst: burst.unwrap_or(requests).max(1),
+                key,
+            })
+        }
+    };
     let sql_defaults = SqlLimits::default();
     let sql = SqlLimits {
         max_bytes: positive(
@@ -1357,6 +1464,7 @@ pub fn parse_app_with(
         kv,
         assets,
         sql,
+        rate,
         triggers,
         fetch,
         secrets,
@@ -1384,24 +1492,24 @@ pub fn store_references(dir: &Path) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// `"300ms"` or `"5s"`.
+/// `"300ms"`, `"5s"`, `"1m"` or `"2h"`.
+///
+/// Minutes and hours are here for `[rate] per`, where a window is
+/// naturally one of them; a deadline may be written that way too, though
+/// one that long is a strange deadline.
 pub fn parse_duration(text: &str) -> Result<Duration, String> {
+    const SHAPE: &str = "a duration like \"300ms\", \"5s\", \"1m\" or \"2h\"";
     let text = text.trim();
-    let (number, unit) = match text.strip_suffix("ms") {
-        Some(number) => (number, 1),
-        None => match text.strip_suffix('s') {
-            Some(number) => (number, 1000),
-            None => {
-                return Err(format!(
-                    "`{text}` is not a duration like \"300ms\" or \"5s\""
-                ))
-            }
-        },
-    };
+    // `ms` before `s`, or every `ms` would read as a number ending in `m`.
+    let units = [("ms", 1u64), ("s", 1000), ("m", 60_000), ("h", 3_600_000)];
+    let (number, unit) = units
+        .iter()
+        .find_map(|(suffix, unit)| text.strip_suffix(suffix).map(|number| (number, *unit)))
+        .ok_or_else(|| format!("`{text}` is not {SHAPE}"))?;
     let n: u64 = number
         .trim()
         .parse()
-        .map_err(|_| format!("`{text}` is not a duration like \"300ms\" or \"5s\""))?;
+        .map_err(|_| format!("`{text}` is not {SHAPE}"))?;
     Ok(Duration::from_millis(n * unit))
 }
 
@@ -1851,7 +1959,13 @@ mod tests {
     fn durations() {
         assert_eq!(parse_duration("5s").unwrap(), Duration::from_secs(5));
         assert_eq!(parse_duration("250ms").unwrap(), Duration::from_millis(250));
-        assert!(parse_duration("5m").is_err());
+        // Minutes and hours, for `[rate] per` (#54).
+        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+        // `ms` is milliseconds, never "a number of m, then s".
+        assert_eq!(parse_duration("1ms").unwrap(), Duration::from_millis(1));
+        assert!(parse_duration("5 weeks").is_err());
+        assert!(parse_duration("5").is_err());
     }
 
     #[test]

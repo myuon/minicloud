@@ -136,6 +136,8 @@ pub(crate) struct Front {
     pub(crate) control: Arc<Control>,
     /// What runs an app on a schedule ([`crate::triggers`]).
     pub(crate) triggers: Arc<crate::triggers::Triggers>,
+    /// The `[rate]` buckets of every app ([`crate::rate`]).
+    pub(crate) rates: crate::rate::Limiter,
     pub(crate) admin_token: String,
     /// Set by [`Host::shutdown`]: new requests are answered 503.
     draining: AtomicBool,
@@ -265,6 +267,7 @@ impl Host {
             draining: AtomicBool::new(false),
             control: Arc::clone(&control),
             triggers: Arc::clone(&triggers),
+            rates: crate::rate::Limiter::default(),
         });
         control.attach(&front);
         let (listener, admin) = {
@@ -442,7 +445,7 @@ content-length: 37\r\n\r\nminicloud: too many open connections\n";
 impl Front {
     async fn accept(self: Arc<Self>, listener: tokio::net::TcpListener) {
         loop {
-            let (mut stream, _) = match listener.accept().await {
+            let (mut stream, from) = match listener.accept().await {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     // Out of file descriptors, most likely: back off rather
@@ -468,7 +471,7 @@ impl Front {
                 let _ = stream.set_nodelay(true);
                 let service = service_fn(move |request| {
                     let front = Arc::clone(&front);
-                    async move { Ok::<_, Infallible>(front.handle(request).await) }
+                    async move { Ok::<_, Infallible>(front.handle(request, from.ip()).await) }
                 });
                 let _ = http1::Builder::new()
                     .timer(TokioTimer::new())
@@ -481,14 +484,18 @@ impl Front {
         }
     }
 
-    async fn handle(&self, request: Request<Incoming>) -> Response<OutBody> {
+    async fn handle(
+        &self,
+        request: Request<Incoming>,
+        from: std::net::IpAddr,
+    ) -> Response<OutBody> {
         // An answer written as it goes, before the ones the host has whole.
         if self.options.ops_listener == OpsListener::Public {
             if let Some(streamed) = self.follow_logs(request.uri()) {
                 return streamed;
             }
         }
-        let reply = self.reply(request).await;
+        let reply = self.reply(request, from).await;
         to_response(reply)
     }
 
@@ -529,7 +536,7 @@ impl Front {
         Some(crate::ops::follow(&slot, n))
     }
 
-    async fn reply(&self, request: Request<Incoming>) -> Reply {
+    async fn reply(&self, request: Request<Incoming>, from: std::net::IpAddr) -> Reply {
         if self.draining.load(Ordering::Relaxed) {
             return Reply::text(503, "minicloud is shutting down; try again shortly\n")
                 .with_header("retry-after", "1")
@@ -581,6 +588,41 @@ impl Front {
         }
         if let AppState::Refused(why) = &app.state {
             return Reply::text(503, format!("app `{}` was not loaded: {why}\n", app.name));
+        }
+
+        // Past the app's `[rate]`, before anything else is done for the
+        // request: a caller that is over its allowance costs the host a
+        // map lookup and nothing more ([`crate::rate`]).
+        if let Some(policy) = &app.rate {
+            let who = match &policy.key {
+                crate::config::RateKey::Address => from.to_string(),
+                crate::config::RateKey::App => String::new(),
+                crate::config::RateKey::Header(name) => request
+                    .headers()
+                    .get(name.as_str())
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+            };
+            let limit = crate::rate::RateLimit {
+                requests: policy.requests,
+                per: policy.per,
+                burst: policy.burst,
+            };
+            if let crate::rate::Allowance::Refused { retry_after_secs } =
+                self.rates.check(&app.name, &who, limit)
+            {
+                app.counters.rejected(Rejection::RateLimited);
+                return Reply::text(
+                    429,
+                    format!(
+                        "app `{}` takes {} request(s) every {:?} from one caller; try again \
+                         in {retry_after_secs}s\n",
+                        app.name, policy.requests, policy.per
+                    ),
+                )
+                .with_header("retry-after", retry_after_secs.to_string());
+            }
         }
 
         // The app's own files, answered here: no queue, no isolate, no run
