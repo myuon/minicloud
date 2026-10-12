@@ -1053,13 +1053,21 @@ async fn sleep_at_most(left: Duration) {
 /// to an answer, `instructions` and `declined` yields.
 fn with_run_headers(reply: Reply, flight: &Flight, meter: Option<(u64, u64)>) -> Reply {
     let (instructions, declined) = meter.unwrap_or_default();
+    let wall = flight.accepted.elapsed();
+    // Every answered run, however it ended: an app whose errors are slow is
+    // what a distribution over its successes alone would not show.
+    flight
+        .version
+        .counters
+        .latency
+        .observe(wall.as_micros() as u64);
     let values = [
         instructions,
         flight.tally.yields,
         declined,
         flight.tally.parks,
         flight.tally.worker.as_micros() as u64,
-        flight.accepted.elapsed().as_micros() as u64,
+        wall.as_micros() as u64,
     ];
     let mut reply = reply;
     for (name, value) in RUN_HEADERS.iter().zip(values) {

@@ -5,6 +5,8 @@
 //! | --- | --- |
 //! | `GET /_host/stats` | every app's counters, gauges, version and store usage, and the server's |
 //! | `GET /_host/apps/<app>` | one app: the same, its versions, and its recent errors |
+//! | `GET /_host/metrics` | the same counters as OpenMetrics, for Prometheus to scrape |
+//! | `GET /_host/series?app=&over=hour\|day\|month` | what each app did, minute by minute (or hour by hour), as JSON |
 //! | `GET /_host/apps/<app>/logs?n=` | its recent log lines, as text |
 //! | `GET /_host/apps/<app>/logs?follow=1` | the same, and then every line as it is written, as server-sent events |
 //! | `GET /_host/ui` | a page of all of it; every value from an app is escaped |
@@ -59,6 +61,9 @@ pub struct OpsContext<'a> {
     pub started: Instant,
     pub max_in_flight: usize,
     pub data: Option<&'a Path>,
+    /// What each app did, minute by minute; `None` for a host that keeps
+    /// no history.
+    pub series: Option<&'a std::sync::Mutex<crate::series::Series>>,
 }
 
 /// The keys summed into the stats' `totals`.
@@ -79,6 +84,363 @@ const TOTALS: [&str; 15] = [
     "worker_ms",
     "updates",
 ];
+
+/// What `GET /_host/series` answers: the rows of the history.
+///
+/// `over` is a window rather than a row count because the two tables have
+/// different granularities: an hour and a day are minutes, a month is
+/// hours, and asking for "the last 500 rows" would mean something
+/// different in each.
+pub fn series(context: &OpsContext, app: Option<&str>, over: &str) -> Json {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    let (secs, hourly) = match over {
+        "day" => (24 * 3600, false),
+        "month" => (30 * 24 * 3600, true),
+        _ => (3600, false),
+    };
+    let Some(series) = context.series else {
+        return json!({"over": over, "kept": false, "rows": []});
+    };
+    let series = series.lock().unwrap_or_else(|p| p.into_inner());
+    let rows = if hourly {
+        series.hours(app, now - secs)
+    } else {
+        series.minutes(app, now - secs)
+    };
+    match rows {
+        Ok(rows) => json!({
+            "over": over,
+            "kept": true,
+            "rows": rows.iter().map(|row| json!({
+                "app": row.app,
+                "at_unix": row.at_unix,
+                "served": row.served,
+                "ok": row.ok,
+                "errors": row.errors,
+                "rejected": row.rejected,
+                "worker_ms": row.worker_ms,
+                "p50_us": row.p50_us,
+                "p99_us": row.p99_us,
+            })).collect::<Vec<Json>>(),
+        }),
+        Err(why) => json!({"over": over, "kept": true, "error": why, "rows": []}),
+    }
+}
+
+/// What `GET /_host/metrics` answers: the counters in the text exposition
+/// format Prometheus scrapes.
+///
+/// Every series is labelled by app, because the host's own totals are a
+/// sum anyone scraping can do and the per-app numbers are not recoverable
+/// from them. The request times are a cumulative histogram
+/// ([`crate::histogram`]), so a quantile is the scraper's to compute with
+/// `histogram_quantile` over whatever window it wants — the host's own
+/// estimate over all time is in the stats, and is a different question.
+pub fn metrics(context: &OpsContext) -> String {
+    let mut out = String::new();
+    out.push_str("# HELP minicloud_up Whether the host is answering.\n");
+    out.push_str("# TYPE minicloud_up gauge\nminicloud_up 1\n");
+    out.push_str("# HELP minicloud_build_info The version of the host.\n");
+    out.push_str("# TYPE minicloud_build_info gauge\n");
+    out.push_str(&format!(
+        "minicloud_build_info{{version=\"{}\"}} 1\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+    out.push_str("# HELP minicloud_uptime_seconds How long the host has been up.\n");
+    out.push_str("# TYPE minicloud_uptime_seconds gauge\n");
+    out.push_str(&format!(
+        "minicloud_uptime_seconds {:.3}\n",
+        context.started.elapsed().as_secs_f64()
+    ));
+
+    let slots = context.engine.slots();
+    let mut counter = |name: &str, help: &str, kind: &str, values: Vec<(String, String)>| {
+        out.push_str(&format!("# HELP minicloud_{name} {help}\n"));
+        out.push_str(&format!("# TYPE minicloud_{name} {kind}\n"));
+        for (labels, value) in values {
+            out.push_str(&format!("minicloud_{name}{labels} {value}\n"));
+        }
+    };
+    let per_app = |read: &dyn Fn(&Arc<Slot>) -> u64| -> Vec<(String, String)> {
+        slots
+            .iter()
+            .map(|slot| {
+                (
+                    format!("{{app=\"{}\"}}", label(&slot.name)),
+                    read(slot).to_string(),
+                )
+            })
+            .collect()
+    };
+    counter(
+        "requests_total",
+        "Requests an app answered, with any status.",
+        "counter",
+        per_app(&|slot| slot.counters.served.load(Ordering::Relaxed)),
+    );
+    counter(
+        "requests_ok_total",
+        "Requests an app answered 2xx-4xx itself.",
+        "counter",
+        per_app(&|slot| slot.counters.ok.load(Ordering::Relaxed)),
+    );
+    let mut errors = Vec::new();
+    for slot in &slots {
+        for kind in crate::stats::ErrorKind::ALL {
+            errors.push((
+                format!("{{app=\"{}\",kind=\"{}\"}}", label(&slot.name), kind.name()),
+                slot.counters.errors(kind).to_string(),
+            ));
+        }
+    }
+    counter(
+        "errors_total",
+        "Runs a limit or a fault ended, by kind.",
+        "counter",
+        errors,
+    );
+    let mut rejected = Vec::new();
+    for slot in &slots {
+        let json = slot.counters.to_json(0, 0);
+        if let Some(reasons) = json["rejected"].as_object() {
+            for (reason, count) in reasons {
+                rejected.push((
+                    format!("{{app=\"{}\",reason=\"{reason}\"}}", label(&slot.name)),
+                    count.as_u64().unwrap_or_default().to_string(),
+                ));
+            }
+        }
+    }
+    counter(
+        "rejected_total",
+        "Requests turned away before they reached an app's queue, by reason.",
+        "counter",
+        rejected,
+    );
+    counter(
+        "worker_seconds_total",
+        "Time workers spent running an app's code.",
+        "counter",
+        slots
+            .iter()
+            .map(|slot| {
+                (
+                    format!("{{app=\"{}\"}}", label(&slot.name)),
+                    format!(
+                        "{:.6}",
+                        slot.counters.worker_ns.load(Ordering::Relaxed) as f64 / 1e9
+                    ),
+                )
+            })
+            .collect(),
+    );
+    let gauges = [
+        ("in_flight", "Requests admitted and not answered."),
+        ("queued", "Requests waiting to start."),
+    ];
+    for (name, help) in gauges {
+        let values = slots
+            .iter()
+            .map(|slot| {
+                let (in_flight, queued) = context.engine.queue.gauges(slot.index);
+                (
+                    format!("{{app=\"{}\"}}", label(&slot.name)),
+                    if name == "in_flight" {
+                        in_flight
+                    } else {
+                        queued
+                    }
+                    .to_string(),
+                )
+            })
+            .collect();
+        counter(name, help, "gauge", values);
+    }
+    counter(
+        "assets_served_total",
+        "Static files the host answered for an app.",
+        "counter",
+        per_app(&|slot| slot.counters.assets.load(Ordering::Relaxed)),
+    );
+    counter(
+        "trigger_runs_total",
+        "Runs the host started on a schedule.",
+        "counter",
+        per_app(&|slot| slot.counters.trigger_runs.load(Ordering::Relaxed)),
+    );
+
+    // The histogram, which has a shape of its own: one `_bucket` series per
+    // bound with a `le` label, then `_sum` and `_count`.
+    out.push_str("# HELP minicloud_request_duration_seconds Admission to answer.\n");
+    out.push_str("# TYPE minicloud_request_duration_seconds histogram\n");
+    for slot in &slots {
+        let app = label(&slot.name);
+        let snapshot = slot.counters.latency.snapshot();
+        let mut running = 0;
+        for (bound, index) in crate::histogram::BOUNDS_US.iter().zip(0..) {
+            running += snapshot.buckets[index];
+            out.push_str(&format!(
+                "minicloud_request_duration_seconds_bucket{{app=\"{app}\",le=\"{:.6}\"}} {running}\n",
+                *bound as f64 / 1e6
+            ));
+        }
+        out.push_str(&format!(
+            "minicloud_request_duration_seconds_bucket{{app=\"{app}\",le=\"+Inf\"}} {}\n",
+            snapshot.count
+        ));
+        out.push_str(&format!(
+            "minicloud_request_duration_seconds_sum{{app=\"{app}\"}} {:.6}\n",
+            snapshot.sum_us as f64 / 1e6
+        ));
+        out.push_str(&format!(
+            "minicloud_request_duration_seconds_count{{app=\"{app}\"}} {}\n",
+            snapshot.count
+        ));
+    }
+    out.push_str("# EOF\n");
+    out
+}
+
+/// The requests of each of the last minutes, as a line.
+///
+/// Scaled to its own largest minute, because the question it answers is
+/// "what is the shape of this app's hour" and not "how does it compare to
+/// the app below it"; the largest is in the `title`, which is where a
+/// number belongs when the picture is a shape.
+fn sparkline(minutes: &[u64]) -> String {
+    let largest = minutes.iter().copied().max().unwrap_or(0);
+    if minutes.len() < 2 || largest == 0 {
+        return "<span class=muted>–</span>".to_string();
+    }
+    let (width, height) = (120.0_f64, 20.0_f64);
+    let step = width / (minutes.len() - 1) as f64;
+    let points: Vec<String> = minutes
+        .iter()
+        .enumerate()
+        .map(|(at, served)| {
+            let x = at as f64 * step;
+            let y = height - (*served as f64 / largest as f64) * height;
+            format!("{x:.1},{y:.1}")
+        })
+        .collect();
+    format!(
+        "<svg width=\"{width:.0}\" height=\"{height:.0}\" viewBox=\"0 0 {width:.0} {height:.0}\" \
+         role=img aria-label=\"requests a minute over the last hour\">\
+         <title>up to {largest} a minute over {} minute(s)</title>\
+         <polyline fill=none stroke=currentColor stroke-width=1 points=\"{}\"/></svg>",
+        minutes.len(),
+        points.join(" ")
+    )
+}
+
+/// A label value, with what the exposition format cannot carry escaped.
+fn label(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+/// Takes a sample of every app's counters each minute and writes what
+/// changed over that minute to the host's history ([`crate::series`]), then
+/// rolls up and prunes at the top of each hour.
+///
+/// The counters are running totals, so what is kept is the **difference**
+/// since the last sample: a row is what that app did in that minute, which
+/// is the only shape a rate can be read off later. The first tick after a
+/// start records nothing, because there is nothing to take a difference
+/// from — a host that counted its totals as one minute's work would show a
+/// spike at every restart.
+pub(crate) async fn sample(front: Arc<crate::server::Front>) {
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs() as i64);
+        let next = (now / 60 + 1) * 60;
+        tokio::time::sleep(std::time::Duration::from_secs((next - now).max(1) as u64)).await;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs() as i64);
+        sample_now(&front, at);
+    }
+}
+
+/// Takes one sample and keeps it, and at the top of an hour rolls up and
+/// prunes. Answers how many rows were written.
+///
+/// The ticking task calls this a moment after each minute begins; a test
+/// calls it with a time of its own, as it does a schedule's.
+pub(crate) fn sample_now(front: &crate::server::Front, at: i64) -> usize {
+    let Some(series) = &front.series else {
+        return 0;
+    };
+    let mut before = front.sampled.lock().unwrap_or_else(|p| p.into_inner());
+    let mut samples = Vec::new();
+    for slot in front.engine.slots() {
+        let (totals, histogram) = totals_of(&slot);
+        if let Some((was, seen)) = before.get(&slot.name) {
+            let over = histogram.since(seen);
+            samples.push(crate::series::Sample {
+                app: slot.name.clone(),
+                at_unix: at - 60,
+                served: totals.served.saturating_sub(was.served),
+                ok: totals.ok.saturating_sub(was.ok),
+                errors: totals.errors.saturating_sub(was.errors),
+                rejected: totals.rejected.saturating_sub(was.rejected),
+                worker_ms: totals.worker_ms.saturating_sub(was.worker_ms),
+                p50_us: over.quantile_us(0.50).unwrap_or(0),
+                p99_us: over.quantile_us(0.99).unwrap_or(0),
+            });
+        }
+        before.insert(slot.name.clone(), (totals, histogram));
+    }
+    let series = series.lock().unwrap_or_else(|p| p.into_inner());
+    if !samples.is_empty() {
+        if let Err(why) = series.record(&samples) {
+            eprintln!("minicloud: cannot keep the history: {why}");
+            return 0;
+        }
+    }
+    // At the top of the hour: roll the hour that ended into the hour table
+    // and drop what is past its keeping.
+    if at % 3600 < 60 {
+        if let Err(why) = series.sweep(
+            at,
+            crate::series::KEEP_MINUTES_SECS,
+            crate::series::KEEP_HOURS_SECS,
+        ) {
+            eprintln!("minicloud: cannot sweep the history: {why}");
+        }
+    }
+    samples.len()
+}
+
+/// One app's running totals now, and its request times.
+fn totals_of(slot: &Arc<Slot>) -> (crate::series::Sample, crate::histogram::Snapshot) {
+    let counters = &slot.counters;
+    let json = counters.to_json(0, 0);
+    let sum = |group: &str| {
+        json[group]
+            .as_object()
+            .map(|counts| counts.values().filter_map(Json::as_u64).sum())
+            .unwrap_or_default()
+    };
+    (
+        crate::series::Sample {
+            app: slot.name.clone(),
+            at_unix: 0,
+            served: json["served"].as_u64().unwrap_or_default(),
+            ok: json["ok"].as_u64().unwrap_or_default(),
+            errors: sum("errors"),
+            rejected: sum("rejected"),
+            worker_ms: json["worker_ms"].as_f64().unwrap_or_default() as u64,
+            p50_us: 0,
+            p99_us: 0,
+        },
+        counters.latency.snapshot(),
+    )
+}
 
 /// How often a following answer writes a comment to keep the connection
 /// through a proxy from being closed as idle. Server-sent events ignore a
@@ -429,9 +791,20 @@ pub fn page(context: &OpsContext) -> String {
         html.push_str(&format!("<th>{title}</th>"));
     }
     html.push_str(
-        "<th>errors</th><th>cancelled</th><th>rejected</th><th>triggers</th><th>assets</th>\
-         <th>kv</th><th>sql</th><th>fetch</th></tr>",
+        "<th>last hour</th><th>errors</th><th>cancelled</th><th>rejected</th>\
+         <th>triggers</th><th>assets</th><th>kv</th><th>sql</th><th>fetch</th></tr>",
     );
+    // One query for every app's last hour, drawn beside its counters.
+    let recent = series(context, None, "hour");
+    let mut lines: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for row in recent["rows"].as_array().into_iter().flatten() {
+        if let Some(app) = row["app"].as_str() {
+            lines
+                .entry(app.to_string())
+                .or_default()
+                .push(row["served"].as_u64().unwrap_or_default());
+        }
+    }
     let apps = stats["apps"].as_object().cloned().unwrap_or_default();
     for (name, app) in &apps {
         html.push_str(&format!(
@@ -449,6 +822,7 @@ pub fn page(context: &OpsContext) -> String {
             .as_object()
             .map(|e| e.values().filter_map(Json::as_u64).sum())
             .unwrap_or_default();
+        let hour = sparkline(lines.get(name).map(Vec::as_slice).unwrap_or(&[]));
         let triggers = match app["triggers"].as_array() {
             Some(list) if !list.is_empty() => format!(
                 "{}: {} run, {} skipped, {} failed",
@@ -495,7 +869,7 @@ pub fn page(context: &OpsContext) -> String {
             "–".to_string()
         };
         html.push_str(&format!(
-            "<td>{errors}</td><td>{}</td><td>{rejected}</td><td>{triggers}</td>\
+            "<td>{hour}</td><td>{errors}</td><td>{}</td><td>{rejected}</td><td>{triggers}</td>\
              <td>{assets}</td><td>{kv}</td><td>{sql}</td>\
              <td>{} calls, {} refused, {} failed</td></tr>",
             cell(&app["errors"]["cancelled"]),

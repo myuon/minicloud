@@ -452,6 +452,41 @@ itself.
 an update changes a schedule with the code, and a run that is in flight when
 the version changes finishes on the version it started on.
 
+## What happened an hour ago
+
+A counter says what an app has done, never when: a host that has served
+four million requests and one that served them all yesterday read the same.
+Once a minute the host takes every app's counters, takes the **difference**
+from the last sample, and writes that minute as a row (`series.rs`, SQLite
+beside the apps' own stores). A row is what happened *in* that minute,
+which is the only shape a rate can be read off later, and a minute in which
+nothing happened is written as a minute of nothing — which is what tells a
+gap in the traffic from a gap in the host.
+
+The first sample after a start writes nothing. There is nothing to take a
+difference from, and counting the running totals as one minute's work would
+put a spike at every restart.
+
+**Two granularities, because retention and resolution pull apart.** Minutes
+for 48 hours answer "what happened this morning"; at the top of each hour
+the hour that ended is rolled into an hour table kept for 90 days, which
+answers "is this worse than last month" at a thousandth of the rows. The
+counts are summed and the percentiles are kept at their **worst** rather
+than averaged: an hour that held one terrible minute should say so.
+
+**The request times are a histogram** (`histogram.rs`): sixteen bounds from
+100 µs to 10 s, cumulative, as Prometheus means one. A quantile off it is an
+estimate — interpolated inside the bucket it falls in — and that is the
+trade for being able to add two of them together, which is what the minute
+rows and `/_host/metrics` both need. Keeping every duration to answer an
+exact p99 would cost memory without bound, and a p99 that is right to the
+microsecond is not a question anybody asks.
+
+**`/_host/metrics` is the exposition format**, not a format of this host's,
+so a scraper already knows how to read it. Every series is labelled by app,
+because the totals are a sum anyone can do and the per-app numbers are not
+recoverable from them.
+
 ## An answer written as it goes
 
 Every answer used to be a `Full<Bytes>`: the host had all of it before it

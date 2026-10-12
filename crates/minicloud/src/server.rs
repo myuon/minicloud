@@ -138,6 +138,14 @@ pub(crate) struct Front {
     pub(crate) triggers: Arc<crate::triggers::Triggers>,
     /// The `[rate]` buckets of every app ([`crate::rate`]).
     pub(crate) rates: crate::rate::Limiter,
+    /// What each app did, minute by minute ([`crate::series`]); `None` for
+    /// a host with no data directory, which keeps no history.
+    pub(crate) series: Option<Arc<std::sync::Mutex<crate::series::Series>>>,
+    /// Each app's running totals as the last sample saw them, which is what
+    /// the next one takes its difference from ([`crate::ops::sample_now`]).
+    pub(crate) sampled: std::sync::Mutex<
+        std::collections::HashMap<String, (crate::series::Sample, crate::histogram::Snapshot)>,
+    >,
     pub(crate) admin_token: String,
     /// Set by [`Host::shutdown`]: new requests are answered 503.
     draining: AtomicBool,
@@ -250,6 +258,21 @@ impl Host {
         }
         let workers = engine.start_workers()?;
         runtime.spawn(Arc::clone(&engine).monitor());
+        // The history is the host's own state, beside the admin's changes
+        // and the secret store, and is lost with the data directory as they
+        // are. A host that keeps nothing still answers every current value.
+        let series = match &options.data {
+            Some(data) => {
+                match crate::series::Series::open(&data.join("_host").join("series.sqlite3")) {
+                    Ok(series) => Some(Arc::new(std::sync::Mutex::new(series))),
+                    Err(why) => {
+                        eprintln!("minicloud: no history will be kept: {why}");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         let triggers = Arc::new(crate::triggers::Triggers::new(
             Arc::clone(&engine),
             options.forwarding.clone(),
@@ -268,6 +291,8 @@ impl Host {
             control: Arc::clone(&control),
             triggers: Arc::clone(&triggers),
             rates: crate::rate::Limiter::default(),
+            series,
+            sampled: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
         control.attach(&front);
         let (listener, admin) = {
@@ -284,6 +309,9 @@ impl Host {
         // onto the running host brings its own, and a timer that wakes once
         // a minute to find nothing due costs nothing.
         runtime.spawn(crate::triggers::tick(Arc::clone(&triggers)));
+        if front.series.is_some() {
+            runtime.spawn(crate::ops::sample(Arc::clone(&front)));
+        }
         runtime.spawn(Arc::clone(&front).accept(listener));
         if let Some(admin) = admin {
             runtime.spawn(crate::admin::serve(Arc::clone(&front), admin));
@@ -315,6 +343,16 @@ impl Host {
     /// ([`crate::triggers::tick`]); a test calls it with a time of its own.
     pub fn fire_due(&self, unix_seconds: i64) -> usize {
         self.front.triggers.fire_due(unix_seconds)
+    }
+
+    /// Takes one sample of every app's counters into the host's history,
+    /// as the minute's tick does, and answers how many rows it wrote.
+    ///
+    /// The first call after a start writes none: there is nothing to take a
+    /// difference from, and a host that counted its running totals as one
+    /// minute's work would show a spike at every restart.
+    pub fn sample_now(&self, at_unix: i64) -> usize {
+        ops::sample_now(&self.front, at_unix)
     }
 
     /// What `GET /_host/stats` answers.
@@ -797,6 +835,32 @@ impl Front {
         if path == "/_host/stats" {
             return json_reply(&ops::stats(&self.ops()));
         }
+        if path == "/_host/metrics" {
+            return Reply {
+                status: 200,
+                headers: vec![(
+                    "content-type".into(),
+                    // What Prometheus asks for, and what it answers with:
+                    // the text exposition format, version 0.0.4.
+                    "text/plain; version=0.0.4; charset=utf-8".into(),
+                )],
+                body: Bytes::from(ops::metrics(&self.ops())),
+            };
+        }
+        if path == "/_host/series" {
+            let asked: BTreeMap<String, String> = query
+                .map(|query| {
+                    form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            return json_reply(&ops::series(
+                &self.ops(),
+                asked.get("app").map(String::as_str),
+                asked.get("over").map(String::as_str).unwrap_or("hour"),
+            ));
+        }
         if path == "/_host/ui" {
             return Reply {
                 status: 200,
@@ -843,6 +907,7 @@ impl Front {
             started: self.started,
             max_in_flight: self.options.max_in_flight,
             data: self.options.data.as_deref(),
+            series: self.series.as_deref(),
         }
     }
 
