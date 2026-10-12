@@ -116,6 +116,14 @@ so, and what it asserts is counted.
   stats. `cron.rs` holds the parser and the calendar to 32 cases of their
   own — the epoch, leap days, negative seconds, the day-or-weekday rule,
   the aliases, and every way a field can be wrong;
+- `defer` (`defer.rs`): the client is answered at once and the work is done
+  after it, as a run of its own counted in `served`; a client that sends
+  `x-minicloud-deferred` itself is still refused by an app that only
+  answers the host; more outstanding work than `max_in_flight` is the app's
+  `Err` and there is room again once a run ends; a deferred run that fails
+  is counted and named in the log while the app and its neighbour go on; a
+  path that is not a path is refused without a run; an app not granted
+  `defer` is refused at load;
 - metrics (`metrics.rs`, and `histogram.rs`'s and `series.rs`'s unit
   tests): the time every request took is a distribution with its quantiles
   in order, and an app that answered nothing has none; `/_host/metrics` is

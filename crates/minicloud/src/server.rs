@@ -187,6 +187,11 @@ impl Host {
             .build()
             .map_err(|e| format!("cannot start the I/O runtime: {e}"))?;
         let control = Arc::new(Control::open(options.data.as_deref())?);
+        // Where apps put work that outlives a request ([`crate::defer`]).
+        // The channel is made before the apps are loaded because their
+        // modules take the sending end; the host drains it once the engine
+        // that runs the work exists.
+        let (defer_to, deferred) = tokio::sync::mpsc::channel(1024);
         let load = LoadOptions {
             backend: options.backend,
             quiet: options.quiet,
@@ -198,10 +203,11 @@ impl Host {
             // an earlier host accepted is not refused for a key this one
             // removed. A deploy or an update refuses it (`load_next`).
             removed_keys: RemovedKeys::Ignore,
+            defer_to: Some(defer_to),
         };
         let mut apps = load_all(&options.apps, &load)?;
         refuse_taken_hostnames(&mut apps);
-        Host::launch(runtime, apps, options, load, control)
+        Host::launch(runtime, apps, options, load, control, deferred)
     }
 
     /// Starts a host over apps already loaded on `runtime`.
@@ -211,6 +217,7 @@ impl Host {
         options: ServeOptions,
         load: LoadOptions,
         control: Arc<Control>,
+        deferred: tokio::sync::mpsc::Receiver<crate::defer::Deferred>,
     ) -> Result<Host, String> {
         if options.ops_listener == OpsListener::Admin && options.admin.is_none() {
             return Err(
@@ -309,6 +316,7 @@ impl Host {
         // onto the running host brings its own, and a timer that wakes once
         // a minute to find nothing due costs nothing.
         runtime.spawn(crate::triggers::tick(Arc::clone(&triggers)));
+        runtime.spawn(crate::defer::deliver(Arc::clone(&front), deferred));
         if front.series.is_some() {
             runtime.spawn(crate::ops::sample(Arc::clone(&front)));
         }
@@ -722,7 +730,9 @@ impl Front {
         // Whatever a client sends, it did not come from the host's clock:
         // the header is the host's alone ([`crate::triggers`]), so an app
         // may trust it to tell a scheduled run from a request.
-        headers.remove(crate::triggers::TRIGGER_HEADER);
+        for header in crate::internal::INTERNAL_HEADERS {
+            headers.remove(header);
+        }
         // How the client reached the host: see `crate::proxy`.
         self.options
             .forwarding

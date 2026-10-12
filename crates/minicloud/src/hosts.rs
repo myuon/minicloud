@@ -63,6 +63,9 @@ pub struct AppContext {
     pub data: Option<std::path::PathBuf>,
     pub kv: KvLimits,
     pub sql: crate::config::SqlLimits,
+    pub defer: crate::config::DeferLimits,
+    /// Where deferred work is taken; `None` for a host that runs none.
+    pub defer_to: Option<tokio::sync::mpsc::Sender<crate::defer::Deferred>>,
     pub fetch: FetchPolicy,
     pub secrets: Secrets,
     /// `[access]`, for `auth.identity`.
@@ -94,8 +97,8 @@ pub struct HostModules {
 }
 
 impl HostModules {
-    /// `web`, `log`, `timer`, `kv`, `sql`, `fetch`, `time`, `random`,
-    /// `auth` and `admin`.
+    /// `web`, `log`, `timer`, `kv`, `sql`, `defer`, `fetch`, `time`,
+    /// `random`, `auth` and `admin`.
     pub fn standard() -> HostModules {
         HostModules {
             modules: vec![
@@ -104,6 +107,7 @@ impl HostModules {
                 Arc::new(TimerModule),
                 Arc::new(crate::kv::KvModule),
                 Arc::new(crate::sql::SqlModule),
+                Arc::new(crate::defer::DeferModule),
                 Arc::new(crate::fetch::FetchModule),
                 Arc::new(crate::sys::TimeModule),
                 Arc::new(crate::sys::RandomModule),

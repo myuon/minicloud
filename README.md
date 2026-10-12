@@ -204,6 +204,9 @@ max_value_bytes = 1048576
 max_keys = 100000
 max_bytes = 67108864            # keys and values, summed
 
+[defer]                         # work that outlives a request, with `defer` granted
+max_in_flight = 8               # deferred runs of this app that have not finished
+
 [rate]                          # how often one caller may reach the app
 requests = 60                   # over `per`; without it there is no limit at all
 per = "1m"                      # "300ms", "5s", "1m", "2h"
@@ -374,6 +377,37 @@ match sql.query("SELECT title FROM books WHERE pages > ? ORDER BY pages DESC", [
   held and not yielded: it is 20 ms by default for that reason, and a query
   that needs longer wants an index.
 
+### Work that outlives a request
+
+An app answers and is done: its isolate ends with its answer, so anything
+it has not finished by then it has not done. Work that should not make the
+client wait — writing an audit line, warming a cache, telling something else
+that this happened — goes to `defer`:
+
+```cove
+use defer
+
+// answer now; the host runs `/work` with this body in a moment
+defer.run("/work", "{id}")
+```
+
+- **It is a run of its own, not the rest of this one.** Cloudflare's
+  `waitUntil` hands the runtime a promise and keeps the isolate alive until
+  it settles; here the answer *is* the end of the isolate, and keeping one
+  alive past its answer would mean a request's budget outliving the
+  request. So the host starts another run of the same app at that path,
+  with its own deadline and its own budget, which the app routes as it
+  routes anything else.
+- `x-minicloud-deferred` says the host is the caller, and the host strips
+  it from every request that comes off a connection — so a path meant for
+  deferred work can refuse anyone else, the way a trigger's can.
+- The call answers as soon as the work is **accepted**, not when it is
+  done; the request that asked goes on to answer its client.
+- `[defer] max_in_flight` (8) is how many deferred runs of one app may be
+  outstanding; a call past it is the app's `Err`, because a queue of work
+  that grows without end is a leak with a slower name. A deferred run may
+  defer again, and an app that loops spends its own turns on it.
+
 ### Running on a schedule
 
 An app had one way in — a request from outside — so anything periodic was a
@@ -428,6 +462,7 @@ path = "/cron/rollup"
 | `log` | `log` | `info`, `warn`, `error`: a line on stdout (`[app] level: line`) and in the app's log |
 | `timer` | `timer` | `sleep(millis)`: parks the run, at most 60 s |
 | `kv` | `kv` | the app's own SQLite store: `get`, `put`, `delete`, `increment`, `list`, `listDesc`; a `put` past a quota is the app's `Err` |
+| `defer` | `defer` | `run(path, body)`: the host runs this app at `path` after this answer ([Work that outlives a request](#work-that-outlives-a-request)) |
 | `sql` | `sql` | the app's own SQL store, beside its `kv`: `query`, `exec`, one statement a call, parameters bound as text ([The SQL store](#the-sql-store)) |
 | `fetch` | `fetch` | `get(url)`, `request(method, url, headers, body)` to the `[fetch] allow` list only; parks the run; redirects are not followed |
 | `time` | `time` | `nowMillis()`, `nowMicros()` |
@@ -459,7 +494,7 @@ error[minicloud::spawn]: `spawner.handle` can spawn a task, which minicloud does
   rule: A spawned task runs outside the host's worker pool and keeps its parent from parking or yielding; minicloud refuses an app that can spawn.
 greedy     requires [log]  granted [-]  REFUSED: `greedy.handle` requires `log`, which app.toml does not grant
 spawner    requires [-]  granted [-]  REFUSED: `spawner.handle` can spawn a task, which minicloud does not run
-checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, fetch, time, random, auth, host); 0 warning(s), 2 refused
+checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, fetch, time, random, auth, host); 0 warning(s), 2 refused
 ```
 
 `test` runs every `test fn` the way `cove test` does, with the app's grant,
@@ -767,6 +802,8 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `errors` by kind, `rejected` by reason, `in_flight`, `queued`, `parked`,
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms`, `heap_peak_words`,
+`deferred_runs`, `deferred_in_flight`, `deferred_failed` and
+`deferred_refused`,
 `latency_us` (how long its answered requests took: the count, the mean and
 p50, p90 and p99, estimated from a histogram),
 `fetch`, `kv` and `sql` usage against their quotas, `assets` (how many files and how many

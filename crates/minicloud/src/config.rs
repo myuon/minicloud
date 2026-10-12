@@ -18,6 +18,9 @@
 //! max_bytes = 8388608             # the files of `assets/` together
 //! cache_control = "no-cache"      # what every one of them is answered with
 //!
+//! [defer]                         # work that outlives a request, with `defer` granted
+//! max_in_flight = 8               # deferred runs of this app that have not finished
+//!
 //! [rate]                          # how often one caller may reach the app
 //! requests = 60                   # over `per`; without it there is no limit
 //! per = "1m"
@@ -118,6 +121,8 @@ pub struct AppFile {
     pub sql: SqlFile,
     #[serde(default)]
     pub rate: RateFile,
+    #[serde(default)]
+    pub defer: DeferFile,
     /// Named secrets the app may check a presented credential against
     /// (`auth.check`), or the host sends as a header (`[fetch.headers]`);
     /// never read.
@@ -419,6 +424,13 @@ pub struct KvFile {
     pub max_value_bytes: Option<usize>,
     pub max_keys: Option<u64>,
     pub max_bytes: Option<u64>,
+}
+
+/// `[defer]` as written.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeferFile {
+    pub max_in_flight: Option<u64>,
 }
 
 /// `[rate]` as written.
@@ -1023,6 +1035,23 @@ impl Default for SqlLimits {
     }
 }
 
+/// `[defer]`: how much work an app may have outstanding
+/// ([`crate::defer`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferLimits {
+    /// Deferred runs of this app that have not finished. A call past it is
+    /// the app's `Err`: a queue of work that grows without end is a leak
+    /// with a slower name. Eight by default, which is more than a request
+    /// that defers one thing ever needs and few enough to notice.
+    pub max_in_flight: u64,
+}
+
+impl Default for DeferLimits {
+    fn default() -> DeferLimits {
+        DeferLimits { max_in_flight: 8 }
+    }
+}
+
 /// What a `[rate]` counts: who the tokens are spent by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RateKey {
@@ -1056,6 +1085,7 @@ pub struct AppConfig {
     pub kv: KvLimits,
     pub assets: AssetPolicy,
     pub sql: SqlLimits,
+    pub defer: DeferLimits,
     /// `[rate]`: how often one caller may reach this app; `None` for no
     /// limit of its own, which is the default.
     pub rate: Option<RatePolicy>,
@@ -1364,6 +1394,14 @@ pub fn parse_app_with(
             })
         }
     };
+    let defer = DeferLimits {
+        max_in_flight: positive(
+            "defer",
+            "max_in_flight",
+            file.defer.max_in_flight,
+            DeferLimits::default().max_in_flight,
+        )?,
+    };
     let sql_defaults = SqlLimits::default();
     let sql = SqlLimits {
         max_bytes: positive(
@@ -1464,6 +1502,7 @@ pub fn parse_app_with(
         kv,
         assets,
         sql,
+        defer,
         rate,
         triggers,
         fetch,

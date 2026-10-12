@@ -1,0 +1,3 @@
+# The app the `defer` tests are run on (issue #56): it answers at once and
+# leaves the host to run the rest.
+grant = ["defer", "kv", "log"]
