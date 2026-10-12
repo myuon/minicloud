@@ -182,6 +182,10 @@ pub struct AppCounters {
     pub queue_delivered: AtomicU64,
     pub queue_retried: AtomicU64,
     pub queue_buried: AtomicU64,
+    /// Alarms that came due and were run, and those that ended 5xx or not
+    /// at all ([`crate::keyed`]).
+    pub alarms_run: AtomicU64,
+    pub alarms_failed: AtomicU64,
     /// Updates installed, and updates refused (the current version kept).
     pub updates: AtomicU64,
     pub updates_refused: AtomicU64,
@@ -291,6 +295,8 @@ impl AppCounters {
             },
             "assets_served": read(&self.assets),
             "assets_not_modified": read(&self.assets_not_modified),
+            "alarms_run": read(&self.alarms_run),
+            "alarms_failed": read(&self.alarms_failed),
             "queue_sent": read(&self.queue_sent),
             "queue_refused": read(&self.queue_refused),
             "queue_in_flight": read(&self.queue_in_flight),

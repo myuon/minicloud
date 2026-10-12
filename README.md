@@ -205,6 +205,11 @@ max_value_bytes = 1048576
 max_keys = 100000
 max_bytes = 67108864            # keys and values, summed
 
+[keyed]                         # one run at a time for one key
+by = "query:room"               # or "header:x-room"; without it there is no key
+max_waiting = 64                # requests waiting for one key; past it, 429
+alarm_path = "/alarm"           # where a due alarm runs, with `keyed` granted
+
 [[queues]]                      # a durable queue, with `queue` granted
 name = "mail"                   # what `queue.send` names
 path = "/queue/mail"            # where a message is delivered
@@ -388,6 +393,44 @@ match sql.query("SELECT title FROM books WHERE pages > ? ORDER BY pages DESC", [
   held and not yielded: it is 20 ms by default for that reason, and a query
   that needs longer wants an index.
 
+### One run at a time for one key
+
+An app can hold state and cannot hold it *safely* when two requests about
+the same thing run at once: `kv.increment` is atomic and nothing else is,
+and read-decide-write is three calls that two runs can interleave. `[keyed]`
+is the guarantee that makes it safe:
+
+```toml
+[keyed]
+by = "query:room"       # or "header:x-room"
+max_waiting = 64
+alarm_path = "/alarm"
+```
+
+- **At most one run per key.** The host takes the key's turn before the
+  request is admitted and holds it until the answer, so everything about one
+  key happens in order and an app may read, decide and write with nobody in
+  the middle. The turn is fair: a key's requests are served in the order
+  they arrived.
+- The key comes from the request — a query parameter or a header the config
+  names — because the waiting has to happen **before** the run starts. A
+  request with no key is not keyed and runs as any request does.
+- **Another key is not waiting**: only requests about the same key queue
+  behind each other. `max_waiting` bounds that queue; past it the answer is
+  429 with `Retry-After`, so one hot key cannot fill the host by itself.
+- **An alarm per key**, with `keyed` granted: `keyed.alarm(key, atMillis)`
+  asks the host to run `alarm_path` with that key at that time,
+  `clearAlarm` takes it back and `alarmAt` says when (`-1` for none). One
+  alarm a key — setting it again moves it — kept in the app's own SQLite
+  file, so it survives a restart. A due alarm **takes the key's turn like a
+  request**, so an alarm and a request about one key never run together.
+
+This is the single-writer half of Cloudflare's Durable Objects and not the
+object: a run's heap ends with the run here, so the state lives in the app's
+own `kv` or `sql` and what the host adds is the guarantee that makes it
+safe. An app that calls itself with the same key from inside a keyed run
+waits for itself, and its deadline is what ends it.
+
 ### An answer written as it goes
 
 A run answered once, at its end, with the whole body in a `web.Response`.
@@ -550,6 +593,7 @@ path = "/cron/rollup"
 | `log` | `log` | `info`, `warn`, `error`: a line on stdout (`[app] level: line`) and in the app's log |
 | `timer` | `timer` | `sleep(millis)`: parks the run, at most 60 s |
 | `kv` | `kv` | the app's own SQLite store: `get`, `put`, `delete`, `increment`, `list`, `listDesc`; a `put` past a quota is the app's `Err` |
+| `keyed` | `keyed` | `alarm(key, atMillis)`, `clearAlarm(key)`, `alarmAt(key)`: wake this app at a key ([One run at a time for one key](#one-run-at-a-time-for-one-key)) |
 | `stream` | `stream` | `open(status, headers)`, `send(chunk)`: an answer written as the run goes ([An answer written as it goes](#an-answer-written-as-it-goes)) |
 | `queue` | `queue` | `send(name, body)`, `depth(name)`: a durable queue the host delivers from ([Queues](#queues)) |
 | `defer` | `defer` | `run(path, body)`: the host runs this app at `path` after this answer ([Work that outlives a request](#work-that-outlives-a-request)) |
@@ -584,7 +628,7 @@ error[minicloud::spawn]: `spawner.handle` can spawn a task, which minicloud does
   rule: A spawned task runs outside the host's worker pool and keeps its parent from parking or yielding; minicloud refuses an app that can spawn.
 greedy     requires [log]  granted [-]  REFUSED: `greedy.handle` requires `log`, which app.toml does not grant
 spawner    requires [-]  granted [-]  REFUSED: `spawner.handle` can spawn a task, which minicloud does not run
-checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, stream, fetch, time, random, auth, host); 0 warning(s), 2 refused
+checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, stream, keyed, fetch, time, random, auth, host); 0 warning(s), 2 refused
 ```
 
 `test` runs every `test fn` the way `cove test` does, with the app's grant,
@@ -892,6 +936,7 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `errors` by kind, `rejected` by reason, `in_flight`, `queued`, `parked`,
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms`, `heap_peak_words`,
+`alarms_run` and `alarms_failed`,
 `queues` (each queue's name, path, waiting and dead) with `queue_sent`,
 `queue_refused`, `queue_in_flight`, `queue_delivered`, `queue_retried` and
 `queue_buried`,
