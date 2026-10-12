@@ -25,11 +25,16 @@ pub struct AppRequest {
 /// from a run: an app's static file ([`crate::assets`]) is answered by the
 /// host as it is on disk, and a favicon is not UTF-8. What a *run* answers
 /// is still a Cove `String` — [`response_of`] is where that becomes bytes.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Reply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
+    /// The rest of the body, for an answer a run writes as it goes
+    /// ([`crate::stream`]): each `Bytes` sent is a chunk, and the end of
+    /// the channel is the end of the answer. `None` for an answer that is
+    /// whole, which every answer but a streamed one is.
+    pub stream: Option<tokio::sync::mpsc::Receiver<Bytes>>,
 }
 
 impl Reply {
@@ -42,6 +47,17 @@ impl Reply {
                 "text/plain; charset=utf-8".to_string(),
             )],
             body: Bytes::from(body.into()),
+            stream: None,
+        }
+    }
+
+    /// A reply with a body of these bytes and nothing else said about it.
+    pub fn bytes(status: u16, headers: Vec<(String, String)>, body: Bytes) -> Reply {
+        Reply {
+            status,
+            headers,
+            body,
+            stream: None,
         }
     }
 
@@ -145,7 +161,11 @@ impl Reply {
             .headers
             .iter()
             .any(|(name, _)| name == "content-encoding");
+        // A streamed answer is not compressed: a buffered encoder would
+        // hold the lines it is meant to deliver, which for server-sent
+        // events is the whole point of them.
         if !takes_gzip
+            || self.stream.is_some()
             || already
             || self.body.len() < COMPRESS_FROM
             || !worth_compressing(&content_type)
@@ -174,7 +194,7 @@ impl Reply {
 }
 
 /// Headers an app may not set: the HTTP layer owns the framing.
-const FRAMING: [&str; 5] = [
+pub(crate) const FRAMING: [&str; 5] = [
     "content-length",
     "transfer-encoding",
     "connection",
@@ -240,5 +260,6 @@ pub fn response_of(value: &Value, max_bytes: usize) -> Result<Reply, BadResponse
         status,
         headers,
         body: Bytes::from(body.to_string()),
+        stream: None,
     })
 }

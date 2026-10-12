@@ -1,0 +1,85 @@
+use web
+use stream
+use timer
+use log
+
+/// Writes its answer as it goes.
+///
+/// `/events?n=` opens a `text/event-stream` and sends that many lines,
+/// waiting `?ms=` between them; the response it returns afterwards is not
+/// the answer, which has been going out since the first line. `/late`
+/// sends a chunk without opening, `/twice` opens twice, and `/huge` sends
+/// a chunk past the app's `max_response_bytes`: each is the app's `Err`.
+export fn handle(request: web.Request) -> web.Response {
+  if request.path == "/late" {
+    return match stream.send("nobody asked") {
+      Ok(_) => web.Response(status: 200, headers: Map.of(), body: "sent\n")
+      Err(error) => web.Response(status: 400, headers: Map.of(), body: "{error.message}\n")
+    }
+  }
+  if request.path == "/events" {
+    let n = Int.parse(request.query.get("n").unwrapOr("3")).unwrapOr(3)
+    let ms = Int.parse(request.query.get("ms").unwrapOr("0")).unwrapOr(0)
+    match stream.open(200, Map.of(MapEntry(key: "content-type", value: "text/event-stream"))) {
+      Ok(_) => {}
+      Err(error) => return web.Response(status: 500, headers: Map.of(), body: "{error.message}\n")
+    }
+    if request.path == "/twice" {
+      return web.Response(status: 200, headers: Map.of(), body: "")
+    }
+    var i = 0
+    while i < n {
+      if ms > 0 {
+        timer.sleep(ms)
+      }
+      match stream.send("data: line {i}\n\n") {
+        Ok(_) => {}
+        Err(error) => {
+          log.warn("stopped at {i}: {error.message}")
+          return web.Response(status: 200, headers: Map.of(), body: "")
+        }
+      }
+      i += 1
+    }
+    log.info("sent {n} line(s)")
+    return web.Response(status: 599, headers: Map.of(), body: "this is not the answer\n")
+  }
+  if request.path == "/twice" {
+    match stream.open(200, Map.of()) {
+      Ok(_) => {}
+      Err(error) => return web.Response(status: 500, headers: Map.of(), body: "{error.message}\n")
+    }
+    return match stream.open(200, Map.of()) {
+      Ok(_) => web.Response(status: 200, headers: Map.of(), body: "")
+      Err(error) => {
+        match stream.send("second open: {error.message}\n") {
+          Ok(_) => {}
+          Err(_) => {}
+        }
+        web.Response(status: 200, headers: Map.of(), body: "")
+      }
+    }
+  }
+  if request.path == "/huge" {
+    match stream.open(200, Map.of()) {
+      Ok(_) => {}
+      Err(error) => return web.Response(status: 500, headers: Map.of(), body: "{error.message}\n")
+    }
+    var big = "x"
+    var i = 0
+    while i < 23 {
+      big = "{big}{big}"
+      i += 1
+    }
+    let said = match stream.send(big) {
+      Ok(_) => "sent the big one\n"
+      Err(error) => "refused: {error.message}\n"
+    }
+    match stream.send(said) {
+      Ok(_) => {}
+      Err(_) => {}
+    }
+    return web.Response(status: 200, headers: Map.of(), body: "")
+  }
+  web.Response(status: 404, headers: Map.of(), body: "no such path\n")
+}

@@ -116,6 +116,15 @@ so, and what it asserts is counted.
   stats. `cron.rs` holds the parser and the calendar to 32 cases of their
   own — the epoch, leap days, negative seconds, the day-or-weekday rule,
   the aliases, and every way a field can be wrong;
+- an answer a run writes as it goes (`stream.rs`): the head is readable
+  before the run ends and each chunk as it is sent, the response the
+  handler returns afterwards is nowhere on the connection, and there are no
+  run headers; a stream that waits between its chunks holds no worker —
+  another app answers throughout on a single-worker host; a chunk without
+  an open, a second open and a chunk past `max_response_bytes` are each the
+  app's `Err` while the rest of the run goes on; a client that goes away is
+  told to the run, which ends; an app not granted `stream` is refused at
+  load;
 - queues (`queue.rs`, and `queue.rs`'s 11 unit tests): a message outlives
   the request that sent it, is delivered as a run, is on disk and is off
   the queue once taken; a client cannot deliver one itself; a delivery that

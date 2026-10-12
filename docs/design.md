@@ -586,6 +586,42 @@ encoder would hold the lines it is meant to deliver.
 pattern second, so a name that is both is its own. A wildcard that crossed
 a dot would claim `a.b.example` from whoever holds `*.b.example`.
 
+## A run that writes its own answer
+
+`stream.open` and `stream.send` let a run answer while it is still going,
+and two things had to be true for them.
+
+**A host call has to know which run made it.** A module instance is the
+app's, shared by every run of it, and `HostApi::call` carries no run: for
+`defer` that was fine (the work is the app's, not the run's), and for a
+chunk it is not — the chunk belongs to one connection. A worker runs
+**one** run at a time, so the scheduler puts the run's answer in a
+thread-local around every slice of it (`sched::Engine::sliced`) and a host
+call reads it there. Outside a run there is none, and the call is the app's
+`Err` rather than a panic.
+
+**The answer has to be able to go out early.** The one-shot the HTTP side
+waits on is behind an `Answering` now, which answers once: whoever is first
+— the run returning, or `stream.open` — is the answer, and the other is a
+no-op rather than a second one. `open` sends a `Reply` whose body is the
+receiving end of a channel, which the HTTP front turns into the same
+written-as-it-goes body a followed log uses; `send` puts a chunk on it, and
+the run ending drops the sender, which ends the body.
+
+**`send` parks.** It answers pending with a future that awaits room on the
+channel, so a run that is faster than its reader gives up its worker rather
+than holding one, and backpressure is the channel's. A client that went
+away is a closed channel, which is an `Err` the run is told about — the one
+way a run finds out, since nothing else about a run knows there is a
+connection.
+
+What this costs is that a streamed answer has no run headers (the head goes
+out before the run has cost anything) and cannot be gzipped (a buffered
+encoder would hold the lines it is meant to deliver). What it does not cost
+is any change to the budgets: the deadline, the host calls and the heap
+bound a streaming run exactly as they bound any other, and `max_response_bytes`
+becomes the bound on one chunk, which is the only thing it can still mean.
+
 ## An answer written as it goes
 
 Every answer used to be a `Full<Bytes>`: the host had all of it before it

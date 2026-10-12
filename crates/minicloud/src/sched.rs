@@ -83,7 +83,9 @@ pub struct Flight {
     /// the version — its prepared program, its registry — alive until then.
     pub version: Arc<App>,
     pub accepted: Instant,
-    pub reply: oneshot::Sender<Reply>,
+    /// Where the answer goes, and what a run that writes its answer as it
+    /// goes writes it on ([`crate::stream`]).
+    pub reply: Arc<crate::stream::Answering>,
     pub cancel: Cancel,
     /// What the run has cost so far, for its answer's [`RUN_HEADERS`].
     pub tally: Tally,
@@ -702,7 +704,8 @@ impl Engine {
                 let budget =
                     Budget::with_cancellation(app.limits.run.clone(), flight.cancel.clone());
                 let signal = vm.yield_request();
-                let step = self.sliced(worker, &app, &mut flight.tally, signal, || {
+                let answering = Arc::clone(&flight.reply);
+                let step = self.sliced(worker, &app, &mut flight.tally, signal, &answering, || {
                     let argument = request_value(&request);
                     vm.invoke_within_parkable(
                         budget,
@@ -723,9 +726,15 @@ impl Engine {
                     Some(answer) => {
                         let signal = parked.yield_request();
                         let version = Arc::clone(&flight.version);
-                        self.sliced(worker, &version, &mut flight.tally, signal, || {
-                            parked.resume(answer)
-                        })
+                        let answering = Arc::clone(&flight.reply);
+                        self.sliced(
+                            worker,
+                            &version,
+                            &mut flight.tally,
+                            signal,
+                            &answering,
+                            || parked.resume(answer),
+                        )
                     }
                     None => {
                         let (vm, error) = parked.cancel();
@@ -741,9 +750,15 @@ impl Engine {
                 } = *cont;
                 let signal = yielded.yield_request();
                 let version = Arc::clone(&flight.version);
-                let step = self.sliced(worker, &version, &mut flight.tally, signal, || {
-                    yielded.resume()
-                });
+                let answering = Arc::clone(&flight.reply);
+                let step = self.sliced(
+                    worker,
+                    &version,
+                    &mut flight.tally,
+                    signal,
+                    &answering,
+                    || yielded.resume(),
+                );
                 self.settle(step, flight);
             }
         }
@@ -757,6 +772,7 @@ impl Engine {
         app: &Arc<App>,
         tally: &mut Tally,
         signal: YieldRequest,
+        answering: &Arc<crate::stream::Answering>,
         step: impl FnOnce() -> Step,
     ) -> Step {
         let since = Instant::now();
@@ -769,7 +785,9 @@ impl Engine {
                 overdue: false,
             });
         }
-        let step = step();
+        // The run's answer, where the host calls it makes can find it: a
+        // worker runs one run at a time, so a thread-local is the run.
+        let step = crate::stream::as_current(answering, step);
         if self.slice.is_some() {
             *self.running[worker].lock().unwrap() = None;
         }
@@ -801,7 +819,10 @@ impl Engine {
         let reply = with_run_headers(reply, &flight, meter)
             .with_header(STOP_HEADER, kind.name())
             .with_header(VERSION_HEADER, app.version.as_str());
-        let _ = flight.reply.send(reply);
+        // A run that opened its answer has already sent it: this reply
+        // is not sent, and what ends the body is the run ending.
+        flight.reply.answer(reply);
+        flight.reply.finish();
         self.queue.finished(flight.app);
     }
 
@@ -852,7 +873,10 @@ impl Engine {
                         counters.ok.fetch_add(1, Ordering::Relaxed);
                         let reply = with_run_headers(reply, &flight, Some(meter))
                             .with_header(VERSION_HEADER, app.version.as_str());
-                        let _ = flight.reply.send(reply);
+                        // A run that opened its answer has already sent it: this reply
+                        // is not sent, and what ends the body is the run ending.
+                        flight.reply.answer(reply);
+                        flight.reply.finish();
                         self.queue.finished(flight.app);
                     }
                     Err((kind, body)) => {

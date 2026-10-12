@@ -1,0 +1,6 @@
+# The app the streaming tests are run on (issue #51): it writes its answer
+# as it goes rather than returning one.
+grant = ["stream", "timer", "log"]
+
+[limits]
+deadline = "20s"

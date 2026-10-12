@@ -101,7 +101,7 @@ pub fn admit(engine: &Engine, asked: Asked<'_>) -> Result<oneshot::Receiver<Repl
             app: slot,
             version: Arc::clone(app),
             accepted: Instant::now(),
-            reply,
+            reply: crate::stream::Answering::new(reply),
             cancel: Cancel::new(),
             tally: Default::default(),
         },

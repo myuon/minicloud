@@ -66,6 +66,9 @@ pub struct AppContext {
     pub defer: crate::config::DeferLimits,
     /// `[[queues]]`: the queues the app may send to.
     pub queues: Vec<crate::config::QueuePolicy>,
+    /// The largest one chunk of a streamed answer may be, which is the
+    /// largest a whole one may be ([`crate::stream`]).
+    pub max_response_bytes: usize,
     /// Where deferred work is taken; `None` for a host that runs none.
     pub defer_to: Option<tokio::sync::mpsc::Sender<crate::defer::Deferred>>,
     pub fetch: FetchPolicy,
@@ -99,8 +102,8 @@ pub struct HostModules {
 }
 
 impl HostModules {
-    /// `web`, `log`, `timer`, `kv`, `sql`, `defer`, `queue`, `fetch`,
-    /// `time`, `random`, `auth` and `admin`.
+    /// `web`, `log`, `timer`, `kv`, `sql`, `defer`, `queue`, `stream`,
+    /// `fetch`, `time`, `random`, `auth` and `admin`.
     pub fn standard() -> HostModules {
         HostModules {
             modules: vec![
@@ -111,6 +114,7 @@ impl HostModules {
                 Arc::new(crate::sql::SqlModule),
                 Arc::new(crate::defer::DeferModule),
                 Arc::new(crate::queue_host::QueueModule),
+                Arc::new(crate::stream::StreamModule),
                 Arc::new(crate::fetch::FetchModule),
                 Arc::new(crate::sys::TimeModule),
                 Arc::new(crate::sys::RandomModule),
