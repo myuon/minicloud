@@ -416,6 +416,40 @@ public origin's scheme, and its port if it has one) — the name the route
 matched, never one the client chose — so an app's same-origin check compares
 against the origin its own pages were served from.
 
+## Queues: work that is written down first
+
+`defer` hands the host work and forgets it: if the host stops before the
+run, the work is gone. That is the right trade for warming a cache and the
+wrong one for anything that must happen. A queue is the other trade.
+
+**The message is on disk when `send` answers.** The store is the app's own
+SQLite file (`queue.rs`), beside its `kv` and its `sql`, and sending is one
+insert — no delivery, no waiting, nothing that can fail after the app has
+been told the message is taken.
+
+**Delivery is a run of the app** ([a run the host asks for](#a-run-the-host-asks-for)),
+which is what makes a consumer an ordinary path with ordinary limits rather
+than a second kind of program. The host leases a message before it delivers
+— `attempts` goes up and the message is hidden for `lease` — so a delivery
+that never answers is tried again rather than lost, and a host that is
+killed mid-delivery picks the message up when it starts.
+
+**That means a delivery may happen twice**, and nothing here can prevent
+it: the alternative is losing a message whenever the host stops in the
+wrong moment. A consumer must be able to be asked twice. Saying so is
+better than a guarantee that would be a lie.
+
+**A failure is retried with a doubling delay** until `max_attempts`, then
+the message is buried as a dead letter with the reason. Burying rather than
+dropping is the point of the feature: a queue that silently loses what
+nobody could take is a queue that cannot be debugged. `minicloud queues`
+reads them and puts one back.
+
+`batch` bounds how many of a queue are in flight at once, counted on the
+app's counters, so a slow consumer cannot be given the whole queue at once;
+the host looks for due messages once a second, which is one indexed
+`SELECT` per app that has a queue.
+
 ## A run the host asks for
 
 A schedule and deferred work want the same thing, so they are the same

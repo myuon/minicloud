@@ -1,0 +1,54 @@
+use web
+use queue
+use kv
+use log
+
+/// Sends to a queue, and takes what the host delivers.
+///
+/// `/send?body=` puts one message on `mail`; `/depth` answers how many are
+/// waiting; `/taken` answers what has been delivered, newest last.
+/// `/queue/mail` is where the host delivers, and it refuses anyone but the
+/// host. `?fail=1` on a message's body makes that delivery fail, which is
+/// how the tests see a retry and a dead letter.
+export fn handle(request: web.Request) -> web.Response {
+  if request.path == "/send" {
+    return match queue.send("mail", request.query.get("body").unwrapOr("")) {
+      Ok(id) => answer(202, "{id}")
+      Err(error) => answer(429, error.message)
+    }
+  }
+  if request.path == "/send-nowhere" {
+    return match queue.send("nowhere", "x") {
+      Ok(id) => answer(202, "{id}")
+      Err(error) => answer(400, error.message)
+    }
+  }
+  if request.path == "/depth" {
+    return match queue.depth("mail") {
+      Ok(waiting) => answer(200, "{waiting}")
+      Err(error) => answer(500, error.message)
+    }
+  }
+  if request.path == "/taken" {
+    return answer(200, kv.get("taken").unwrapOr(""))
+  }
+  if request.path == "/queue/mail" {
+    if request.headers.get("x-minicloud-queue").isNone() {
+      return answer(403, "not the host")
+    }
+    if request.body == "fail" {
+      log.warn("refusing {request.body}")
+      return answer(500, "this consumer refuses")
+    }
+    let before = kv.get("taken").unwrapOr("")
+    return match kv.put("taken", "{before}{request.body};") {
+      Ok(_) => answer(200, "took it")
+      Err(error) => answer(507, error.message)
+    }
+  }
+  answer(404, "no such path")
+}
+
+fn answer(status: Int, body: String) -> web.Response {
+  web.Response(status: status, headers: Map.of(), body: "{body}\n")
+}

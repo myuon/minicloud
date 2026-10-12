@@ -148,6 +148,15 @@ enum Command {
         #[command(flatten)]
         admin: AdminArgs,
     },
+    /// What an app's queues hold, and its dead letters.
+    Queues {
+        app: String,
+        /// Put a dead letter back on its queue.
+        #[arg(long, value_name = "ID")]
+        revive: Option<i64>,
+        #[command(flatten)]
+        admin: AdminArgs,
+    },
     /// An app's recent log lines, and with `--follow` every line as it is
     /// written, until Ctrl-C.
     Logs {
@@ -462,6 +471,18 @@ fn main() -> ExitCode {
         Command::Reset { app, admin: args } => {
             admin(&args, reqwest::Method::POST, &format!("/apps/{app}/reset"))
         }
+        Command::Queues {
+            app,
+            revive,
+            admin: args,
+        } => match revive {
+            Some(id) => admin(
+                &args,
+                reqwest::Method::POST,
+                &format!("/apps/{app}/queues/revive/{id}"),
+            ),
+            None => admin(&args, reqwest::Method::GET, &format!("/apps/{app}/queues")),
+        },
         Command::Logs {
             app,
             n,

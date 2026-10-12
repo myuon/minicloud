@@ -173,6 +173,15 @@ pub struct AppCounters {
     pub deferred_in_flight: AtomicU64,
     pub deferred_failed: AtomicU64,
     pub deferred_refused: AtomicU64,
+    /// The app's queues ([`crate::queue`]): messages it sent and had
+    /// refused, deliveries in flight, taken, tried again and buried as
+    /// dead letters.
+    pub queue_sent: AtomicU64,
+    pub queue_refused: AtomicU64,
+    pub queue_in_flight: AtomicU64,
+    pub queue_delivered: AtomicU64,
+    pub queue_retried: AtomicU64,
+    pub queue_buried: AtomicU64,
     /// Updates installed, and updates refused (the current version kept).
     pub updates: AtomicU64,
     pub updates_refused: AtomicU64,
@@ -282,6 +291,12 @@ impl AppCounters {
             },
             "assets_served": read(&self.assets),
             "assets_not_modified": read(&self.assets_not_modified),
+            "queue_sent": read(&self.queue_sent),
+            "queue_refused": read(&self.queue_refused),
+            "queue_in_flight": read(&self.queue_in_flight),
+            "queue_delivered": read(&self.queue_delivered),
+            "queue_retried": read(&self.queue_retried),
+            "queue_buried": read(&self.queue_buried),
             "deferred_runs": read(&self.deferred_runs),
             "deferred_in_flight": read(&self.deferred_in_flight),
             "deferred_failed": read(&self.deferred_failed),
