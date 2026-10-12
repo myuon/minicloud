@@ -822,7 +822,17 @@ admin app (`--with-bundled-apps ""` for none), and only then points
 command that installs the unit and starts `cove-tools.service`.
 
 **A release is the platform; the apps are deployed separately.** Installing
-one never removes or replaces an app other than `admin`. The apps are
+one never removes or replaces an app other than `admin`. When a release
+carries a **newer copy** of an app that is installed, it says so and leaves
+the installed one serving, with the command that would deploy the
+release's:
+
+```console
+this release carries a newer copy of: admin
+the installed one is still what serves; deploy the release's with:
+
+  bash install.sh --with-bundled-apps "admin" v0.17.0
+``` The apps are
 whatever was deployed into `~/cove-tools/apps` ([Deploying an
 app](#deploying-an-app)), and their state is in `~/cove-tools/data`, which no
 release or deploy touches.

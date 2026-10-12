@@ -226,6 +226,39 @@ echo
 installed="$(for dir in "$ROOT"/apps/*/; do if [ -f "$dir/app.toml" ]; then basename "$dir"; fi; done | tr '\n' ' ')"
 installed="${installed% }"
 echo "installed minicloud $version in $ROOT (apps: ${installed:-none})"
+
+# A release that carries a newer copy of an app that is installed says so,
+# and does not deploy it: `--with-bundled-apps` is how an operator asks for
+# that, and an install that quietly replaced an app would be an install
+# that could not be rolled back app by app (issue #37).
+behind=""
+for dir in "$release"/apps/*/; do
+  [ -f "$dir/app.toml" ] || continue
+  app="$(basename "$dir")"
+  [ -f "$ROOT/apps/$app/app.toml" ] || continue
+  # The app's files, as `minicloud deploy` chooses them: app.toml, the
+  # .cove files, and everything under assets/.
+  files() {
+    (
+      cd "$1" || exit 0
+      find . \( -name '*.cove' -o -name app.toml -o -path './assets/*' \) -type f \
+        ! -name '.*' | LC_ALL=C sort | while IFS= read -r file; do
+        printf '%s ' "$file"
+        cksum < "$file"
+      done
+    )
+  }
+  if [ "$(files "$dir")" != "$(files "$ROOT/apps/$app")" ]; then
+    behind="$behind $app"
+  fi
+done
+if [ -n "$behind" ]; then
+  echo
+  echo "this release carries a newer copy of:${behind}"
+  echo "the installed one is still what serves; deploy the release's with:"
+  echo
+  echo "  bash install.sh --with-bundled-apps \"${behind# }\" $version"
+fi
 if [ -z "$installed" ]; then
   echo "no apps are installed: run again without --with-bundled-apps \"\" for the admin app,"
   echo "or deploy one with: $ROOT/current/$product deploy <app-dir> --admin 127.0.0.1:8791 --token-file $ROOT/data/admin.token"

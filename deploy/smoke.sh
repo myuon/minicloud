@@ -84,6 +84,27 @@ for app in $deployed_examples; do
   [ ! -e "$root/apps/.previous/$app" ] || fail "a reinstall redeployed $app, which is not the release's"
 done
 [ ! -e "$root/apps/.previous/admin" ] || fail "a reinstall with --with-bundled-apps \"\" redeployed admin"
+
+# A release that carries a newer copy of an installed app says so and does
+# not deploy it (issue #37).
+echo '/* an old copy */' >> "$root/apps/admin/assets/style.css"
+bash "$here/install.sh" --with-bundled-apps "" "$tarball" > "$scratch/behind.log" 2>&1 \
+  || fail "install.sh refused a reinstall: $(cat "$scratch/behind.log")"
+grep -q 'this release carries a newer copy of: admin' "$scratch/behind.log" \
+  || fail "install.sh did not say the release carries a newer admin: $(cat "$scratch/behind.log")"
+grep -q 'install.sh --with-bundled-apps "admin"' "$scratch/behind.log" \
+  || fail "install.sh did not say how to deploy it: $(cat "$scratch/behind.log")"
+grep -q 'an old copy' "$root/apps/admin/assets/style.css" \
+  || fail "install.sh deployed the release's app although it was not asked to"
+# And once it is asked, it says nothing of the sort.
+bash "$here/install.sh" --with-bundled-apps "admin" "$tarball" > "$scratch/caught-up.log" 2>&1 \
+  || fail "install.sh refused to deploy the bundled admin: $(cat "$scratch/caught-up.log")"
+if grep -q 'this release carries a newer copy' "$scratch/caught-up.log"; then
+  fail "install.sh still says the app is behind after deploying it"
+fi
+if grep -q 'an old copy' "$root/apps/admin/assets/style.css"; then
+  fail "install.sh did not deploy the release's admin when asked"
+fi
 echo 'fn broken( {' >> "$root/apps/hello/hello.cove"
 ln -sfn releases/before "$root/current"
 if bash "$here/install.sh" "$tarball" > "$scratch/refused.log" 2>&1; then
