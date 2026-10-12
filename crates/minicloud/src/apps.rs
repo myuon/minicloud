@@ -26,8 +26,8 @@ use cove_sema::{Compiler, HostSchemas};
 
 use crate::assets::Assets;
 use crate::config::{
-    read_app_with, AppConfig, AppLimits, AppOverride, AssetPolicy, FetchPolicy, KvLimits,
-    RatePolicy, RemovedKeys, SecretSource, Secrets, Trigger, ADMIN_APP,
+    read_app_with, AppConfig, AppLimits, AppOverride, AssetPolicy, DeferLimits, FetchPolicy,
+    KvLimits, RatePolicy, RemovedKeys, SecretSource, Secrets, Trigger, ADMIN_APP,
 };
 use crate::hosts::{AppContext, HostModules};
 use crate::logs::LogRing;
@@ -73,6 +73,9 @@ pub struct LoadOptions {
     pub io: tokio::runtime::Handle,
     /// What the admin app's `host` module acts on; given to that app only.
     pub control: Option<Arc<Control>>,
+    /// Where an app's deferred work is taken ([`crate::defer`]); `None`
+    /// for a host that runs none, such as `minicloud test`.
+    pub defer_to: Option<tokio::sync::mpsc::Sender<crate::defer::Deferred>>,
     /// What a removed `app.toml` key does: refuses the app when it is being
     /// put forward (a deploy, an update), is ignored with a warning when an
     /// app already deployed is loaded again (the host's start).
@@ -114,6 +117,8 @@ pub struct App {
     pub kv: KvLimits,
     /// `[sql]`: the app's SQL store, with `sql` granted.
     pub sql: crate::config::SqlLimits,
+    /// `[defer]`: how much work it may have outstanding.
+    pub defer: DeferLimits,
     pub fetch: FetchPolicy,
     /// `[assets]`: how the files below are answered.
     pub asset_policy: AssetPolicy,
@@ -210,17 +215,19 @@ impl App {
         data: Option<&Path>,
         io: &tokio::runtime::Handle,
     ) -> AppContext {
-        self.context_with(quiet, data, io, None)
+        self.context_with(quiet, data, io, None, None)
     }
 
     /// [`App::context`], with the host's control for the admin app — and
-    /// for no other app, whatever it is granted.
+    /// for no other app, whatever it is granted — and where the host takes
+    /// deferred work, which only a running host has.
     pub fn context_with(
         &self,
         quiet: bool,
         data: Option<&Path>,
         io: &tokio::runtime::Handle,
         control: Option<&Arc<Control>>,
+        defer_to: Option<&tokio::sync::mpsc::Sender<crate::defer::Deferred>>,
     ) -> AppContext {
         AppContext {
             app: self.name.clone(),
@@ -231,6 +238,8 @@ impl App {
             data: data.map(|root| root.join(&self.name)),
             kv: self.kv.clone(),
             sql: self.sql.clone(),
+            defer: self.defer.clone(),
+            defer_to: defer_to.cloned(),
             fetch: self.fetch.clone(),
             secrets: self.secrets.clone(),
             access: self.access.clone(),
@@ -383,6 +392,7 @@ pub fn describe_as(
         limits: AppLimits::default(),
         kv: KvLimits::default(),
         sql: crate::config::SqlLimits::default(),
+        defer: DeferLimits::default(),
         fetch: FetchPolicy::default(),
         asset_policy: AssetPolicy::default(),
         assets: Arc::new(Assets::default()),
@@ -410,6 +420,7 @@ pub fn describe_as(
             app.limits = config.limits.clone();
             app.kv = config.kv.clone();
             app.sql = config.sql.clone();
+            app.defer = config.defer.clone();
             app.fetch = config.fetch.clone();
             app.secrets = config.secrets.clone();
             app.access = config.access.clone();
@@ -791,6 +802,7 @@ fn prepare(app: &mut App, options: &LoadOptions) -> Result<Ready, String> {
         options.data.as_deref(),
         &options.io,
         options.control.as_ref(),
+        options.defer_to.as_ref(),
     );
     let hosts = Arc::new(options.modules.registry(&app.granted, &context)?);
     let sources = Arc::new(compiled.sources);

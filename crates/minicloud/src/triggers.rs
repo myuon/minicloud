@@ -4,7 +4,7 @@
 //! to be a crontab somewhere else calling the host over HTTP. A trigger is
 //! the host making that call itself.
 //!
-//! **A trigger run is an ordinary run.** The host builds a [`AppRequest`]
+//! **A trigger run is an ordinary run.** The host builds a request
 //! and admits it to the app's queue exactly as the HTTP front does, so a
 //! scheduled run is served round robin with everything else, holds a worker
 //! for a slice at a time, parks where it waits, and is stopped by the app's
@@ -34,22 +34,13 @@
 //! running two at once: a job that takes longer than its period would
 //! otherwise pile up until it filled its app's queue.
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::oneshot;
-
-use crate::convert::AppRequest;
 use crate::cron::Minute;
 use crate::proxy::Forwarding;
-use crate::sched::{Cancel, Engine, Flight, Start};
-
-/// The header a trigger's run carries, naming the path its schedule asked
-/// for. The host sets it here and removes it from every request that comes
-/// off a connection, so an app that finds it knows the host is the caller.
-pub const TRIGGER_HEADER: &str = "x-minicloud-trigger";
+use crate::sched::Engine;
 
 /// What the ticking task runs triggers with.
 pub struct Triggers {
@@ -138,50 +129,29 @@ impl Triggers {
     /// runtime to count it and let the next tick fire.
     fn start(&self, app: &Arc<crate::apps::App>, slot: usize, index: usize, key: (String, usize)) {
         let trigger = &app.triggers[index];
-        let mut headers: BTreeMap<String, String> = BTreeMap::new();
-        headers.insert(TRIGGER_HEADER.to_string(), trigger.path.clone());
-        // What the app is told about how it is reached, as a request off a
-        // connection is told it: a job that writes a link to itself writes
-        // the same one a page would.
-        self.forwarding
-            .apply(&mut headers, app.hosts.first().map(String::as_str));
-        headers.insert(
-            "x-forwarded-prefix".to_string(),
-            if app.hosts.is_empty() {
-                format!("/{}", app.name)
-            } else {
-                String::new()
-            },
-        );
-        let (reply, answer) = oneshot::channel();
-        let start = Box::new(Start {
-            request: AppRequest {
-                method: trigger.method.clone(),
-                path: trigger.path.clone(),
-                query: Vec::new(),
-                headers: headers.into_iter().collect(),
+        let what = format!("trigger {} {}", trigger.method, trigger.path);
+        let answer = match crate::internal::admit(
+            &self.engine,
+            crate::internal::Asked {
+                app,
+                slot,
+                forwarding: &self.forwarding,
+                by: (crate::internal::TRIGGER_HEADER, &trigger.path),
+                method: &trigger.method,
+                path: &trigger.path,
                 body: String::new(),
             },
-            flight: Flight {
-                id: self.engine.next_id(),
-                app: slot,
-                version: Arc::clone(app),
-                accepted: Instant::now(),
-                reply,
-                cancel: Cancel::new(),
-                tally: Default::default(),
-            },
-        });
-        let what = format!("trigger {} {}", trigger.method, trigger.path);
-        if let Err(why) = self.engine.queue.admit(slot, start) {
-            app.counters.rejected(why);
-            app.counters
-                .trigger_failed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            app.logs.push("host", &format!("{what}: not run ({why:?})"));
-            self.running.lock().unwrap().remove(&key);
-            return;
-        }
+        ) {
+            Ok(answer) => answer,
+            Err(why) => {
+                app.counters
+                    .trigger_failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                app.logs.push("host", &format!("{what}: not run ({why:?})"));
+                self.running.lock().unwrap().remove(&key);
+                return;
+            }
+        };
         let counters = Arc::clone(&app.counters);
         let logs = Arc::clone(&app.logs);
         let running = Arc::clone(&self.running);
@@ -210,7 +180,7 @@ impl Triggers {
                         &format!(
                             "{what}: {} in {took} ms: {}",
                             reply.status,
-                            first_line(&reply.body)
+                            crate::internal::first_line(&reply.body)
                         ),
                     );
                 }
@@ -223,20 +193,6 @@ impl Triggers {
             }
         });
     }
-}
-
-/// The first line of a body, cut, for a log line.
-fn first_line(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let line = text.lines().next().unwrap_or_default();
-    if line.len() <= 200 {
-        return line.to_string();
-    }
-    let mut end = 200;
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &line[..end])
 }
 
 /// Ticks a moment after each minute begins, for as long as the host runs.

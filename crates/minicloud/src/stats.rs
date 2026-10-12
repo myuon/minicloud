@@ -166,6 +166,13 @@ pub struct AppCounters {
     /// ([`crate::histogram`]). A run's own headers say what one cost; this
     /// is what they all cost.
     pub latency: crate::histogram::Latency,
+    /// Work the app deferred ([`crate::defer`]): runs started this way,
+    /// how many have not finished, how many ended 5xx or not at all, and
+    /// calls refused because too many were outstanding.
+    pub deferred_runs: AtomicU64,
+    pub deferred_in_flight: AtomicU64,
+    pub deferred_failed: AtomicU64,
+    pub deferred_refused: AtomicU64,
     /// Updates installed, and updates refused (the current version kept).
     pub updates: AtomicU64,
     pub updates_refused: AtomicU64,
@@ -275,6 +282,10 @@ impl AppCounters {
             },
             "assets_served": read(&self.assets),
             "assets_not_modified": read(&self.assets_not_modified),
+            "deferred_runs": read(&self.deferred_runs),
+            "deferred_in_flight": read(&self.deferred_in_flight),
+            "deferred_failed": read(&self.deferred_failed),
+            "deferred_refused": read(&self.deferred_refused),
             "trigger_runs": read(&self.trigger_runs),
             "trigger_skipped": read(&self.trigger_skipped),
             "trigger_failed": read(&self.trigger_failed),

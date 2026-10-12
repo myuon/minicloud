@@ -1,0 +1,66 @@
+use web
+use defer
+use kv
+use log
+
+/// Answers at once and leaves the work to the host.
+///
+/// `/ask` defers `/work`, which counts a run in the app's store; `/count`
+/// answers the count. `/ask-many?n=` defers that many, to find the limit.
+/// `/work` refuses anyone but the host, which is how the tests see that
+/// `x-minicloud-deferred` is the host's to set.
+export fn handle(request: web.Request) -> web.Response {
+  if request.path == "/count" {
+    return answer(200, kv.get("done").unwrapOr("0"))
+  }
+  if request.path == "/work" {
+    if request.headers.get("x-minicloud-deferred").isNone() {
+      return answer(403, "not the host")
+    }
+    log.info("worked on {request.body}")
+    return match kv.increment("done", 1) {
+      Ok(now) => answer(200, "{now}")
+      Err(error) => answer(507, error.message)
+    }
+  }
+  if request.path == "/fail" {
+    return answer(500, "this deferred run fails")
+  }
+  if request.path == "/ask" {
+    return match defer.run("/work", "once") {
+      Ok(_) => answer(202, "asked")
+      Err(error) => answer(429, error.message)
+    }
+  }
+  if request.path == "/ask-fail" {
+    return match defer.run("/fail", "") {
+      Ok(_) => answer(202, "asked")
+      Err(error) => answer(429, error.message)
+    }
+  }
+  if request.path == "/ask-many" {
+    let n = Int.parse(request.query.get("n").unwrapOr("1")).unwrapOr(1)
+    var asked = 0
+    var refused = ""
+    var i = 0
+    while i < n {
+      match defer.run("/work", "many") {
+        Ok(_) => asked += 1
+        Err(error) => refused = error.message
+      }
+      i += 1
+    }
+    return answer(200, "asked {asked}; {refused}")
+  }
+  if request.path == "/ask-nowhere" {
+    return match defer.run("work", "") {
+      Ok(_) => answer(202, "asked")
+      Err(error) => answer(400, error.message)
+    }
+  }
+  answer(404, "no such path")
+}
+
+fn answer(status: Int, body: String) -> web.Response {
+  web.Response(status: status, headers: Map.of(), body: "{body}\n")
+}

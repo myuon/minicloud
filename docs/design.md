@@ -416,6 +416,37 @@ public origin's scheme, and its port if it has one) — the name the route
 matched, never one the client chose — so an app's same-origin check compares
 against the origin its own pages were served from.
 
+## A run the host asks for
+
+A schedule and deferred work want the same thing, so they are the same
+thing: `internal.rs` builds an `AppRequest` and admits it to the app's
+queue exactly as the HTTP front does, and everything downstream — round
+robin, the slice, parking, the deadline, the host-call budget, the
+counters, the version a run is pinned to — is the same code. What the host
+adds is a header saying who asked (`x-minicloud-trigger`,
+`x-minicloud-deferred`), which it **strips from every request that comes
+off a connection**, so an app may trust it. The answer comes back on a
+`oneshot` that the caller may wait on to count and log, or drop; dropping
+it does not cancel the run, which is the point.
+
+**`defer` is this host's `waitUntil`, and it is a different shape.**
+Cloudflare hands the runtime a promise and keeps the isolate alive until it
+settles. Here the answer *is* the end of the isolate: a run's heap, its
+budget and its deadline end together, and keeping one alive past its answer
+would mean a request's budget outliving the request, which is the one thing
+the whole design is built to prevent. So deferred work is another run, at a
+path the app names, and the app routes it like anything else.
+
+What it costs is that the work cannot see the run that asked for it —
+there is no closure, only a path and a body. What it buys is that nothing
+about the scheduler, the budgets or the counters needs a second case.
+
+`[defer] max_in_flight` bounds what is outstanding: the count is taken
+before the work is sent and given back when the run ends, so the bound
+holds while the host is still starting it. A deferred run may defer again,
+and an app that loops costs itself its own turns — the scheduler serves
+apps round robin, so the loop is that app's problem.
+
 ## Running an app on a schedule
 
 A trigger could have been a second entry — Cloudflare's `scheduled()` — and
