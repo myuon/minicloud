@@ -396,6 +396,50 @@ match sql.query("SELECT title FROM books WHERE pages > ? ORDER BY pages DESC", [
   held and not yielded: it is 20 ms by default for that reason, and a query
   that needs longer wants an index.
 
+### A socket a run holds
+
+Everything else here answers: a request comes in, a run answers it, the run
+ends. A socket is the one thing that does not — it is open for as long as
+both ends want it, and both may speak. With `socket` granted, the run holds
+it:
+
+```cove
+use socket
+
+export fn handle(request: web.Request) -> web.Response {
+  match socket.accept() {
+    Ok(_) => {}
+    Err(error) => return web.Response(status: 400, headers: Map.of(), body: error.message)
+  }
+  while true {
+    match socket.receive() {
+      Ok(said) => { socket.send("you said {said}") }
+      Err(_) => break        // the client has gone
+    }
+  }
+  web.Response(status: 200, headers: Map.of(), body: "")   // not the answer
+}
+```
+
+- The request **arrives as a request**: the app sees its headers and may
+  refuse it like any other. `socket.accept()` is what turns it into a
+  socket — the host answers `101` with the key the protocol asks for and
+  takes the connection over.
+- **Both ends park.** `send` gives the worker up until the client has taken
+  what is queued, `receive` until there is a message. A socket nobody is
+  speaking on costs a parked run and no worker at all, which is what makes
+  holding one for minutes reasonable on a host with two of them.
+- The host answers `ping` with `pong` itself: keeping a connection alive is
+  not the app's business.
+- The run's **`deadline` is how long the socket may be held** — an app that
+  means to hold one for an hour says `deadline = "1h"` — `max_host_calls`
+  bounds how many messages there may be, and `max_response_bytes` bounds
+  one message. A run that ends closes the socket, and a client that goes is
+  an `Err` from `receive`, which is how the run finds out.
+- A message that is not text is given to the run as text where it is text
+  and dropped where it is not: a run reads a `String`, and nothing of this
+  host can carry bytes to an app yet.
+
 ### One run at a time for one key
 
 An app can hold state and cannot hold it *safely* when two requests about
@@ -596,6 +640,7 @@ path = "/cron/rollup"
 | `log` | `log` | `info`, `warn`, `error`: a line on stdout (`[app] level: line`) and in the app's log |
 | `timer` | `timer` | `sleep(millis)`: parks the run, at most 60 s |
 | `kv` | `kv` | the app's own SQLite store: `get`, `put`, `delete`, `increment`, `list`, `listDesc`; a `put` past a quota is the app's `Err` |
+| `socket` | `socket` | `accept`, `send`, `receive`, `close`: a WebSocket the run holds ([A socket a run holds](#a-socket-a-run-holds)) |
 | `keyed` | `keyed` | `alarm(key, atMillis)`, `clearAlarm(key)`, `alarmAt(key)`: wake this app at a key ([One run at a time for one key](#one-run-at-a-time-for-one-key)) |
 | `stream` | `stream` | `open(status, headers)`, `send(chunk)`: an answer written as the run goes ([An answer written as it goes](#an-answer-written-as-it-goes)) |
 | `queue` | `queue` | `send(name, body)`, `depth(name)`: a durable queue the host delivers from ([Queues](#queues)) |
@@ -631,7 +676,7 @@ error[minicloud::spawn]: `spawner.handle` can spawn a task, which minicloud does
   rule: A spawned task runs outside the host's worker pool and keeps its parent from parking or yielding; minicloud refuses an app that can spawn.
 greedy     requires [log]  granted [-]  REFUSED: `greedy.handle` requires `log`, which app.toml does not grant
 spawner    requires [-]  granted [-]  REFUSED: `spawner.handle` can spawn a task, which minicloud does not run
-checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, stream, keyed, fetch, time, random, auth, host); 0 warning(s), 2 refused
+checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, stream, keyed, socket, fetch, time, random, auth, host); 0 warning(s), 2 refused
 ```
 
 `test` runs every `test fn` the way `cove test` does, with the app's grant,

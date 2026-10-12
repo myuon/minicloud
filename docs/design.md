@@ -649,6 +649,40 @@ encoder would hold the lines it is meant to deliver.
 pattern second, so a name that is both is its own. A wildcard that crossed
 a dot would claim `a.b.example` from whoever holds `*.b.example`.
 
+## A socket a run holds
+
+A WebSocket is the one thing here that is not a request and an answer, and
+it needed less new machinery than that suggests: the run already knows how
+to be found by a host call ([a run that writes its own
+answer](#a-run-that-writes-its-own-answer)), and already knows how to park.
+
+`socket.accept()` answers `101` through the same `Answering` that answers
+everything — so the run's returned response is not the answer afterwards,
+exactly as it is for a stream — takes hyper's `OnUpgrade` (which the HTTP
+front put beside the answer when it saw the request asking) and starts a
+task that holds the connection and speaks frames. The run and that task
+have a channel each way, and **both ends of both channels park**: a socket
+nobody is speaking on is a parked run and no worker, which is the whole
+reason a host with two workers can hold a hundred sockets.
+
+**The request arrives as a request.** The app sees the headers and may
+refuse the upgrade with an ordinary response, which is both the simplest
+thing to implement and the right place for the decision: whether this
+client may open a socket is the app's question, not the host's.
+
+`serve_connection` had to become `with_upgrades` on both listeners, which
+is the whole of the change to the HTTP front.
+
+**The handshake's SHA-1 is written out** rather than taken from a crate:
+twenty lines, the only place this host hashes anything for a protocol, and
+a hash whose weakness does not matter — the handshake uses it to prove the
+server read the key, not to keep a secret.
+
+What bounds a socket is what bounds a run, which means the **deadline is
+how long it may be held**. That is a strange sentence until you notice it
+is the same sentence as everywhere else: a run has a budget, a socket is a
+run, so a socket has a budget. An app that wants an hour says an hour.
+
 ## A run that writes its own answer
 
 `stream.open` and `stream.send` let a run answer while it is still going,

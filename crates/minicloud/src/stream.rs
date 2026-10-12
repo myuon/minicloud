@@ -79,6 +79,13 @@ pub struct Answering {
     streaming: AtomicBool,
     /// The chunks of a streamed answer, once `open` has sent the head.
     chunks: Mutex<Option<mpsc::Sender<Bytes>>>,
+    /// The connection, for a request that asked to be upgraded: taken by
+    /// `socket.accept` ([`crate::socket`]) and by nothing else.
+    upgrade: Mutex<Option<hyper::upgrade::OnUpgrade>>,
+    /// The key the client sent, which the `101` has to answer.
+    websocket_key: Mutex<Option<String>>,
+    /// The socket this run is holding, once it has accepted one.
+    socket: Mutex<Option<Arc<crate::socket::Socket>>>,
 }
 
 impl Answering {
@@ -88,7 +95,81 @@ impl Answering {
             sender: Mutex::new(Some(sender)),
             streaming: AtomicBool::new(false),
             chunks: Mutex::new(None),
+            upgrade: Mutex::new(None),
+            websocket_key: Mutex::new(None),
+            socket: Mutex::new(None),
         })
+    }
+
+    /// Keeps what a request that asked to be upgraded needs, for a run that
+    /// accepts it.
+    pub fn upgradable(&self, upgrade: hyper::upgrade::OnUpgrade, key: String) {
+        *self.upgrade.lock().unwrap_or_else(|p| p.into_inner()) = Some(upgrade);
+        *self.websocket_key.lock().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    }
+
+    /// The socket this run is holding, if it has accepted one.
+    pub fn socket(&self) -> Option<Arc<crate::socket::Socket>> {
+        self.socket
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Answers `101`, takes the connection, and starts the task that holds
+    /// it ([`crate::socket::hold`]).
+    ///
+    /// `io` is the host's I/O runtime: this is called from a worker
+    /// thread, which is not in one, and the task that holds the socket has
+    /// to be.
+    pub fn upgrade(&self, ahead: usize, io: &tokio::runtime::Handle) -> Result<(), String> {
+        if self.socket().is_some() {
+            return Err("socket.accept: this run has a socket already".to_string());
+        }
+        let key = self
+            .websocket_key
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .ok_or_else(|| "socket.accept: this request did not ask for a WebSocket".to_string())?;
+        let Some(upgrade) = self
+            .upgrade
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        else {
+            return Err("socket.accept: this request cannot be upgraded".to_string());
+        };
+        let sent = self.answer(Reply {
+            status: 101,
+            headers: vec![
+                ("upgrade".to_string(), "websocket".to_string()),
+                ("connection".to_string(), "Upgrade".to_string()),
+                (
+                    "sec-websocket-accept".to_string(),
+                    crate::socket::accept_key(&key),
+                ),
+            ],
+            body: Bytes::new(),
+            stream: None,
+        });
+        if !sent {
+            return Err("socket.accept: this run has answered already".to_string());
+        }
+        self.streaming.store(true, Ordering::Relaxed);
+        let (outgoing, to_client) = mpsc::channel(ahead);
+        let (from_client, incoming) = mpsc::channel(ahead);
+        *self.socket.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(Arc::new(crate::socket::Socket {
+                outgoing,
+                incoming: tokio::sync::Mutex::new(incoming),
+            }));
+        io.spawn(async move {
+            if let Ok(upgraded) = upgrade.await {
+                crate::socket::hold(upgraded, to_client, from_client).await;
+            }
+        });
+        Ok(())
     }
 
     /// Answers with `reply`, if nothing has answered yet. `false` when the
@@ -107,10 +188,12 @@ impl Answering {
         self.streaming.load(Ordering::Relaxed)
     }
 
-    /// Ends a streamed answer, which is the end of its body. Called when
-    /// the run ends, however it ends.
+    /// Ends a streamed answer, which is the end of its body, and closes a
+    /// socket this run was holding. Called when the run ends, however it
+    /// ends.
     pub fn finish(&self) {
         *self.chunks.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.socket.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Sends the head and keeps the channel its body is written on.
