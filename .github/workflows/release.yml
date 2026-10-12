@@ -47,6 +47,7 @@ jobs:
         env:
           WEBHOOKS_ADMIN_TOKEN: ci
           LEDGER_TOKEN: ci
+          WATCH_ADMIN_TOKEN: ci
           ADMIN_UI_TOKEN: ci
         run: |
           ./target/release/minicloud check --apps apps

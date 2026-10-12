@@ -1,0 +1,32 @@
+use web
+
+/// `minicloud test` runs these with the app's grant and limits, so they
+/// are the parts that need no clock and no network: what a name may be,
+/// and how a day of checks reads.
+
+test fn anIdIsANameAndNotASentence() -> Result<Unit, Error> {
+  assert(named("api"))?
+  assert(named("api-2_b"))?
+  assert(!named(""))?
+  assert(!named("the api"))?
+  assert(!named("api/other"))?
+  Ok(())
+}
+
+test fn uptimeIsTheGoodChecksOverTheWindow() -> Result<Unit, Error> {
+  let none = Status(target: "a", url: "", ok: false, status: 0, ms: 0, at: 0, why: "", checks: 0, good: 0)
+  assertEqual(uptime(none), "—")?
+  let some = Status(target: "a", url: "", ok: true, status: 200, ms: 3, at: 1, why: "", checks: 8, good: 7)
+  assertEqual(uptime(some), "87.5% of 8")?
+  let all = Status(target: "a", url: "", ok: true, status: 200, ms: 3, at: 1, why: "", checks: 4, good: 4)
+  assertEqual(uptime(all), "100.0% of 4")?
+  Ok(())
+}
+
+test fn aPageIsHtmlAndSaysSo() -> Result<Unit, Error> {
+  let answered = page(200, "watch", "<p>hi</p>")
+  assertEqual(answered.status, 200)?
+  assert(answered.body.contains("<link rel=stylesheet href=\"style.css\">"))?
+  assert(answered.headers.get("content-type").unwrapOr("").contains("text/html"))?
+  Ok(())
+}

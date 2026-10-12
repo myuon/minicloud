@@ -7,10 +7,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The webhook lab's admin secret, the ledger's post secret (examples/) and
-  # the admin UI's secret (apps/admin), which `minicloud check` resolves.
+  # The webhook lab's admin secret, the ledger's post secret, the watch's
+  # admin secret (examples/) and the admin UI's secret (apps/admin), which
+  # `minicloud check` resolves.
   WEBHOOKS_ADMIN_TOKEN: ci
   LEDGER_TOKEN: ci
+  WATCH_ADMIN_TOKEN: ci
   ADMIN_UI_TOKEN: ci
 
 jobs:

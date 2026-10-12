@@ -1190,10 +1190,11 @@ modules, and CI checks and tests them.
 | [`webhooks`](examples/webhooks/README.md) | `kv`, `fetch`, `auth`, … | the webhook lab: receive URLs that keep every request, and pages to read and resend them |
 | [`ledger`](examples/ledger/README.md) | `kv`, `auth`, `log` | the bench ledger: benchmark results posted as JSON, and pages to compare them |
 | [`algo`](examples/algo/README.md) | `time` | the algorithm playground: bipartite matching, SAT and simulated annealing, run on request |
+| [`watch`](examples/watch/README.md) | `sql`, `queue`, `defer`, `stream`, `socket`, `keyed`, … | a watch on the things you run: a minute's `[[triggers]]` check, the answers in `sql`, a change on a `[[queues]]`, a dashboard with `assets/` and `stream`, and a console over `socket` |
 
-`webhooks` and `ledger` take a secret from the environment
-(`WEBHOOKS_ADMIN_TOKEN`, `LEDGER_TOKEN`); on the server those are in
-`~/cove-tools/env`. Deploy one from a checkout over ssh, as in [Deploying an
+`webhooks`, `ledger` and `watch` take a secret from the environment
+(`WEBHOOKS_ADMIN_TOKEN`, `LEDGER_TOKEN`, `WATCH_ADMIN_TOKEN`); on the server
+those are in `~/cove-tools/env`. Deploy one from a checkout over ssh, as in [Deploying an
 app](#deploying-an-app):
 
 ```console

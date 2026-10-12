@@ -1,0 +1,75 @@
+# A watch on the things you run: every minute it asks each target whether
+# it is there, keeps the answers, shows them, and tells somebody when one
+# changes. It is the example that uses what a host gained after 0.5 —
+# `[[triggers]]`, `sql`, `[[queues]]`, `defer`, `stream`, `socket`,
+# `[keyed]`, `[rate]` and `assets/` — in the shape an app that does a real
+# job uses them.
+grant = ["sql", "fetch", "queue", "defer", "stream", "socket", "keyed", "timer", "time", "log", "auth"]
+
+[limits]
+# A socket is held for as long as its run lives, so this is also how long a
+# console may stay open ([An answer written as it goes] in the README).
+deadline = "60s"
+# The checks a minute's run makes, and the messages a console may exchange.
+max_host_calls = 2000
+
+# The dashboard and the console page: one stylesheet and one icon, answered
+# by the host before the app runs.
+[assets]
+cache_control = "no-cache"
+
+# One run at a time for one target, so that a check started by the clock
+# and one asked for by hand cannot both write that target's history. The
+# key is `?target=`, which every path about one target carries.
+[keyed]
+by = "query:target"
+alarm_path = "/alarm"
+
+# Every minute: check the targets that are due.
+[[triggers]]
+cron = "* * * * *"
+path = "/cron/check"
+
+# A target that changed — up to down, or down to up — is a message, not a
+# `fetch` in the middle of a check: whoever is told may be down too, and a
+# queue is what keeps trying without holding up the check that noticed.
+[[queues]]
+name = "notify"
+path = "/queue/notify"
+max_attempts = 4
+retry = "20s"
+
+[sql]
+max_bytes = 16777216
+max_rows = 500
+
+# A dashboard that anyone may look at is a dashboard somebody may hammer.
+[rate]
+requests = 120
+per = "1m"
+key = "address"
+
+# Where the targets are, and where a notification may be sent. A monitor
+# can only watch what its app.toml lets it reach: adding a target means
+# adding its origin here, which is the point of an allowlist.
+[fetch]
+allow = [
+  "http://127.0.0.1:8080",
+  "http://localhost:8080",
+  "http://127.0.0.1:8790",
+  "http://localhost:8790",
+  "https://covtools.ramda.io",
+]
+timeout = "5s"
+
+# Who may add a target or ask for a check by hand. Reading is open; the
+# dashboard is meant to be looked at.
+[access]
+team = { env = "ACCESS_TEAM_DOMAIN" }
+aud = { env = "COVTOOLS_ACCESS_AUD" }
+emails = { env = "ACCESS_ALLOWED_EMAILS" }
+token = "admin"
+fallback = "none"
+
+[secrets]
+admin = { env = "WATCH_ADMIN_TOKEN" }

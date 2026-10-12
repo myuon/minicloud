@@ -1,0 +1,31 @@
+test fn escapesEveryHtmlSpecialCharacter() -> Result<Unit, Error> {
+  assertEqual(escapeHtml("<a href=\"x\">'&'</a>"), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;")?
+  assertEqual(escapeHtml("plain"), "plain")?
+  Ok(())
+}
+
+test fn decodesForms() -> Result<Unit, Error> {
+  let form = parseForm("name=GitHub+hooks&x=%3Cb%3E&u=%C3%A9%E3%81%82&eq=a%3Db=c&empty=")
+  assertEqual(form.get("name").unwrapOr(""), "GitHub hooks")?
+  assertEqual(form.get("x").unwrapOr(""), "<b>")?
+  assertEqual(form.get("u").unwrapOr(""), "éあ")?
+  assertEqual(form.get("eq").unwrapOr(""), "a=b=c")?
+  assertEqual(form.get("empty").unwrapOr("missing"), "")?
+  // Not UTF-8, and a stray percent: kept readable rather than refused.
+  assertEqual(urlDecode("%FF%"), "{replacement()}%")?
+  Ok(())
+}
+
+test fn writesIsoTimes() -> Result<Unit, Error> {
+  assertEqual(isoTime(0), "1970-01-01T00:00:00.000Z")?
+  assertEqual(isoTime(951782400000), "2000-02-29T00:00:00.000Z")?
+  assertEqual(isoTime(1791170989566), "2026-10-05T03:29:49.566Z")?
+  Ok(())
+}
+
+test fn truncatesAtACharacterBoundary() -> Result<Unit, Error> {
+  assertEqual(truncateBytes("aéb", 2), "a")?
+  assertEqual(truncateBytes("aéb", 3), "aé")?
+  assertEqual(truncateBytes("abc", 10), "abc")?
+  Ok(())
+}

@@ -107,14 +107,25 @@ pub fn admit_with(
             String::new()
         },
     );
+    // A path may carry its own query — `defer.run("/check?target=a")` is
+    // how an app says which thing the work is about — and the app sees the
+    // two apart, as it does for a request off a connection. It matters
+    // beyond tidiness: `[keyed]` reads the key out of the query, so a path
+    // whose query stayed in the path would be a run that took no turn.
+    let (path, own_query) = match path.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (path, ""),
+    };
+    let query: Vec<(String, String)> = form_urlencoded::parse(own_query.as_bytes())
+        .into_owned()
+        .chain(form_urlencoded::parse(query.as_bytes()).into_owned())
+        .collect();
     let (reply, answer) = oneshot::channel();
     let start = Box::new(Start {
         request: AppRequest {
             method: method.to_string(),
             path: path.to_string(),
-            query: form_urlencoded::parse(query.as_bytes())
-                .into_owned()
-                .collect(),
+            query,
             headers: headers.into_iter().collect(),
             body,
         },

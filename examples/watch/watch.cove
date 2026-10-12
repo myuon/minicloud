@@ -1,0 +1,593 @@
+use web
+use sql
+use fetch
+use queue
+use defer
+use stream
+use socket
+use keyed
+use timer
+use time
+use log
+use auth
+use text
+
+/// A watch on the things you run.
+///
+/// Every minute the host runs `/cron/check` (`[[triggers]]`), which asks
+/// each target whether it is there and writes the answer down (`sql`). A
+/// target whose answer *changed* is a message on the `notify` queue, which
+/// the host delivers to `/queue/notify` and keeps trying; a target that is
+/// down gets an alarm so it is asked again in half a minute rather than at
+/// the next minute (`keyed`). The dashboard is a page the host serves the
+/// stylesheet of (`assets/`), and it may be watched as it happens over
+/// server-sent events (`stream`) or talked to over a socket (`socket`).
+///
+/// | path | what |
+/// | --- | --- |
+/// | `GET /` | the dashboard |
+/// | `GET /events` | the same, as server-sent events |
+/// | `GET /live` | the same, over a WebSocket, which also takes commands |
+/// | `GET /history?target=` | one target's last checks |
+/// | `POST /targets` | add one (the admin) |
+/// | `POST /targets/remove?target=` | drop one (the admin) |
+/// | `POST /check?target=` | check one now (the admin) |
+/// | `POST /cron/check` | the clock's |
+/// | `POST /alarm?target=` | the alarm's: a target that was down |
+/// | `POST /queue/notify` | the queue's: tell somebody |
+export fn handle(request: web.Request) -> web.Response {
+  // The host's own paths first: a run the host asked for carries a header
+  // no client can send, so an app may trust it.
+  if request.path == "/cron/check" {
+    return checkDue(request)
+  }
+  if request.path == "/alarm" {
+    return rang(request)
+  }
+  if request.path == "/queue/notify" {
+    return notify(request)
+  }
+  if request.path == "/" {
+    return dashboard(request)
+  }
+  if request.path == "/events" {
+    return events()
+  }
+  if request.path == "/live" {
+    return live()
+  }
+  if request.path == "/history" {
+    return historyPage(request)
+  }
+  if request.path == "/prune" {
+    return pruned(request)
+  }
+  // Changing what is watched is the admin's; reading is anybody's — and a
+  // run the host asked for is neither: a check this app deferred carries
+  // `x-minicloud-deferred`, which no client can send.
+  if request.path == "/check" || request.path == "/targets" || request.path == "/targets/remove" {
+    if !fromHost(request) {
+      match refusal(request) {
+        Some(no) => return no
+        None => {}
+      }
+    }
+    if request.path == "/check" {
+      return checkOne(request)
+    }
+    if request.path == "/targets" {
+      return addTargetFrom(request)
+    }
+    return removeTargetFrom(request)
+  }
+  page(404, "not here", "<p>No such page. The dashboard is at <a href=\"./\">/</a>.</p>")
+}
+
+// ------------------------------------------------------------- who is asking
+
+/// Why this request is not the admin's, if it is not.
+///
+/// Reading is open — a dashboard is meant to be looked at — and changing
+/// what is watched is not.
+fn refusal(request: web.Request) -> Option<web.Response> {
+  match auth.identity(request.headers) {
+    Ok(_) => None
+    Err(error) => {
+      let status = if auth.usesAccess() { 403 } else { 401 }
+      Some(answer(status, "{error.message}\n"))
+    }
+  }
+}
+
+/// Whether the host asked for this run, rather than a client.
+fn fromHost(request: web.Request) -> Bool {
+  if request.headers.get("x-minicloud-trigger").isSome() {
+    return true
+  }
+  if request.headers.get("x-minicloud-alarm").isSome() {
+    return true
+  }
+  if request.headers.get("x-minicloud-deferred").isSome() {
+    return true
+  }
+  request.headers.get("x-minicloud-queue").isSome()
+}
+
+// ----------------------------------------------------------------- checking
+
+/// Asks one target whether it is there, writes the answer down, and does
+/// what the answer calls for: an alarm while it is down, a message when it
+/// changed.
+///
+/// Every path that checks goes through here, and every one of them carries
+/// `?target=`, so `[keyed]` is what keeps two checks of one target from
+/// writing over each other.
+fn check(target: Target) -> Result<Bool, Error> {
+  let began = time.nowMillis()
+  let outcome = fetch.get(target.url)
+  let took = time.nowMillis() - began
+  let was = store_wasOk(target.id)
+  var ok = false
+  var status = 0
+  var why = ""
+  match outcome {
+    Ok(got) => {
+      status = got.status
+      ok = got.status < 400
+      if !ok {
+        why = "answered {got.status}"
+      }
+    }
+    Err(error) => {
+      why = error.message
+    }
+  }
+  record(target.id, ok, status, took, why)?
+  if ok {
+    // Back up: no more alarms, and tell whoever is listening if it had
+    // been down.
+    match keyed.clearAlarm(target.id) {
+      Ok(_) => {}
+      Err(error) => log.warn("cannot clear {target.id}'s alarm: {error.message}")
+    }
+  } else {
+    // Down: ask again in half a minute rather than at the next minute.
+    match keyed.alarm(target.id, time.nowMillis() + 30000) {
+      Ok(_) => {}
+      Err(error) => log.warn("cannot set {target.id}'s alarm: {error.message}")
+    }
+  }
+  match was {
+    Some(before) => {
+      if before != ok {
+        told(target, ok)
+      }
+    }
+    None => {}
+  }
+  Ok(ok)
+}
+
+/// The last check before this one, or nothing for a target that has only
+/// been checked once.
+fn store_wasOk(target: String) -> Option<Bool> {
+  match wasOk(target) {
+    Ok(was) => was
+    Err(error) => {
+      log.error("cannot read {target}'s last check: {error.message}")
+      None
+    }
+  }
+}
+
+/// Puts the change on the queue.
+///
+/// Not a `fetch` from here: whoever is told may be down too, and a check
+/// that waited for them would be a check that took as long as they do. The
+/// queue keeps trying — four times, twenty seconds apart — and what nobody
+/// could be told stays as a dead letter rather than being lost.
+fn told(target: Target, ok: Bool) {
+  if target.notify == "" {
+    return
+  }
+  let what = if ok { "up" } else { "down" }
+  match queue.send("notify", "{target.id} {what}") {
+    Ok(_) => log.info("{target.id} is {what}; told the queue")
+    Err(error) => log.error("cannot queue {target.id}'s change: {error.message}")
+  }
+}
+
+/// `POST /cron/check`: every target, every minute.
+fn checkDue(request: web.Request) -> web.Response {
+  if !fromHost(request) {
+    return answer(403, "the clock asks for this\n")
+  }
+  let watched = match targets() {
+    Ok(watched) => watched
+    Err(error) => return answer(500, "{error.message}\n")
+  }
+  var checked = 0
+  for target in watched {
+    match check(target) {
+      Ok(_) => { checked += 1 }
+      Err(error) => log.error("checking {target.id}: {error.message}")
+    }
+  }
+  // A day of checks is what the dashboard asks about; the rest is
+  // yesterday. Pruning after the answer keeps it off the minute's path.
+  match defer.run("/prune", "") {
+    Ok(_) => {}
+    Err(_) => {}
+  }
+  answer(200, "checked {checked}\n")
+}
+
+/// `POST /prune`: yesterday's checks, dropped after the minute answered.
+///
+/// Deferred rather than done in the minute's run: the clock's run should
+/// end when it has checked, and tidying is not checking.
+fn pruned(request: web.Request) -> web.Response {
+  if !fromHost(request) {
+    return answer(403, "the host asks for this\n")
+  }
+  match prune(time.nowMillis() - 7 * day()) {
+    Ok(gone) => answer(200, "dropped {gone}\n")
+    Err(error) => answer(500, "{error.message}\n")
+  }
+}
+
+/// `POST /alarm`: a target that was down, asked again sooner.
+fn rang(request: web.Request) -> web.Response {
+  if !fromHost(request) {
+    return answer(403, "the clock asks for this\n")
+  }
+  let id = request.query.get("target").unwrapOr("")
+  match target(id) {
+    Ok(Some(found)) => {
+      match check(found) {
+        Ok(ok) => answer(200, "{id} is {if ok { "up" } else { "down" }}\n")
+        Err(error) => answer(500, "{error.message}\n")
+      }
+    }
+    Ok(None) => answer(200, "{id} is not watched any more\n")
+    Err(error) => answer(500, "{error.message}\n")
+  }
+}
+
+/// `POST /check?target=`: by hand, and never beside the clock's.
+fn checkOne(request: web.Request) -> web.Response {
+  let id = request.query.get("target").unwrapOr("")
+  match target(id) {
+    Ok(Some(found)) => {
+      match check(found) {
+        Ok(ok) => answer(200, "{id} is {if ok { "up" } else { "down" }}\n")
+        Err(error) => answer(500, "{error.message}\n")
+      }
+    }
+    Ok(None) => answer(404, "no target `{id}`\n")
+    Err(error) => answer(500, "{error.message}\n")
+  }
+}
+
+/// `POST /queue/notify`: tell whoever the target names.
+///
+/// A delivery that answers 5xx is one the host tries again, so a target
+/// that cannot be told is 500 here and not a line in the log.
+fn notify(request: web.Request) -> web.Response {
+  if !fromHost(request) {
+    return answer(403, "the queue asks for this\n")
+  }
+  let parts = request.body.trim().split(" ")
+  let id = parts.get(0).unwrapOr("")
+  let what = parts.get(1).unwrapOr("")
+  let found = match target(id) {
+    Ok(Some(found)) => found
+    Ok(None) => return answer(200, "{id} is not watched any more\n")
+    Err(error) => return answer(500, "{error.message}\n")
+  }
+  if found.notify == "" {
+    return answer(200, "{id} has nowhere to tell\n")
+  }
+  // `\{` and `\}` are a literal brace: a bare one opens an interpolation.
+  let body = "\{\"target\": \"{id}\", \"state\": \"{what}\", \"at\": {time.nowMillis()}\}"
+  match fetch.request("POST", found.notify, Map.of(MapEntry(key: "content-type", value: "application/json")), body) {
+    Ok(got) => {
+      if got.status < 400 {
+        return answer(200, "told\n")
+      }
+      answer(500, "the notification answered {got.status}\n")
+    }
+    Err(error) => answer(500, "cannot tell: {error.message}\n")
+  }
+}
+
+// ------------------------------------------------------------------ targets
+
+/// `POST /targets`: `id`, `url` and an optional `notify`, as a form.
+fn addTargetFrom(request: web.Request) -> web.Response {
+  let form = text.parseForm(request.body)
+  let id = form.get("id").unwrapOr("").trim()
+  let url = form.get("url").unwrapOr("").trim()
+  let notify = form.get("notify").unwrapOr("").trim()
+  if id == "" || url == "" {
+    return answer(400, "a target is an `id` and a `url`\n")
+  }
+  if !named(id) {
+    return answer(400, "an id is letters, digits, `-` and `_`\n")
+  }
+  match addTarget(id, url, notify) {
+    Ok(_) => {}
+    Err(error) => return answer(500, "{error.message}\n")
+  }
+  // Answer now; find out whether it is up in a moment. The client asked
+  // to watch something, not to wait for it.
+  match defer.run("/check?target={id}", "") {
+    Ok(_) => {}
+    Err(error) => log.warn("cannot check {id} yet: {error.message}")
+  }
+  answer(201, "watching {id}\n")
+}
+
+/// `POST /targets/remove?target=`.
+fn removeTargetFrom(request: web.Request) -> web.Response {
+  let id = request.query.get("target").unwrapOr("")
+  match removeTarget(id) {
+    Ok(_) => answer(200, "dropped {id}\n")
+    Err(error) => answer(500, "{error.message}\n")
+  }
+}
+
+/// Whether `id` is a name and not a sentence.
+fn named(id: String) -> Bool {
+  if id.length() == 0 || id.length() > 64 {
+    return false
+  }
+  var ok = true
+  for letter in id.chars() {
+    let letters = (letter >= "a" && letter <= "z") || (letter >= "A" && letter <= "Z")
+    let fine = letters || (letter >= "0" && letter <= "9") || letter == "-" || letter == "_"
+    if !fine {
+      ok = false
+    }
+  }
+  ok
+}
+
+// ---------------------------------------------------------------- the pages
+
+/// A day, in milliseconds: the window the dashboard asks about.
+fn day() -> Int {
+  86400000
+}
+
+/// `GET /`: every target, what it is doing, and how much of the day it was
+/// up.
+fn dashboard(request: web.Request) -> web.Response {
+  let base = request.headers.get("x-forwarded-prefix").unwrapOr("")
+  let found = match statuses(time.nowMillis() - day()) {
+    Ok(found) => found
+    Err(error) => return page(500, "the store", "<p>{text.escapeHtml(error.message)}</p>")
+  }
+  var rows = Vector.of()
+  for status in found {
+    rows.push(row(base, status))
+  }
+  let table = if found.length() == 0 {
+    "<p class=quiet>Nothing is being watched yet. Add one below.</p>"
+  } else {
+    "<table><tr><th>target</th><th>state</th><th>last answer</th><th>when</th><th>a day</th><th></th></tr>{"".join(rows.freeze())}</table>"
+  }
+  page(
+    200,
+    "watch",
+    "{table}
+<h2>Watch something</h2>
+<form method=post action=\"{base}/targets\">
+  <label>name <input name=id required pattern=\"[A-Za-z0-9_-]+\"></label>
+  <label>url <input name=url type=url required></label>
+  <label>tell <input name=notify type=url placeholder=\"optional: where to POST a change\"></label>
+  <button>watch it</button>
+</form>
+<p class=quiet>Live: <a href=\"{base}/events\">server-sent events</a>, or a
+WebSocket at <code>{base}/live</code>. A target is checked every minute, and
+every half minute while it is down.</p>",
+  )
+}
+
+/// One target's line.
+fn row(base: String, status: Status) -> String {
+  let state = if status.at == 0 {
+    "<span class=\"state new\">not yet</span>"
+  } else {
+    if status.ok {
+      "<span class=\"state up\">up</span>"
+    } else {
+      "<span class=\"state down\">down</span>"
+    }
+  }
+  let said = if status.at == 0 {
+    "—"
+  } else {
+    if status.ok { "{status.status} in {status.ms} ms" } else { text.escapeHtml(status.why) }
+  }
+  let when = if status.at == 0 { "—" } else { text.isoTime(status.at) }
+  "<tr><td><a href=\"{base}/history?target={status.target}\">{text.escapeHtml(status.target)}</a>
+   <div class=quiet>{text.escapeHtml(status.url)}</div></td>
+   <td>{state}</td><td>{said}</td><td>{when}</td><td>{uptime(status)}</td>
+   <td><form method=post action=\"{base}/check?target={status.target}\"><button>check now</button></form></td></tr>"
+}
+
+/// How much of the window was good, as a percentage.
+fn uptime(status: Status) -> String {
+  if status.checks == 0 {
+    return "—"
+  }
+  let tenths = (status.good * 1000) / status.checks
+  "{tenths / 10}.{tenths % 10}% of {status.checks}"
+}
+
+/// `GET /history?target=`.
+fn historyPage(request: web.Request) -> web.Response {
+  let base = request.headers.get("x-forwarded-prefix").unwrapOr("")
+  let id = request.query.get("target").unwrapOr("")
+  let checks = match history(id, 100) {
+    Ok(checks) => checks
+    Err(error) => return page(500, "the store", "<p>{text.escapeHtml(error.message)}</p>")
+  }
+  var rows = Vector.of()
+  for check in checks {
+    let said = if check.ok { "{check.status}" } else { text.escapeHtml(check.why) }
+    let state = if check.ok { "up" } else { "down" }
+    rows.push(
+      "<tr><td>{text.isoTime(check.at)}</td><td><span class=\"state {state}\">{state}</span></td>
+       <td>{said}</td><td>{check.ms} ms</td></tr>",
+    )
+  }
+  page(
+    200,
+    "{id}",
+    "<p><a href=\"{base}/\">← every target</a></p>
+     <h2>{text.escapeHtml(id)}</h2>
+     <table><tr><th>when</th><th>state</th><th>answer</th><th>took</th></tr>
+     {"".join(rows.freeze())}</table>",
+  )
+}
+
+// --------------------------------------------------------- as it happens
+
+/// `GET /events`: the dashboard's numbers as server-sent events.
+///
+/// The run writes its answer as it goes and parks between lines, so a
+/// browser left open on this costs a parked run and no worker. It ends
+/// with the run's deadline, and a browser reconnects by itself — which is
+/// what makes a deadline the right bound for it.
+fn events() -> web.Response {
+  match stream.open(
+    200,
+    Map.of(
+      MapEntry(key: "content-type", value: "text/event-stream"),
+      MapEntry(key: "cache-control", value: "no-store"),
+    ),
+  ) {
+    Ok(_) => {}
+    Err(error) => return answer(500, "{error.message}\n")
+  }
+  var sent = 0
+  var open = true
+  while open && sent < 30 {
+    match stream.send("data: {summary()}\n\n") {
+      Ok(_) => { sent += 1 }
+      Err(_) => { open = false }
+    }
+    if open {
+      timer.sleep(2000)
+    }
+  }
+  answer(200, "")
+}
+
+/// `GET /live`: the same over a WebSocket, which also takes commands.
+///
+/// `status` answers the summary and `check <target>` runs one, so this is
+/// the console a person watching a deploy actually wants: one connection,
+/// both directions, and no page to refresh.
+fn live() -> web.Response {
+  match socket.accept() {
+    Ok(_) => {}
+    Err(error) => return answer(400, "{error.message}\n")
+  }
+  match socket.send(summary()) {
+    Ok(_) => {}
+    Err(_) => return answer(200, "")
+  }
+  var open = true
+  while open {
+    match socket.receive() {
+      Ok(said) => {
+        let parts = said.trim().split(" ")
+        let command = parts.get(0).unwrapOr("")
+        let said = if command == "status" {
+          summary()
+        } else {
+          if command == "check" {
+            checked(parts.get(1).unwrapOr(""))
+          } else {
+            "say `status`, or `check <target>`"
+          }
+        }
+        match socket.send(said) {
+          Ok(_) => {}
+          Err(_) => { open = false }
+        }
+      }
+      Err(_) => { open = false }
+    }
+  }
+  answer(200, "")
+}
+
+/// Checks one target for the console, by name.
+fn checked(id: String) -> String {
+  match target(id) {
+    Ok(Some(found)) => {
+      match check(found) {
+        Ok(ok) => "{id} is {if ok { "up" } else { "down" }}"
+        Err(error) => "{id}: {error.message}"
+      }
+    }
+    Ok(None) => "no target `{id}`"
+    Err(error) => "{error.message}"
+  }
+}
+
+/// Every target and its state, in one line.
+fn summary() -> String {
+  match statuses(time.nowMillis() - day()) {
+    Ok(found) => {
+      if found.length() == 0 {
+        return "nothing is watched"
+      }
+      var parts = Vector.of()
+      for status in found {
+        let state = if status.at == 0 {
+          "?"
+        } else {
+          if status.ok { "up" } else { "down" }
+        }
+        parts.push("{status.target}={state}")
+      }
+      " ".join(parts.freeze())
+    }
+    Err(error) => "the store: {error.message}"
+  }
+}
+
+// ----------------------------------------------------------------- answers
+
+fn answer(status: Int, body: String) -> web.Response {
+  web.Response(
+    status: status,
+    headers: Map.of(MapEntry(key: "content-type", value: "text/plain; charset=utf-8")),
+    body: body,
+  )
+}
+
+/// One page, around `content`. The stylesheet and the icon are files the
+/// host answers from `assets/` before this app runs.
+fn page(status: Int, title: String, content: String) -> web.Response {
+  let body = "<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content=\"width=device-width,initial-scale=1\">
+<title>{text.escapeHtml(title)} · watch</title>
+<link rel=stylesheet href=\"style.css\"><link rel=icon href=\"favicon.svg\" type=\"image/svg+xml\">
+</head><body><header><strong>watch</strong> — what is up, and what is not</header>
+<main>{content}</main></body></html>"
+  web.Response(
+    status: status,
+    headers: Map.of(
+      MapEntry(key: "content-type", value: "text/html; charset=utf-8"),
+      MapEntry(key: "content-security-policy", value: "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'"),
+      MapEntry(key: "x-content-type-options", value: "nosniff"),
+    ),
+    body: body,
+  )
+}

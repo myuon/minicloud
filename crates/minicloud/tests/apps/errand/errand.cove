@@ -18,6 +18,10 @@ export fn handle(request: web.Request) -> web.Response {
       return answer(403, "not the host")
     }
     log.info("worked on {request.body}")
+    match kv.put("asked-for", "{request.path} about={request.query.get("about").unwrapOr("-")} n={request.query.get("n").unwrapOr("-")}") {
+      Ok(_) => {}
+      Err(_) => {}
+    }
     return match kv.increment("done", 1) {
       Ok(now) => answer(200, "{now}")
       Err(error) => answer(507, error.message)
@@ -25,6 +29,15 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if request.path == "/fail" {
     return answer(500, "this deferred run fails")
+  }
+  if request.path == "/asked-for" {
+    return answer(200, kv.get("asked-for").unwrapOr(""))
+  }
+  if request.path == "/ask-with-query" {
+    return match defer.run("/work?about=a%20thing&n=2", "with a query") {
+      Ok(_) => answer(202, "asked")
+      Err(error) => answer(429, error.message)
+    }
   }
   if request.path == "/ask" {
     return match defer.run("/work", "once") {
