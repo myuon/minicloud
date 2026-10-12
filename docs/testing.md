@@ -74,7 +74,9 @@ so, and what it asserts is counted.
   the env lacks is refused with its reason and changes no file; rollback
   restores the kept version and a second undoes it; both need the token;
   `minicloud deploy` from a directory and from stdin, and `--into`;
-  `deploy/smoke.sh` (CI, Linux) checks the release packages `admin` alone,
+  `deploy/smoke.sh` (CI, Linux) checks that a release carrying a newer copy
+  of an installed app says so and does not deploy it, and says nothing once
+  it has been asked to (#37); that the release packages `admin` alone,
   `install.sh` deploys it by default and refuses an example asked for as a
   bundled app, pointing at `examples/`, leaves an app that is not the
   release's alone (the examples, deployed from `examples/`) and refuses to
