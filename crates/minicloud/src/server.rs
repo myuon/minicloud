@@ -20,6 +20,10 @@
 //! | the app has `max_queued` requests waiting | 429, `Retry-After: 1` |
 //! | the server has `--max-in-flight` requests admitted | 503, `Retry-After: 1` |
 //!
+//! And what is *answered* here, before anything runs: a `GET` or `HEAD`
+//! whose path names a file in the app's `assets/` directory
+//! ([`crate::assets`]), with the bytes or a `304`.
+//!
 //! A second listener, the **admin** one ([`crate::admin`]), takes updates.
 //! An update loads the new version off the request path and switches the
 //! app's route to it only if it loaded; see [`Host::update`].
@@ -514,6 +518,22 @@ impl Front {
             return Reply::text(503, format!("app `{}` was not loaded: {why}\n", app.name));
         }
 
+        // The app's own files, answered here: no queue, no isolate, no run
+        // ([`crate::assets`]). A `GET` or a `HEAD` whose path names one of
+        // them never reaches `handle`; any other method, and any path that
+        // names no file, goes on as before, so a `POST` to the path of a
+        // file is the app's to answer.
+        let method = request.method().clone();
+        if method == hyper::Method::GET || method == hyper::Method::HEAD {
+            if let Some(asset) = app.assets.get(&route.path) {
+                let none_match = request
+                    .headers()
+                    .get(hyper::header::IF_NONE_MATCH)
+                    .and_then(|value| value.to_str().ok());
+                return asset_reply(asset, none_match, &app);
+            }
+        }
+
         let limit = app.limits.max_request_bytes;
         let too_large = || {
             app.counters.rejected(Rejection::TooLarge);
@@ -533,7 +553,7 @@ impl Front {
         if declared.is_some_and(|length| length > limit as u64) {
             return too_large();
         }
-        let method = request.method().as_str().to_string();
+        let method = method.as_str().to_string();
         let query: BTreeMap<String, String> = request
             .uri()
             .query()
@@ -670,7 +690,7 @@ impl Front {
             return Reply {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
-                body: ops::page(&self.ops()),
+                body: Bytes::from(ops::page(&self.ops())),
             };
         }
         if let Some(name) = path
@@ -996,7 +1016,7 @@ pub(crate) fn json_reply(value: &Json) -> Reply {
     Reply {
         status: 200,
         headers: vec![("content-type".into(), "application/json".into())],
-        body,
+        body: Bytes::from(body),
     }
 }
 
@@ -1018,19 +1038,50 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// One of an app's static files as the reply: the bytes, or `304 Not
+/// Modified` when the client already has them.
+///
+/// The headers are the host's, not the app's: the content type from the
+/// file's extension, a strong `etag` over its bytes, the `cache-control`
+/// `[assets]` asks for, and `nosniff` — the type is known, so a browser must
+/// not guess another. `x-cove-app-version` names the version the file came
+/// with, as it names the version that answered a run.
+fn asset_reply(asset: &crate::assets::Asset, if_none_match: Option<&str>, app: &App) -> Reply {
+    let modified = !if_none_match.is_some_and(|tags| asset.matches(tags));
+    app.counters.asset(modified);
+    let mut reply = Reply {
+        status: if modified { 200 } else { 304 },
+        headers: vec![
+            ("etag".to_string(), asset.etag.clone()),
+            (
+                "cache-control".to_string(),
+                app.asset_policy.cache_control.clone(),
+            ),
+            ("x-content-type-options".to_string(), "nosniff".to_string()),
+            ("x-cove-app-version".to_string(), app.version.clone()),
+        ],
+        body: Bytes::new(),
+    };
+    if modified {
+        reply
+            .headers
+            .push(("content-type".to_string(), asset.content_type.to_string()));
+        reply.body = asset.bytes.clone();
+    }
+    reply
+}
+
 /// A reply as the hyper response.
 pub(crate) fn to_response(reply: Reply) -> Response<Full<Bytes>> {
     let mut builder = Response::builder().status(reply.status);
     for (name, value) in &reply.headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
-    builder
-        .body(Full::new(Bytes::from(reply.body)))
-        .unwrap_or_else(|error| {
-            let mut response = Response::new(Full::new(Bytes::from(format!(
-                "minicloud: cannot build the response: {error}\n"
-            ))));
-            *response.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
-            response
-        })
+    builder.body(Full::new(reply.body)).unwrap_or_else(|error| {
+        let mut response = Response::new(Full::new(Bytes::from(format!(
+            "minicloud: cannot build the response: {error}\n"
+        ))));
+        *response.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+        response
+    })
 }

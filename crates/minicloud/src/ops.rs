@@ -58,9 +58,10 @@ pub struct OpsContext<'a> {
 }
 
 /// The keys summed into the stats' `totals`.
-const TOTALS: [&str; 14] = [
+const TOTALS: [&str; 15] = [
     "served",
     "ok",
+    "assets_served",
     "in_flight",
     "queued",
     "parked",
@@ -112,6 +113,16 @@ pub fn app_json(context: &OpsContext, slot: &Slot) -> Json {
                     "max_queued": app.limits.max_queued,
                 }),
             );
+            if !app.assets.is_empty() {
+                object.insert(
+                    "assets".into(),
+                    json!({
+                        "files": app.assets.len(),
+                        "bytes": app.assets.bytes(),
+                        "max_bytes": app.asset_policy.max_bytes,
+                    }),
+                );
+            }
             if app.granted.contains("kv") {
                 let usage = context
                     .data
@@ -317,7 +328,8 @@ pub fn page(context: &OpsContext) -> String {
         html.push_str(&format!("<th>{title}</th>"));
     }
     html.push_str(
-        "<th>errors</th><th>cancelled</th><th>rejected</th><th>kv</th><th>fetch</th></tr>",
+        "<th>errors</th><th>cancelled</th><th>rejected</th><th>assets</th><th>kv</th>\
+         <th>fetch</th></tr>",
     );
     let apps = stats["apps"].as_object().cloned().unwrap_or_default();
     for (name, app) in &apps {
@@ -336,6 +348,17 @@ pub fn page(context: &OpsContext) -> String {
             .as_object()
             .map(|e| e.values().filter_map(Json::as_u64).sum())
             .unwrap_or_default();
+        let assets = if app["assets"].is_object() {
+            format!(
+                "{} file(s), {} bytes, {} answered ({} not modified)",
+                cell(&app["assets"]["files"]),
+                cell(&app["assets"]["bytes"]),
+                cell(&app["assets_served"]),
+                cell(&app["assets_not_modified"])
+            )
+        } else {
+            "–".to_string()
+        };
         let kv = if app["kv"].is_object() {
             format!(
                 "{} / {} keys, {} / {} bytes",
@@ -348,7 +371,8 @@ pub fn page(context: &OpsContext) -> String {
             "–".to_string()
         };
         html.push_str(&format!(
-            "<td>{errors}</td><td>{}</td><td>{rejected}</td><td>{kv}</td><td>{} calls, {} refused, {} failed</td></tr>",
+            "<td>{errors}</td><td>{}</td><td>{rejected}</td><td>{assets}</td><td>{kv}</td>\
+             <td>{} calls, {} refused, {} failed</td></tr>",
             cell(&app["errors"]["cancelled"]),
             cell(&app["fetch"]["calls"]),
             cell(&app["fetch"]["refused"]),

@@ -6,7 +6,8 @@ whole suite; the [README](../README.md#development) has the full gate CI runs.
 The tests run Cove programs, so they run optimised (`--profile checked`, as
 in Cove's own repository); a bare `cargo test` works, more slowly. The
 integration tests (`crates/minicloud/tests/host.rs`, `services.rs` and
-`updates.rs`, `deploying.rs`, `admin.rs`, `access.rs`, `secrets.rs`, and one
+`updates.rs`, `deploying.rs`, `admin.rs`, `access.rs`, `secrets.rs`,
+`assets.rs`, and one
 per real example: `webhooks.rs`, `ledger.rs`, `algo.rs`) start the host
 in-process on a free port and ask it over TCP. None asserts a duration: where
 a test needs the host in some state it waits for the host's own stats to say
@@ -91,6 +92,17 @@ so, and what it asserts is counted.
   `check --data` and `test` without the secret (on a placeholder, said); and
   the value is in none of the listener's answers, the admin pages, the stats,
   the operations views, the logs, the change history or `overrides.json`;
+- static files (`assets.rs`, and `assets.rs`'s and `config.rs`'s unit
+  tests): a file is answered with the type its extension says and the
+  host's headers while the app's `served` stays at zero; **bytes that are
+  not UTF-8 come back byte for byte**, which is the whole point of the
+  feature; an `etag` answers `304` with no body and a changed file answers
+  `200`; a path naming no file and a `POST` to a file's path reach the app;
+  a changed file is a new version and an update switches to it; an
+  `assets/` over `max_bytes`, or with a symbolic link in it, refuses that
+  app alone; the admin app's own `favicon.ico`, `favicon.svg` and
+  `style.css` are answered as they ship, its pages link the sheet rather
+  than inlining one, and its policy no longer allows an inline style;
 - the operations page escapes markup an app logs, and shows errors and KV
   usage against the quota; an app's log reaches `<data>/<app>/log.txt`;
 - Cloudflare Access (`access.rs`, against a JWKS the test serves with RSA

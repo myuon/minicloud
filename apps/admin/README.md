@@ -41,14 +41,39 @@ not a whole number, below its least value, an allowlist line that is not
 
 ## On a screen of any width
 
-The pages are one stylesheet, inline in each of them ([`pages.cove`](pages.cove),
-`css`), and no script at all: what they do on a phone, they do in CSS. Nothing
-scrolls sideways under about 760 px — each row of a wide table (the apps, the
+The pages are one stylesheet, [`assets/style.css`](assets/style.css), and
+no script at all: what they do on a phone, they do in CSS. Nothing scrolls
+sideways under about 760 px — each row of a wide table (the apps, the
 history, the secrets, an app's recent errors) becomes a card, its cells
 labelled by the column headings they lose, and the forms' fields go one to a
 line. The colours are custom properties with a `prefers-color-scheme: dark`
 set beside them, and `color-scheme` tells the browser to draw its own parts —
 the checkboxes, the scrollbars, the login prompt — to match.
+
+## `assets/`
+
+Static files the host serves itself, before a request reaches the app (issue
+#57). The directory has no `.cove` in it, so it is not a module.
+
+| file | is |
+| --- | --- |
+| `assets/style.css` | the one stylesheet every page links |
+| `assets/favicon.svg` | the icon, which scales to any size; linked by the pages |
+| `assets/favicon.ico` | the same icon at 16x16 and 32x32, as PNGs; browsers ask for `/favicon.ico` on their own |
+
+The request path is the file name: this app is reached by hostname, so the
+path arrives as it was sent, and `GET /style.css` is `assets/style.css`,
+`GET /favicon.ico` is `assets/favicon.ico`. Only `GET` and `HEAD` are
+answered from the files; a path with no file goes to the app's `handle`, as
+before. The host adds `content-type` (from the extension), `etag` and
+`cache-control: no-cache`.
+
+To draw the icon again, run `python3 apps/admin/favicon.py` from the
+repository root (standard library only). It writes both icon files.
+
+Because the stylesheet is a file, the pages no longer carry inline styles,
+and the CSP has no `'unsafe-inline'`: it is `default-src 'none'; style-src
+'self'; img-src 'self'; ...`.
 
 ## Getting in
 
@@ -80,8 +105,12 @@ the checkboxes, the scrollbars, the login prompt — to match.
   https://covtools.ramda.io`), so the main hostname's pages cannot post here
   either.
 - Every value shown is HTML-escaped; the pages carry a CSP of `default-src
-  'none'` with inline styles only — **no script at all** — `form-action
-  'self'`, `frame-ancestors 'none'`, and `no-store`.
+  'none'` with this site's own stylesheet and icon only — **no script at
+  all** — `form-action 'self'`, `frame-ancestors 'none'`, and `no-store`.
+- The files in `assets/` are answered before the app runs, so the login is
+  not in front of them: a stylesheet and an icon are public here, and
+  nothing else belongs there. On the server Cloudflare Access is in front of
+  the hostname, so they are behind it like everything else.
 - Who made a change is the verified email from the Access token (`admin
   app: you@example.com` in the history), or `token` when the secret got in.
   The unsigned `Cf-Access-Authenticated-User-Email` header is not read: any

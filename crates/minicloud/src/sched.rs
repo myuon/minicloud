@@ -797,7 +797,7 @@ impl Engine {
         let app = &flight.version;
         app.counters.error(kind);
         app.counters
-            .recent_error(kind, &app.version, reply.body.as_str());
+            .recent_error(kind, &app.version, &String::from_utf8_lossy(&reply.body));
         let reply = with_run_headers(reply, &flight, meter)
             .with_header(STOP_HEADER, kind.name())
             .with_header(VERSION_HEADER, app.version.as_str());
