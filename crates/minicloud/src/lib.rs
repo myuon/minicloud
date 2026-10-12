@@ -57,6 +57,7 @@ pub mod sched;
 pub mod secrets;
 pub mod series;
 pub mod server;
+pub mod socket;
 pub mod sql;
 pub mod stats;
 pub mod stream;

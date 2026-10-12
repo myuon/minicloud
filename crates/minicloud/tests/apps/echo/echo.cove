@@ -1,0 +1,59 @@
+use web
+use socket
+use log
+
+/// Says back what it hears, until the client goes.
+///
+/// `/ws` takes the socket; `/refuse` is a request that looks at the
+/// upgrade and answers an ordinary response instead; `/plain` takes no
+/// socket at all, which is how the tests see what a call without one says.
+export fn handle(request: web.Request) -> web.Response {
+  if request.path == "/plain" {
+    return match socket.send("nobody is listening") {
+      Ok(_) => answer(200, "sent")
+      Err(error) => answer(400, error.message)
+    }
+  }
+  if request.path == "/refuse" {
+    return answer(403, "not here")
+  }
+  if request.path == "/ws" {
+    match socket.accept() {
+      Ok(_) => {}
+      Err(error) => return answer(400, error.message)
+    }
+    match socket.send("hello") {
+      Ok(_) => {}
+      Err(error) => return answer(200, error.message)
+    }
+    var open = true
+    while open {
+      match socket.receive() {
+        Ok(said) => {
+          if said == "bye" {
+            match socket.send("goodbye") {
+              Ok(_) => {}
+              Err(_) => {}
+            }
+            open = false
+          } else {
+            match socket.send("you said {said}") {
+              Ok(_) => {}
+              Err(_) => { open = false }
+            }
+          }
+        }
+        Err(error) => {
+          log.info("the client went: {error.message}")
+          open = false
+        }
+      }
+    }
+    return answer(200, "")
+  }
+  answer(404, "no such path")
+}
+
+fn answer(status: Int, body: String) -> web.Response {
+  web.Response(status: status, headers: Map.of(), body: "{body}\n")
+}

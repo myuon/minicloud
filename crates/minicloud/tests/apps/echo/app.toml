@@ -1,0 +1,7 @@
+# The app the WebSocket tests are run on (issue #51): it holds the socket
+# for as long as the client speaks on it.
+grant = ["socket", "log"]
+
+[limits]
+deadline = "30s"
+max_host_calls = 200

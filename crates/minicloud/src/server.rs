@@ -656,7 +656,10 @@ impl Front {
                             .timer(TokioTimer::new())
                             .header_read_timeout(Duration::from_secs(10))
                             .max_buf_size(64 * 1024)
-                            .serve_connection(TokioIo::new(stream), service)
+                            // With upgrades, so that a `101` hands the
+                            // connection over instead of ending it
+                            // ([`crate::socket`]).
+                            .serve_connection_with_upgrades(TokioIo::new(stream), service)
                             .await;
                         }
                     }
@@ -666,6 +669,7 @@ impl Front {
                             .header_read_timeout(Duration::from_secs(10))
                             .max_buf_size(64 * 1024)
                             .serve_connection(TokioIo::new(stream), service)
+                            .with_upgrades()
                             .await;
                     }
                 }
@@ -920,6 +924,18 @@ impl Front {
             .trim_end_matches('/')
             .to_string();
         headers.insert("x-forwarded-prefix".to_string(), mount);
+        // A request that asks for a WebSocket keeps its connection, for the
+        // run to take with `socket.accept` ([`crate::socket`]). The key is
+        // the client's; the host answers it in the `101`.
+        let websocket = headers
+            .get("upgrade")
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+            .then(|| headers.get("sec-websocket-key").cloned())
+            .flatten();
+        let mut request = request;
+        let upgrade = websocket
+            .is_some()
+            .then(|| hyper::upgrade::on(&mut request));
         let body = match Limited::new(request.into_body(), limit).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => return too_large(),
@@ -963,6 +979,10 @@ impl Front {
         };
         let (reply, answer) = oneshot::channel();
         let cancel = Cancel::new();
+        let answering = crate::stream::Answering::new(reply);
+        if let (Some(upgrade), Some(key)) = (upgrade, websocket) {
+            answering.upgradable(upgrade, key);
+        }
         let start = Box::new(Start {
             request: AppRequest {
                 method,
@@ -976,7 +996,7 @@ impl Front {
                 app: index,
                 version: Arc::clone(&app),
                 accepted: Instant::now(),
-                reply: crate::stream::Answering::new(reply),
+                reply: answering,
                 cancel: cancel.clone(),
                 tally: Default::default(),
             },

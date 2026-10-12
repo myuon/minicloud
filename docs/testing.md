@@ -116,6 +116,15 @@ so, and what it asserts is counted.
   stats. `cron.rs` holds the parser and the calendar to 32 cases of their
   own — the epoch, leap days, negative seconds, the day-or-weekday rule,
   the aliases, and every way a field can be wrong;
+- a WebSocket a run holds (`socket.rs`, and `socket.rs`'s unit tests): the
+  run speaks first and answers what it hears more than once, a ping is the
+  host's to answer, and the run ends the socket when it decides to; a
+  socket being held costs no worker — another app answers throughout on a
+  single-worker host; a client that goes away is told to the run; an app
+  may refuse the upgrade like any other request; a call on a run with no
+  socket is the app's `Err`; an app not granted `socket` is refused at
+  load. The accept key is held to RFC 6455's own example and the hash to
+  the digests everyone checks a SHA-1 against;
 - an answer a run writes as it goes (`stream.rs`): the head is readable
   before the run ends and each chunk as it is sent, the response the
   handler returns afterwards is nowhere on the connection, and there are no

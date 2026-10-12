@@ -45,9 +45,18 @@ instant-acme = { version = "0.7", default-features = false, features = ["hyper-r
 # The key and the signing request an order is made with; also the TLS
 # tests' certificate.
 rcgen = "0.13"
+# The WebSocket frames, for a connection a run holds both ways
+# ([`minicloud::socket`]). No features: the host has already made the
+# connection by the time this sees it.
+tokio-tungstenite = { version = "0.24", default-features = false }
+# The handshake's accept key, and nothing else.
+base64 = "0.22"
+# `split`, so the socket task may read and write at once.
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [dev-dependencies]
-base64 = "0.22"
+# The WebSocket tests' client.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
 brotli = "8"
 rand = "0.8"
 rsa = "0.9"

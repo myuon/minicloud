@@ -106,7 +106,7 @@ pub struct HostModules {
 
 impl HostModules {
     /// `web`, `log`, `timer`, `kv`, `sql`, `defer`, `queue`, `stream`,
-    /// `keyed`, `fetch`, `time`, `random`, `auth` and `admin`.
+    /// `keyed`, `socket`, `fetch`, `time`, `random`, `auth` and `admin`.
     pub fn standard() -> HostModules {
         HostModules {
             modules: vec![
@@ -119,6 +119,7 @@ impl HostModules {
                 Arc::new(crate::queue_host::QueueModule),
                 Arc::new(crate::stream::StreamModule),
                 Arc::new(crate::keyed::KeyedModule),
+                Arc::new(crate::socket::SocketModule),
                 Arc::new(crate::fetch::FetchModule),
                 Arc::new(crate::sys::TimeModule),
                 Arc::new(crate::sys::RandomModule),
