@@ -1,0 +1,42 @@
+use web
+use kv
+use log
+use timer
+
+/// Counts the runs the host's clock starts.
+///
+/// `/tick` counts one, and only for the host: a request that arrives
+/// without `x-minicloud-trigger` is refused, which is how the tests see
+/// that the header is the host's to set and nobody else's. `/count`
+/// answers the count to anyone. `/slow` is a tick that takes long enough
+/// for the next one to find it still running, and `/boom` is one that
+/// fails.
+export fn handle(request: web.Request) -> web.Response {
+  let from = request.headers.get("x-minicloud-trigger")
+  if request.path == "/count" {
+    return answer(200, count())
+  }
+  if from.isNone() {
+    return answer(403, "not the clock")
+  }
+  if request.path == "/boom" {
+    return answer(500, "this tick fails")
+  }
+  if request.path == "/slow" {
+    timer.sleep(400)
+  }
+  let now = match kv.increment("ticks", 1) {
+    Ok(value) => value
+    Err(error) => return answer(507, error.message)
+  }
+  log.info("tick {now} from {from.unwrapOr("?")}")
+  answer(200, "{now}")
+}
+
+fn count() -> String {
+  kv.get("ticks").unwrapOr("0")
+}
+
+fn answer(status: Int, body: String) -> web.Response {
+  web.Response(status: status, headers: Map.of(), body: "{body}\n")
+}

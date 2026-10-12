@@ -12,7 +12,8 @@ apps are served round robin, so one busy app cannot starve the rest.
 
 Files an app serves as they are — a stylesheet, an icon — go in an
 **`assets/` directory** beside its code and are answered by the host, bytes
-and all, before the app runs.
+and all, before the app runs. An app that must run on its own asks for a
+**schedule** (`[[triggers]]`), and the host makes the request itself.
 
 Each app gets only the **capabilities** its `app.toml` grants (logging,
 timers, a persistent key-value store, outbound HTTP to an allowlist, the
@@ -212,6 +213,11 @@ max_response_bytes = 4194304    # the decoded body
 # [fetch.headers."https://api.openai.com"]   # a secret the host adds as a header
 # authorization = { secret = "openai", prefix = "Bearer " }
 
+[[triggers]]                    # the host runs the app itself, on a schedule
+cron = "0 * * * *"              # UTC, to the minute; or @hourly, @daily, @weekly, …
+path = "/cron/hourly"           # the path the run is given; `/` by default
+method = "POST"                 # the method it is given
+
 [assets]                        # the app's `assets/` directory, answered by the host
 max_bytes = 8388608             # its files together; a larger one refuses the app
 cache_control = "no-cache"      # what every one of them is answered with
@@ -281,6 +287,52 @@ it; every other app serves. The load line says what an app has:
 ```console
   admin      v1-17e8cb08  requires [admin, auth]  granted [admin, auth]  ok: 329 fn on native, checked in 24.1 ms, prepared in 19.9 ms, 3 file(s) in assets/ (10182 bytes)
 ```
+
+### Running on a schedule
+
+An app had one way in — a request from outside — so anything periodic was a
+crontab elsewhere calling the host. `[[triggers]]` is the host making that
+call itself:
+
+```toml
+[[triggers]]
+cron = "*/10 * * * *"
+path = "/cron/poll"
+
+[[triggers]]
+cron = "@daily"
+path = "/cron/rollup"
+```
+
+- **A trigger's run is an ordinary run**: admitted to the app's queue,
+  served round robin, sliced, parked where it waits, and stopped by the
+  app's own `deadline`, `max_host_calls` and heap. It is counted in
+  `served`, `ok` and the errors like any other, and in `trigger_runs`
+  beside them. It runs on the version current when it was admitted.
+- **The app knows who called**: the host sets `x-minicloud-trigger` to the
+  path the schedule asked for, and strips that header from every request
+  that comes off a connection, so a path meant for the clock can refuse
+  anyone else:
+
+  ```cove
+  if request.headers.get("x-minicloud-trigger").isNone() {
+    return web.Response(status: 403, headers: Map.of(), body: "not the clock\n")
+  }
+  ```
+
+  The path is otherwise an ordinary path of the app's — reachable unless the
+  app refuses it, which is also how a job is run by hand.
+- **Schedules are to the minute, in UTC.** Five fields (`minute hour day
+  month weekday`) with `*`, `*/n`, `a-b`, `a-b/n` and lists of them, or
+  `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. A day and a weekday
+  that are both given run on **either**, as cron has always done. UTC, not
+  the machine's zone: midnight in Tokyo is `0 15 * * *`.
+- **A tick is let go by rather than doubled**: a schedule whose last run has
+  not finished counts `trigger_skipped` and does not start a second. A
+  minute the host was not running for does not happen later.
+- At most 16 schedules an app, and `method` is `POST` unless it says
+  otherwise. A `cron` that does not parse refuses the app at load, naming
+  the key, and every other app serves.
 
 ### Host modules
 
@@ -625,8 +677,9 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms`, `heap_peak_words`,
 `fetch`, `kv` usage against its quota, `assets` (how many files and how many
-bytes) with `assets_served` and `assets_not_modified`, `updates` and
-`versions_alive`; the full list is in
+bytes) with `assets_served` and `assets_not_modified`, `triggers` (each
+schedule and when it is next due) with `trigger_runs`, `trigger_skipped` and
+`trigger_failed`, `updates` and `versions_alive`; the full list is in
 [`ops.rs`](crates/minicloud/src/ops.rs).
 
 ### Response headers

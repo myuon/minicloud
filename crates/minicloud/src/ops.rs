@@ -113,6 +113,28 @@ pub fn app_json(context: &OpsContext, slot: &Slot) -> Json {
                     "max_queued": app.limits.max_queued,
                 }),
             );
+            if !app.triggers.is_empty() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs() as i64);
+                let at = crate::cron::Minute::from_unix(now);
+                object.insert(
+                    "triggers".into(),
+                    json!(app
+                        .triggers
+                        .iter()
+                        .map(|trigger| json!({
+                            "cron": trigger.cron.as_str(),
+                            "method": trigger.method,
+                            "path": trigger.path,
+                            "next_unix_ms": trigger
+                                .cron
+                                .next_after(at)
+                                .map(|next| next.to_unix() * 1000),
+                        }))
+                        .collect::<Vec<Json>>()),
+                );
+            }
             if !app.assets.is_empty() {
                 object.insert(
                     "assets".into(),
@@ -328,8 +350,8 @@ pub fn page(context: &OpsContext) -> String {
         html.push_str(&format!("<th>{title}</th>"));
     }
     html.push_str(
-        "<th>errors</th><th>cancelled</th><th>rejected</th><th>assets</th><th>kv</th>\
-         <th>fetch</th></tr>",
+        "<th>errors</th><th>cancelled</th><th>rejected</th><th>triggers</th><th>assets</th>\
+         <th>kv</th><th>fetch</th></tr>",
     );
     let apps = stats["apps"].as_object().cloned().unwrap_or_default();
     for (name, app) in &apps {
@@ -348,6 +370,20 @@ pub fn page(context: &OpsContext) -> String {
             .as_object()
             .map(|e| e.values().filter_map(Json::as_u64).sum())
             .unwrap_or_default();
+        let triggers = match app["triggers"].as_array() {
+            Some(list) if !list.is_empty() => format!(
+                "{}: {} run, {} skipped, {} failed",
+                list.iter()
+                    .filter_map(|t| t["cron"].as_str())
+                    .map(escape)
+                    .collect::<Vec<String>>()
+                    .join(", "),
+                cell(&app["trigger_runs"]),
+                cell(&app["trigger_skipped"]),
+                cell(&app["trigger_failed"])
+            ),
+            _ => "–".to_string(),
+        };
         let assets = if app["assets"].is_object() {
             format!(
                 "{} file(s), {} bytes, {} answered ({} not modified)",
@@ -371,7 +407,8 @@ pub fn page(context: &OpsContext) -> String {
             "–".to_string()
         };
         html.push_str(&format!(
-            "<td>{errors}</td><td>{}</td><td>{rejected}</td><td>{assets}</td><td>{kv}</td>\
+            "<td>{errors}</td><td>{}</td><td>{rejected}</td><td>{triggers}</td>\
+             <td>{assets}</td><td>{kv}</td>\
              <td>{} calls, {} refused, {} failed</td></tr>",
             cell(&app["errors"]["cancelled"]),
             cell(&app["fetch"]["calls"]),

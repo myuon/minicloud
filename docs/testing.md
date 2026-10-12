@@ -7,7 +7,7 @@ The tests run Cove programs, so they run optimised (`--profile checked`, as
 in Cove's own repository); a bare `cargo test` works, more slowly. The
 integration tests (`crates/minicloud/tests/host.rs`, `services.rs` and
 `updates.rs`, `deploying.rs`, `admin.rs`, `access.rs`, `secrets.rs`,
-`assets.rs`, and one
+`assets.rs`, `triggers.rs`, and one
 per real example: `webhooks.rs`, `ledger.rs`, `algo.rs`) start the host
 in-process on a free port and ask it over TCP. None asserts a duration: where
 a test needs the host in some state it waits for the host's own stats to say
@@ -92,6 +92,18 @@ so, and what it asserts is counted.
   `check --data` and `test` without the secret (on a placeholder, said); and
   the value is in none of the listener's answers, the admin pages, the stats,
   the operations views, the logs, the change history or `overrides.json`;
+- schedules (`triggers.rs`, and `cron.rs`'s and `config.rs`'s unit tests):
+  a schedule runs the app in the minute it names and in no other, a minute
+  fires once however often the clock is asked, and the run is counted in
+  `served` and `ok` like any other; a client that sends
+  `x-minicloud-trigger` itself is still refused by an app that only answers
+  the clock; a tick whose last run has not finished is let go by and
+  counted, and the schedule runs again once it has; a failing tick is
+  counted and named in the app's log; a `cron` that does not parse refuses
+  that app alone; the schedules and when they are next due are in the
+  stats. `cron.rs` holds the parser and the calendar to 32 cases of their
+  own — the epoch, leap days, negative seconds, the day-or-weekday rule,
+  the aliases, and every way a field can be wrong;
 - static files (`assets.rs`, and `assets.rs`'s and `config.rs`'s unit
   tests): a file is answered with the type its extension says and the
   host's headers while the app's `served` stays at zero; **bytes that are

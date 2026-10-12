@@ -1,0 +1,8 @@
+# The app the trigger tests are run on (issue #56). The tests write their
+# own `app.toml` with the `[[triggers]]` each of them needs; this one is
+# what `minicloud check` and `test` see, and it has no schedule, so nothing
+# of it runs on its own.
+grant = ["kv", "log", "timer"]
+
+[limits]
+deadline = "10s"
