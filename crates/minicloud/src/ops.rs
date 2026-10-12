@@ -6,6 +6,7 @@
 //! | `GET /_host/stats` | every app's counters, gauges, version and store usage, and the server's |
 //! | `GET /_host/apps/<app>` | one app: the same, its versions, and its recent errors |
 //! | `GET /_host/apps/<app>/logs?n=` | its recent log lines, as text |
+//! | `GET /_host/apps/<app>/logs?follow=1` | the same, and then every line as it is written, as server-sent events |
 //! | `GET /_host/ui` | a page of all of it; every value from an app is escaped |
 //!
 //! They are read-only and unauthenticated. Where they are served is
@@ -17,7 +18,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
+
+use bytes::Bytes;
 
 use serde_json::{json, Map, Value as Json};
 
@@ -75,6 +79,69 @@ const TOTALS: [&str; 15] = [
     "worker_ms",
     "updates",
 ];
+
+/// How often a following answer writes a comment to keep the connection
+/// through a proxy from being closed as idle. Server-sent events ignore a
+/// line that starts with `:`.
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `GET /_host/apps/<app>/logs?follow=1`: the last `n` lines, then every
+/// line as it is written, as server-sent events.
+///
+/// The answer never ends on its own. It ends when the client goes away,
+/// which the send on the body's channel is what notices — there is nothing
+/// to cancel and nothing to clean up but the task itself.
+pub fn follow(slot: &Arc<Slot>, n: usize) -> hyper::Response<crate::server::OutBody> {
+    let (chunks, body) = tokio::sync::mpsc::channel(64);
+    let mut live = slot.logs.follow();
+    let backlog = slot.logs.tail(n);
+    let name = slot.name.clone();
+    tokio::spawn(async move {
+        let opening = format!(
+            ": following `{name}`; the last {} line(s) first\n\n",
+            backlog.lines().count()
+        );
+        if chunks.send(Bytes::from(opening)).await.is_err() {
+            return;
+        }
+        for line in backlog.lines() {
+            if chunks.send(event(line)).await.is_err() {
+                return;
+            }
+        }
+        loop {
+            let next = tokio::time::timeout(HEARTBEAT, live.recv()).await;
+            let chunk = match next {
+                Ok(Ok(line)) => event(&line),
+                // Past the ring's backlog: say so rather than leave a hole.
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(missed))) => Bytes::from(
+                    format!(": {missed} line(s) missed; the log outran this\n\n"),
+                ),
+                // The app and its ring are gone: an app that was removed.
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
+                Err(_elapsed) => Bytes::from_static(b": ping\n\n"),
+            };
+            if chunks.send(chunk).await.is_err() {
+                return;
+            }
+        }
+    });
+    crate::server::to_streamed(
+        200,
+        &[
+            ("content-type", "text/event-stream; charset=utf-8"),
+            ("cache-control", "no-store"),
+            // Tells nginx not to buffer an answer it would otherwise hold.
+            ("x-accel-buffering", "no"),
+        ],
+        body,
+    )
+}
+
+/// One line as a server-sent event.
+fn event(line: &str) -> Bytes {
+    Bytes::from(format!("data: {line}\n\n"))
+}
 
 /// One app's entry: counters, gauges, and what its current version is.
 pub fn app_json(context: &OpsContext, slot: &Slot) -> Json {

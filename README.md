@@ -513,8 +513,8 @@ in flight — queued, running, yielded or parked — finish on the version they
 were admitted to; the old version is dropped with its last request. The
 app's store, log and counters carry over.
 
-The other admin subcommands are `remove`, `enable`, `disable`, `reset` and
-`secret` ([Operating](#operating)); `minicloud <command> --help` describes
+The other admin subcommands are `remove`, `enable`, `disable`, `reset`,
+`logs` and `secret` ([Operating](#operating)); `minicloud <command> --help` describes
 each. The listener's HTTP endpoints are listed in
 [docs/design.md](docs/design.md#updates-and-versions).
 
@@ -715,6 +715,7 @@ token` secret is the way in. See
 | `GET /_host/stats` | every app's counters as JSON, with the server's totals |
 | `GET /_host/apps/<app>` | one app as JSON: its limits, every version it has had, its last 50 errors, and on the native tier which functions stayed on the VM and why |
 | `GET /_host/apps/<app>/logs?n=200` | its recent log lines, as text |
+| `GET /_host/apps/<app>/logs?follow=1` | those, and then every line as it is written: server-sent events, until the client goes away |
 
 They are read-only and unauthenticated, on the public listener by default.
 With `--ops-listener admin` (as deployed) the public listener answers 404
@@ -781,7 +782,21 @@ diagnostic, with the source line.
 An app's `log` lines and the host's lines about it (a failed request, an
 update, a run that would not yield) are kept in memory (the last 1,000, at
 `/_host/apps/<app>/logs`) and written to `<data>/<app>/log.txt`, rotated to
-`log.1.txt` past 1 MiB. Without `--quiet`, `log` lines also go to stdout; the
+`log.1.txt` past 1 MiB. **`minicloud logs <app>`** prints the last of them
+through the admin listener, and `--follow` keeps the connection open and
+prints every line as it happens:
+
+```console
+$ minicloud logs notes -n 20
+$ minicloud logs notes --follow
+1791803880.369 info: stored todo
+```
+
+It is the admin listener's `GET /apps/<app>/logs?follow=1` and the
+operations view's `?follow=1`, both server-sent events; the host writes a
+`: ping` comment every 15 s so that a proxy does not close an idle
+connection, and says so if a reader falls more than 1,000 lines behind
+rather than leaving a hole. Without `--quiet`, `log` lines also go to stdout; the
 host's own messages go to stderr — on the server, `journalctl -u cove-tools`.
 The admin app shows the same ring, a line at a time with its level
 (`/apps/<app>/logs`), so the lines are there in a browser as well.

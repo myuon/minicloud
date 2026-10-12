@@ -19,6 +19,7 @@
 //! | `GET /apps` | the stats, as `GET /_host/stats` |
 //! | `GET /changes?n=50` | the change history, newest first, as JSON |
 //! | `GET /secrets` | the secret store ([`crate::secrets`]), as JSON: each secret stored or used — `name`, `set`, `updated_ms`, `apps` (those that use it) — **never a value** |
+//! | `GET /apps/<app>/logs?n=&follow=1` | its recent log lines as text, or — with `follow` — those and every line as it is written, as server-sent events (`minicloud logs`) |
 //! | `PUT /secrets/<name>` | body: the value. Stores it (mode 0600, atomically), then reloads every app that uses it. 200 with each app's reload; 422 for a name or value refused |
 //! | `DELETE /secrets/<name>` | removes it. 409 while an app uses it, unless `?force=1`, which reloads those apps without it (they are refused); 404 if it is not set |
 //!
@@ -38,8 +39,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -76,8 +76,77 @@ pub(crate) async fn serve(front: Arc<Front>, listener: tokio::net::TcpListener) 
     }
 }
 
-async fn handle(front: &Front, request: Request<Incoming>) -> Response<Full<Bytes>> {
+async fn handle(front: &Front, request: Request<Incoming>) -> Response<crate::server::OutBody> {
+    // The operations views are on this listener with `--ops-listener
+    // admin`, and the one that follows a log is written as it goes.
+    // `GET /apps/<app>/logs?follow=1`, with the token: `minicloud logs
+    // --follow`, which does not depend on where the operations views are.
+    if request.method() == Method::GET && authorized(front, &request) {
+        if let Some(streamed) = follow_app_logs(front, request.uri()) {
+            return streamed;
+        }
+    }
+    if front.options.ops_listener == OpsListener::Admin
+        && request.method() == Method::GET
+        && is_loopback_host(
+            request
+                .headers()
+                .get(hyper::header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+        )
+    {
+        if let Some(streamed) = front.follow_logs(request.uri()) {
+            return streamed;
+        }
+    }
     to_response(reply(front, request).await)
+}
+
+/// How many lines `?n=` asks for, bounded by what the ring keeps.
+fn log_lines(uri: &hyper::Uri) -> usize {
+    uri.query()
+        .and_then(|query| {
+            form_urlencoded::parse(query.as_bytes())
+                .find(|(key, _)| key == "n")
+                .and_then(|(_, n)| n.parse().ok())
+        })
+        .unwrap_or(200)
+        .min(crate::logs::LOG_LINES)
+}
+
+/// `GET /apps/<app>/logs?follow=1`, the admin listener's own, answered as
+/// the operations view is ([`crate::ops::follow`]).
+fn follow_app_logs(front: &Front, uri: &hyper::Uri) -> Option<Response<crate::server::OutBody>> {
+    let name = uri.path().strip_prefix("/apps/")?.strip_suffix("/logs")?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let follows = uri.query().is_some_and(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .any(|(key, value)| key == "follow" && (value == "1" || value == "true"))
+    });
+    if !follows {
+        return None;
+    }
+    match front.engine.slot_named(name) {
+        Some(slot) => Some(crate::ops::follow(&slot, log_lines(uri))),
+        None => Some(to_response(Reply::text(
+            404,
+            format!("no app named `{name}`\n"),
+        ))),
+    }
+}
+
+/// Whether the request presents the admin token.
+fn authorized(front: &Front, request: &Request<Incoming>) -> bool {
+    let presented = request
+        .headers()
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    !front.admin_token.is_empty() && same(presented.trim(), &front.admin_token)
 }
 
 async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
@@ -99,13 +168,7 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
         }
         return front.ops_reply(request.uri().path(), request.uri().query());
     }
-    let presented = request
-        .headers()
-        .get(hyper::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    if front.admin_token.is_empty() || !same(presented.trim(), &front.admin_token) {
+    if !authorized(front, &request) {
         return Reply::text(
             401,
             "minicloud admin: a valid `Authorization: Bearer <token>` is required\n",
@@ -137,6 +200,12 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
     });
     match (method, path.as_str()) {
         (Method::GET, "/apps") => json_reply(&ops::stats(&front_ops(front))),
+        (Method::GET, _) if verb == "logs" && !name.is_empty() => {
+            match front.engine.slot_named(&name) {
+                Some(slot) => Reply::text(200, slot.logs.tail(log_lines(request.uri()))),
+                None => Reply::text(404, format!("no app named `{name}`\n")),
+            }
+        }
         (Method::GET, "/changes") => {
             let n = request
                 .uri()
