@@ -78,6 +78,15 @@ enum Command {
         /// `--public-origin`, apps are told `http` and the request's `Host`.
         #[arg(long)]
         trust_proxy: bool,
+        /// The certificate chain the public listener serves, leaf first, in
+        /// PEM. With `--tls-key`, the host terminates TLS itself and
+        /// speaks HTTP/2 as well; without both, it is plain HTTP for a
+        /// proxy in front. SIGHUP reads the pair again, for a renewal.
+        #[arg(long, value_name = "FILE", requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// The private key for `--tls-cert`, in PEM.
+        #[arg(long, value_name = "FILE", requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
         /// On SIGTERM or Ctrl-C, how long to wait for requests in flight, in
         /// seconds; new ones are answered 503 meanwhile.
         #[arg(long, default_value_t = 10.0)]
@@ -404,6 +413,8 @@ fn main() -> ExitCode {
             ops_listener,
             public_origin,
             trust_proxy,
+            tls_cert,
+            tls_key,
             shutdown_grace,
         } => {
             let mut options = ServeOptions::new(apps);
@@ -423,6 +434,10 @@ fn main() -> ExitCode {
             options.forwarding = Forwarding {
                 public_origin,
                 trust_proxy,
+            };
+            options.tls = match (tls_cert, tls_key) {
+                (Some(cert), Some(key)) => Some(minicloud::tls::Pair { cert, key }),
+                _ => None,
             };
             eprintln!("minicloud: loading apps from {}", options.apps.display());
             let host = match Host::start(options) {

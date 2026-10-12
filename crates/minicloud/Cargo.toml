@@ -22,8 +22,18 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # SQL is bounded ([`minicloud::sql`]); `limits` caps what one statement may be.
 rusqlite = { version = "0.32", features = ["bundled", "hooks", "limits"] }
 http-body-util = "0.1"
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+# `http2` is for the connections the host terminates TLS on itself
+# ([`minicloud::tls`]); a plain connection is still HTTP/1.1.
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+# Response compression: the bodies are already whole, so one pass over one
+# buffer is the whole of it.
+flate2 = "1"
+# TLS the host terminates itself, so that a certificate and a key are all
+# it needs to be reached directly.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tar = { version = "0.4", default-features = false }
@@ -33,8 +43,9 @@ jsonwebtoken = "9"
 
 [dev-dependencies]
 base64 = "0.22"
+# A certificate for the TLS tests, written as a renewal would write one.
+rcgen = "0.13"
 brotli = "8"
-flate2 = "1"
 rand = "0.8"
 rsa = "0.9"
 

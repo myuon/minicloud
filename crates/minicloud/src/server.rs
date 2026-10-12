@@ -95,6 +95,10 @@ pub struct ServeOptions {
     /// What apps are told of the client's scheme and host
     /// (`--public-origin`, `--trust-proxy`).
     pub forwarding: Forwarding,
+    /// The certificate and key the public listener terminates TLS with
+    /// (`--tls-cert`, `--tls-key`); `None` is plain HTTP, for a host
+    /// behind a proxy that holds them ([`crate::tls`]).
+    pub tls: Option<crate::tls::Pair>,
 }
 
 impl ServeOptions {
@@ -116,6 +120,7 @@ impl ServeOptions {
             admin_token: None,
             ops_listener: OpsListener::Public,
             forwarding: Forwarding::default(),
+            tls: None,
         }
     }
 }
@@ -149,6 +154,8 @@ pub(crate) struct Front {
     pub(crate) admin_token: String,
     /// Set by [`Host::shutdown`]: new requests are answered 503.
     draining: AtomicBool,
+    /// What the public listener accepts with, when it terminates TLS.
+    pub(crate) certificates: Option<Arc<crate::tls::Certificates>>,
 }
 
 /// Why an update did not happen.
@@ -284,6 +291,13 @@ impl Host {
             }
             None => None,
         };
+        // Read before anything is served: a certificate that does not read
+        // is a host that does not start, rather than one that listens and
+        // refuses every connection.
+        let certificates = match &options.tls {
+            Some(pair) => Some(Arc::new(crate::tls::Certificates::load(pair.clone())?)),
+            None => None,
+        };
         let triggers = Arc::new(crate::triggers::Triggers::new(
             Arc::clone(&engine),
             options.forwarding.clone(),
@@ -302,6 +316,7 @@ impl Host {
             control: Arc::clone(&control),
             triggers: Arc::clone(&triggers),
             rates: crate::rate::Limiter::default(),
+            certificates,
             series,
             sampled: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
@@ -425,6 +440,13 @@ impl Host {
                 OpsListener::Public => "",
             }
         ));
+        if let Some(pair) = &options.tls {
+            out.push_str(&format!(
+                "  TLS: {} with {} — HTTP/1.1 and HTTP/2; SIGHUP reads them again\n",
+                pair.cert.display(),
+                pair.key.display()
+            ));
+        }
         if let Some(origin) = &options.forwarding.public_origin {
             out.push_str(&format!("  public origin: {origin}\n"));
         } else if options.forwarding.trust_proxy {
@@ -443,6 +465,16 @@ impl Host {
         out
     }
 
+    /// Reads the TLS pair again, for a certificate that has been renewed
+    /// on disk. The pair that is serving is kept if the new one does not
+    /// read ([`crate::tls`]).
+    pub fn reload_certificates(&self) -> Result<(), String> {
+        match &self.front.certificates {
+            Some(certificates) => certificates.reload(),
+            None => Err("this host terminates no TLS".to_string()),
+        }
+    }
+
     /// Blocks until Ctrl-C (SIGINT) or, on Unix, SIGTERM — what
     /// `systemctl stop` sends.
     pub fn wait_for_signal(&self) {
@@ -454,11 +486,25 @@ impl Host {
             {
                 use tokio::signal::unix::{signal, SignalKind};
                 if let Ok(mut term) = signal(SignalKind::terminate()) {
-                    tokio::select! {
-                        _ = tokio::signal::ctrl_c() => {}
-                        _ = term.recv() => {}
+                    // SIGHUP is a renewal hook's way of saying the files
+                    // have changed; it is not a reason to stop.
+                    let mut hangup = signal(SignalKind::hangup()).ok();
+                    loop {
+                        let hung_up = async {
+                            match &mut hangup {
+                                Some(hangup) => hangup.recv().await,
+                                None => std::future::pending().await,
+                            }
+                        };
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => return,
+                            _ = term.recv() => return,
+                            _ = hung_up => match self.reload_certificates() {
+                                Ok(()) => eprintln!("minicloud: the TLS certificate was read again"),
+                                Err(why) => eprintln!("minicloud: SIGHUP: {why}"),
+                            },
+                        }
                     }
-                    return;
                 }
             }
             let _ = tokio::signal::ctrl_c().await;
@@ -497,6 +543,7 @@ content-length: 37\r\n\r\nminicloud: too many open connections\n";
 
 impl Front {
     async fn accept(self: Arc<Self>, listener: tokio::net::TcpListener) {
+        let accepting = self.certificates.clone();
         loop {
             let (mut stream, from) = match listener.accept().await {
                 Ok(accepted) => accepted,
@@ -520,18 +567,44 @@ impl Front {
                 continue;
             };
             let front = Arc::clone(&self);
+            let accepting = accepting.clone();
             tokio::spawn(async move {
                 let _ = stream.set_nodelay(true);
                 let service = service_fn(move |request| {
                     let front = Arc::clone(&front);
                     async move { Ok::<_, Infallible>(front.handle(request, from.ip()).await) }
                 });
-                let _ = http1::Builder::new()
-                    .timer(TokioTimer::new())
-                    .header_read_timeout(Duration::from_secs(10))
-                    .max_buf_size(64 * 1024)
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
+                match &accepting {
+                    // TLS, and then HTTP/1.1 or HTTP/2 as ALPN chose. The
+                    // handshake is on this connection's task, so one that
+                    // never finishes costs this task and no other.
+                    Some(accepting) => {
+                        let accepted = tokio::time::timeout(
+                            Duration::from_secs(10),
+                            tokio_rustls::TlsAcceptor::from(accepting.now()).accept(stream),
+                        )
+                        .await;
+                        if let Ok(Ok(stream)) = accepted {
+                            let _ = hyper_util::server::conn::auto::Builder::new(
+                                hyper_util::rt::TokioExecutor::new(),
+                            )
+                            .http1()
+                            .timer(TokioTimer::new())
+                            .header_read_timeout(Duration::from_secs(10))
+                            .max_buf_size(64 * 1024)
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                        }
+                    }
+                    None => {
+                        let _ = http1::Builder::new()
+                            .timer(TokioTimer::new())
+                            .header_read_timeout(Duration::from_secs(10))
+                            .max_buf_size(64 * 1024)
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    }
+                }
                 drop(permit);
             });
         }
@@ -548,8 +621,14 @@ impl Front {
                 return streamed;
             }
         }
+        let takes_gzip = crate::convert::takes_gzip(
+            request
+                .headers()
+                .get(hyper::header::ACCEPT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+        );
         let reply = self.reply(request, from).await;
-        to_response(reply)
+        to_response(reply.compressed(takes_gzip))
     }
 
     /// `GET /_host/apps/<app>/logs?follow=1`: the app's recent lines, then

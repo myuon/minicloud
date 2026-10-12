@@ -1334,14 +1334,24 @@ pub fn parse_app_with(
     let mut hosts = Vec::new();
     for host in &file.route.hosts {
         let host = host.to_ascii_lowercase();
-        let valid = !host.is_empty()
+        // `*.example` reaches every name one label below it, and is only
+        // ever the first label: a wildcard in the middle would be a
+        // pattern rather than a name, and one that crossed a dot would
+        // claim a name whose own `*.b.example` is somebody else's.
+        let (wildcard, rest) = match host.strip_prefix("*.") {
+            Some(rest) => (true, rest.to_string()),
+            None => (false, host.clone()),
+        };
+        let valid = !rest.is_empty()
             && host.len() <= 253
-            && host.split('.').all(|label| {
+            && (!wildcard || rest.contains('.'))
+            && rest.split('.').all(|label| {
                 !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
             });
         if !valid {
             return Err(format!(
-                "`route.hosts`: `{host}` is not a hostname (no scheme, port or path)"
+                "`route.hosts`: `{host}` is not a hostname or a `*.name` (no scheme, port or \
+                 path; a `*` is the first label of two or more)"
             ));
         }
         if !hosts.contains(&host) {

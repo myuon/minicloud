@@ -141,6 +141,7 @@ error[cove::runtime]: execution stopped: wall-clock deadline of 2s exceeded
 | `--max-in-flight N` | `10000` | requests admitted at once, over every app |
 | `--backend auto\|vm\|native` | `auto` | the native tier where the machine has one (Unix x86-64), else the VM |
 | `--ops-listener public\|admin` | `public` | which listener serves `/_host/` |
+| `--tls-cert FILE` / `--tls-key FILE` | — | the certificate chain and key the public listener serves; with them the host terminates TLS itself and speaks HTTP/2 |
 | `--public-origin URL` | — | the origin clients reach the host at, behind a TLS-terminating proxy |
 | `--trust-proxy` | off | believe `X-Forwarded-Proto` and `X-Forwarded-Host` instead |
 | `--shutdown-grace SECONDS` | `10` | on SIGTERM or Ctrl-C, how long to wait for requests in flight |
@@ -958,6 +959,42 @@ host's own messages go to stderr — on the server, `journalctl -u cove-tools`.
 The admin app shows the same ring, a line at a time with its level
 (`/apps/<app>/logs`), so the lines are there in a browser as well.
 
+## The front door
+
+The public listener is plain HTTP unless it is given a certificate, for a
+host behind a proxy that holds one. With **`--tls-cert` and `--tls-key`**
+it terminates TLS itself — one process, one port, nothing in front:
+
+```console
+$ minicloud serve --apps apps --addr 0.0.0.0:443 \
+    --tls-cert /etc/letsencrypt/live/example/fullchain.pem \
+    --tls-key /etc/letsencrypt/live/example/privkey.pem
+```
+
+- **HTTP/2 comes with it.** ALPN offers `h2` and `http/1.1` and the
+  connection is served by whichever the client chose. A plain connection
+  stays HTTP/1.1: a browser will not speak h2 without TLS, and h2c would be
+  a second protocol for nobody.
+- **The files are read at start and on `SIGHUP`**, never per connection, so
+  a renewal reaches the host when its hook says so and a half-written pair
+  is never served. A reload that does not read keeps the pair that is
+  serving and says why; a host whose pair does not read at start does not
+  start.
+- **Getting the certificate is not the host's** (yet): certbot, lego or
+  anything else renews it on disk and runs `systemctl reload` or
+  `kill -HUP`. ACME is an account, a challenge and a clock, and is
+  [#52](https://github.com/myuon/minicloud/issues/52)'s remainder.
+
+**Answers are gzipped** where it is worth it: a body over 1 KiB, of a text
+or text-shaped type, for a client that said `Accept-Encoding: gzip` — with
+`Vary: accept-encoding`, and only if it actually came out smaller. An
+image, a font or a `.wasm` is left alone, being compressed already.
+
+**A hostname may be a `*.name`**: `[route] hosts = ["*.apps.example"]`
+reaches that app for `a.apps.example` and `b.apps.example`. One label and
+never more — `a.b.apps.example` is not it — because a wildcard that crossed
+a dot would claim a name whose own `*.b.apps.example` is somebody else's.
+
 ## Security
 
 Same-process isolation between apps is a fault and resource boundary for
@@ -969,11 +1006,13 @@ apps share one process, one address space and one native code generator, and
 nothing here has been reviewed as a sandbox. Deploy only apps you wrote or
 reviewed; `admin` is a capability for code you trust.
 
-There is no TLS. Put the host behind a reverse proxy (Caddy, nginx,
-cloudflared) that terminates it and forwards to `--addr`, which defaults to
-localhost, and pass `--public-origin` so the apps' same-origin checks and
-the URLs they write use the public origin. Keep the admin listener on
-localhost.
+The host terminates TLS with `--tls-cert` and `--tls-key` ([The front
+door](#the-front-door)); without them it is plain HTTP, for a reverse proxy
+(Caddy, nginx, cloudflared) that terminates it and forwards to `--addr`,
+which defaults to localhost. Behind a proxy, pass `--public-origin` so the
+apps' same-origin checks and the URLs they write use the public origin.
+Keep the admin listener on localhost, and on loopback the admin listener
+has no TLS of its own.
 
 ## Examples
 
