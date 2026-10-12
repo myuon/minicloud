@@ -1,0 +1,87 @@
+use web
+use sql
+
+/// A table of books: what the app's SQL store is for.
+///
+/// `/setup` makes the table, `/add?title=&pages=` inserts a row, `/titles`
+/// reads them back in an order an index can serve, `/longest` is an
+/// aggregate over them, and `/find?title=` binds a parameter rather than
+/// building a statement out of what was asked. The rest are the refusals
+/// the tests check: a write through `sql.query`, a statement that does not
+/// parse, and an `ATTACH` the host does not allow.
+export fn handle(request: web.Request) -> web.Response {
+  if request.path == "/setup" {
+    return changed(sql.exec(
+      "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, title TEXT NOT NULL, pages INTEGER)",
+      [],
+    ))
+  }
+  if request.path == "/index" {
+    return changed(sql.exec("CREATE INDEX IF NOT EXISTS books_pages ON books (pages DESC)", []))
+  }
+  if request.path == "/add" {
+    return changed(sql.exec(
+      "INSERT INTO books (title, pages) VALUES (?, ?)",
+      [request.query.get("title").unwrapOr(""), request.query.get("pages").unwrapOr("0")],
+    ))
+  }
+  if request.path == "/titles" {
+    return rows(sql.query("SELECT title, pages FROM books ORDER BY pages DESC, title", []))
+  }
+  if request.path == "/longest" {
+    return rows(sql.query("SELECT title, max(pages) FROM books", []))
+  }
+  if request.path == "/find" {
+    return rows(sql.query(
+      "SELECT title FROM books WHERE title = ?",
+      [request.query.get("title").unwrapOr("")],
+    ))
+  }
+  if request.path == "/every" {
+    return rows(sql.query("SELECT title FROM books", []))
+  }
+  if request.path == "/drop-through-query" {
+    return rows(sql.query("DELETE FROM books", []))
+  }
+  if request.path == "/nonsense" {
+    return rows(sql.query("SELECT nope FROM nothing", []))
+  }
+  if request.path == "/attach" {
+    return changed(sql.exec("ATTACH DATABASE 'elsewhere.sqlite3' AS other", []))
+  }
+  if request.path == "/begin" {
+    return changed(sql.exec("BEGIN", []))
+  }
+  answer(404, "no such path")
+}
+
+/// The rows as text: the column names, then a line a row with `|` between
+/// the values and `NULL` for one that is not there.
+fn rows(result: Result<sql.Rows, Error>) -> web.Response {
+  match result {
+    Ok(got) => {
+      var out = Vector.of()
+      out.push("|".join(got.columns))
+      for row in got.rows {
+        var cells = Vector.of()
+        for value in row.values {
+          cells.push(value.unwrapOr("NULL"))
+        }
+        out.push("|".join(cells.freeze()))
+      }
+      answer(200, "\n".join(out.freeze()))
+    }
+    Err(error) => answer(422, error.message)
+  }
+}
+
+fn changed(result: Result<sql.Changed, Error>) -> web.Response {
+  match result {
+    Ok(got) => answer(200, "{got.rows} rows, id {got.lastInsertId}")
+    Err(error) => answer(422, error.message)
+  }
+}
+
+fn answer(status: Int, body: String) -> web.Response {
+  web.Response(status: status, headers: Map.of(), body: "{body}\n")
+}

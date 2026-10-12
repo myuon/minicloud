@@ -113,6 +113,18 @@ pub fn app_json(context: &OpsContext, slot: &Slot) -> Json {
                     "max_queued": app.limits.max_queued,
                 }),
             );
+            if app.granted.contains("sql") {
+                let bytes = context
+                    .data
+                    .and_then(|data| crate::sql::usage(&data.join(&slot.name).join("sql.sqlite3")));
+                object.insert(
+                    "sql".into(),
+                    json!({
+                        "bytes": bytes,
+                        "max_bytes": app.sql.max_bytes,
+                    }),
+                );
+            }
             if !app.triggers.is_empty() {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -351,7 +363,7 @@ pub fn page(context: &OpsContext) -> String {
     }
     html.push_str(
         "<th>errors</th><th>cancelled</th><th>rejected</th><th>triggers</th><th>assets</th>\
-         <th>kv</th><th>fetch</th></tr>",
+         <th>kv</th><th>sql</th><th>fetch</th></tr>",
     );
     let apps = stats["apps"].as_object().cloned().unwrap_or_default();
     for (name, app) in &apps {
@@ -395,6 +407,15 @@ pub fn page(context: &OpsContext) -> String {
         } else {
             "–".to_string()
         };
+        let sql = if app["sql"].is_object() {
+            format!(
+                "{} / {} bytes",
+                cell(&app["sql"]["bytes"]),
+                cell(&app["sql"]["max_bytes"])
+            )
+        } else {
+            "–".to_string()
+        };
         let kv = if app["kv"].is_object() {
             format!(
                 "{} / {} keys, {} / {} bytes",
@@ -408,7 +429,7 @@ pub fn page(context: &OpsContext) -> String {
         };
         html.push_str(&format!(
             "<td>{errors}</td><td>{}</td><td>{rejected}</td><td>{triggers}</td>\
-             <td>{assets}</td><td>{kv}</td>\
+             <td>{assets}</td><td>{kv}</td><td>{sql}</td>\
              <td>{} calls, {} refused, {} failed</td></tr>",
             cell(&app["errors"]["cancelled"]),
             cell(&app["fetch"]["calls"]),

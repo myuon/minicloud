@@ -32,6 +32,18 @@ so, and what it asserts is counted.
 - two apps' stores are separate (and separate files); a store survives
   stopping the host and starting another over the same data directory;
   quotas answer the app's `Err`; listing pages both ways;
+- the SQL store (`sql.rs`, and `sql.rs`'s unit tests): a table, an index and
+  an aggregate answer what `kv` could not; a parameter holding `'; DROP
+  TABLE …` is stored and found as that string; `NULL` is not an empty
+  string; a write through `query` is refused pointing at `exec`; a syntax
+  error is the app's `Err` and names no file; `ATTACH` and `BEGIN` are
+  refused by the authorizer and the app still works after them; two
+  statements in one call are refused rather than half-run; `max_rows`,
+  `max_result_bytes`, `max_bytes`, `max_statement_bytes` and
+  `max_statement_ms` are each the app's `Err` naming the limit; a blob says
+  what to do instead; the store survives a restart and is a file of its own
+  beside where `kv`'s would be; an app not granted `sql` is refused at load
+  and no file is made for it;
 - `fetch` reaches an allowed local upstream with GET and with POST carrying
   a header and a body, exactly as the upstream records them; a target off
   the allowlist is refused with the upstream seeing no connection at all;

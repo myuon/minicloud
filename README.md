@@ -204,6 +204,13 @@ max_value_bytes = 1048576
 max_keys = 100000
 max_bytes = 67108864            # keys and values, summed
 
+[sql]                           # the app's SQL store, with `sql` granted
+max_bytes = 67108864            # the database
+max_rows = 1000                 # rows one query may answer
+max_result_bytes = 4194304      # the values of one answer, summed
+max_statement_ms = 20           # how long one statement may run
+max_statement_bytes = 65536     # how long its text may be
+
 [fetch]                         # outbound HTTP, with `fetch` granted
 allow = []                      # e.g. ["https://api.github.com", "http://127.0.0.1:*"]
 timeout = "10s"                 # one fetch, connect to last byte
@@ -288,6 +295,49 @@ it; every other app serves. The load line says what an app has:
   admin      v1-17e8cb08  requires [admin, auth]  granted [admin, auth]  ok: 329 fn on native, checked in 24.1 ms, prepared in 19.9 ms, 3 file(s) in assets/ (10182 bytes)
 ```
 
+### The SQL store
+
+`kv` holds a value under a key and lists keys by prefix, which is the wrong
+shape for anything an app wants to *ask questions of*. With `sql` granted an
+app gets a second store of its own — `<data>/<app>/sql.sqlite3`, beside its
+`kv` — with a schema, indexes and aggregates:
+
+```cove
+use sql
+
+sql.exec("CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, title TEXT NOT NULL, pages INTEGER)", [])
+sql.exec("INSERT INTO books (title, pages) VALUES (?, ?)", [title, pages])
+match sql.query("SELECT title FROM books WHERE pages > ? ORDER BY pages DESC", ["300"]) {
+  Ok(got) => …   // got.columns: Array<String>, got.rows: Array<sql.Row>
+  Err(error) => …
+}
+```
+
+- **Two operations.** `query` runs a statement that only reads — a statement
+  that writes is the app's `Err`, pointing at `exec` — and `exec` runs one
+  that writes or changes the schema, answering `{ rows, lastInsertId }`.
+  **One statement a call**: two separated by `;` are refused rather than
+  half-run.
+- **Values are text.** A row is `Array<Option<String>>`: `NULL` is nothing,
+  `TEXT` is itself, `INTEGER` and `REAL` are their decimal text. A `BLOB` is
+  the app's `Err`. Parameters are `Array<String>`, bound as text — SQLite's
+  type affinity makes `"42"` a number against an integer column — and
+  **bound, never pasted**, so a parameter can never be SQL. For `NULL`,
+  write `nullif(?1, '')`.
+- **The app owns its schema**: `CREATE TABLE`, `CREATE INDEX` and `ALTER
+  TABLE` are the app's to run, and migrating is the app's job. `ATTACH`,
+  `PRAGMA` and transactions of its own (`BEGIN`, `SAVEPOINT`) are refused by
+  SQLite's authorizer — a transaction held open across host calls would keep
+  the connection locked if the run hit its deadline in between, and a single
+  statement is atomic by itself.
+- **The limits are `[sql]`**, and each is the app's `Err` rather than the
+  host's error: a database past `max_bytes`, an answer past `max_rows` or
+  `max_result_bytes` (an error, not a truncated answer), a statement past
+  `max_statement_ms` (stopped where it is) or `max_statement_bytes`. SQLite
+  answers on the worker, as `kv` does, so `max_statement_ms` is a worker
+  held and not yielded: it is 20 ms by default for that reason, and a query
+  that needs longer wants an index.
+
 ### Running on a schedule
 
 An app had one way in — a request from outside — so anything periodic was a
@@ -342,6 +392,7 @@ path = "/cron/rollup"
 | `log` | `log` | `info`, `warn`, `error`: a line on stdout (`[app] level: line`) and in the app's log |
 | `timer` | `timer` | `sleep(millis)`: parks the run, at most 60 s |
 | `kv` | `kv` | the app's own SQLite store: `get`, `put`, `delete`, `increment`, `list`, `listDesc`; a `put` past a quota is the app's `Err` |
+| `sql` | `sql` | the app's own SQL store, beside its `kv`: `query`, `exec`, one statement a call, parameters bound as text ([The SQL store](#the-sql-store)) |
 | `fetch` | `fetch` | `get(url)`, `request(method, url, headers, body)` to the `[fetch] allow` list only; parks the run; redirects are not followed |
 | `time` | `time` | `nowMillis()`, `nowMicros()` |
 | `random` | `random` | `hex(bytes)`: 1–64 bytes from the operating system |
@@ -350,7 +401,8 @@ path = "/cron/rollup"
 
 The exact signatures are the schemas in the source:
 [`hosts.rs`](crates/minicloud/src/hosts.rs) (`web`, `log`, `timer`),
-[`kv.rs`](crates/minicloud/src/kv.rs), [`fetch.rs`](crates/minicloud/src/fetch.rs),
+[`kv.rs`](crates/minicloud/src/kv.rs), [`sql.rs`](crates/minicloud/src/sql.rs),
+[`fetch.rs`](crates/minicloud/src/fetch.rs),
 [`sys.rs`](crates/minicloud/src/sys.rs) (`time`, `random`, `auth`) and
 [`admin_module.rs`](crates/minicloud/src/admin_module.rs) (`host`). How
 `kv`, `fetch` and `auth` behave is in [docs/design.md](docs/design.md).
@@ -371,7 +423,7 @@ error[minicloud::spawn]: `spawner.handle` can spawn a task, which minicloud does
   rule: A spawned task runs outside the host's worker pool and keeps its parent from parking or yielding; minicloud refuses an app that can spawn.
 greedy     requires [log]  granted [-]  REFUSED: `greedy.handle` requires `log`, which app.toml does not grant
 spawner    requires [-]  granted [-]  REFUSED: `spawner.handle` can spawn a task, which minicloud does not run
-checked 2 app(s) against the host's schemas (web, log, timer, kv, fetch, time, random, auth, host); 0 warning(s), 2 refused
+checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, fetch, time, random, auth, host); 0 warning(s), 2 refused
 ```
 
 `test` runs every `test fn` the way `cove test` does, with the app's grant,
@@ -676,7 +728,7 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `errors` by kind, `rejected` by reason, `in_flight`, `queued`, `parked`,
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms`, `heap_peak_words`,
-`fetch`, `kv` usage against its quota, `assets` (how many files and how many
+`fetch`, `kv` and `sql` usage against their quotas, `assets` (how many files and how many
 bytes) with `assets_served` and `assets_not_modified`, `triggers` (each
 schedule and when it is next due) with `trigger_runs`, `trigger_skipped` and
 `trigger_failed`, `updates` and `versions_alive`; the full list is in

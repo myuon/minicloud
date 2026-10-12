@@ -112,6 +112,8 @@ pub struct App {
     pub open: bool,
     pub limits: AppLimits,
     pub kv: KvLimits,
+    /// `[sql]`: the app's SQL store, with `sql` granted.
+    pub sql: crate::config::SqlLimits,
     pub fetch: FetchPolicy,
     /// `[assets]`: how the files below are answered.
     pub asset_policy: AssetPolicy,
@@ -225,6 +227,7 @@ impl App {
             granted: self.granted.clone(),
             data: data.map(|root| root.join(&self.name)),
             kv: self.kv.clone(),
+            sql: self.sql.clone(),
             fetch: self.fetch.clone(),
             secrets: self.secrets.clone(),
             access: self.access.clone(),
@@ -376,6 +379,7 @@ pub fn describe_as(
         open: false,
         limits: AppLimits::default(),
         kv: KvLimits::default(),
+        sql: crate::config::SqlLimits::default(),
         fetch: FetchPolicy::default(),
         asset_policy: AssetPolicy::default(),
         assets: Arc::new(Assets::default()),
@@ -401,6 +405,7 @@ pub fn describe_as(
             app.granted = config.granted.clone();
             app.limits = config.limits.clone();
             app.kv = config.kv.clone();
+            app.sql = config.sql.clone();
             app.fetch = config.fetch.clone();
             app.secrets = config.secrets.clone();
             app.access = config.access.clone();

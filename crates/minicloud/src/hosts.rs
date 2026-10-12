@@ -62,6 +62,7 @@ pub struct AppContext {
     /// state in memory (`minicloud test`).
     pub data: Option<std::path::PathBuf>,
     pub kv: KvLimits,
+    pub sql: crate::config::SqlLimits,
     pub fetch: FetchPolicy,
     pub secrets: Secrets,
     /// `[access]`, for `auth.identity`.
@@ -93,8 +94,8 @@ pub struct HostModules {
 }
 
 impl HostModules {
-    /// `web`, `log`, `timer`, `kv`, `fetch`, `time`, `random`, `auth` and
-    /// `admin`.
+    /// `web`, `log`, `timer`, `kv`, `sql`, `fetch`, `time`, `random`,
+    /// `auth` and `admin`.
     pub fn standard() -> HostModules {
         HostModules {
             modules: vec![
@@ -102,6 +103,7 @@ impl HostModules {
                 Arc::new(LogModule),
                 Arc::new(TimerModule),
                 Arc::new(crate::kv::KvModule),
+                Arc::new(crate::sql::SqlModule),
                 Arc::new(crate::fetch::FetchModule),
                 Arc::new(crate::sys::TimeModule),
                 Arc::new(crate::sys::RandomModule),
