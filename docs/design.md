@@ -552,6 +552,40 @@ so a scraper already knows how to read it. Every series is labelled by app,
 because the totals are a sum anyone can do and the per-app numbers are not
 recoverable from them.
 
+## The front door
+
+Until `--tls-cert`, the host could not be reached by a browser without
+something else in front of it. Now it can: rustls on the public listener,
+ALPN offering `h2` then `http/1.1`, and `hyper_util`'s auto builder serving
+whichever the client chose. A plain listener stays HTTP/1.1 — a browser
+will not speak h2 without TLS, and h2c would be a second protocol for
+nobody.
+
+**The pair is read at start and on SIGHUP, never per connection.** Reading
+per connection would make a half-written renewal a half-broken host, and
+would put two file reads in front of every handshake. A reload that does
+not read keeps what is serving, because an old certificate beats none. The
+handshake itself is on the connection's own task, under a timeout, so one
+that never finishes costs that task and nothing else.
+
+**ACME is deliberately not here.** Getting a certificate is an account, a
+challenge served from a path the host would have to answer before it has a
+certificate at all, and a renewal clock — a protocol, not a feature.
+Reading a pair that certbot renews is the smaller half and is the half that
+takes the proxy out of the picture today.
+
+**Compression is one pass over one buffer**, because the bodies are already
+whole: an app's answer is a `String` and a file is bytes the host holds. It
+is done where it pays — over a kilobyte, text-shaped, asked for, and only
+kept if it came out smaller — and nowhere else. A streamed answer
+([an answer written as it goes](#an-answer-written-as-it-goes)) is not
+compressed, which is right for server-sent events anyway: a buffered
+encoder would hold the lines it is meant to deliver.
+
+**A `*.name` is one label**, and the lookup is the exact name first and the
+pattern second, so a name that is both is its own. A wildcard that crossed
+a dot would claim `a.b.example` from whoever holds `*.b.example`.
+
 ## An answer written as it goes
 
 Every answer used to be a `Full<Bytes>`: the host had all of it before it

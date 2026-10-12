@@ -152,6 +152,15 @@ so, and what it asserts is counted.
   behind it too; five ways of writing it wrong refuse that app alone; and
   the buckets refill, are swept when there are too many, and are forgotten
   with the app;
+- the front door (`ingress.rs`, and `tls.rs`'s unit tests): the host
+  terminates TLS itself and the answer comes back over HTTP/2, a plain
+  request to that port is not served and does not take the host down; a
+  certificate renewed on disk is read again without a restart and a half
+  renewal keeps the pair that is serving; a host whose key does not read
+  does not start; a body over a kilobyte is gzipped for a client that takes
+  it and not for one that says `gzip;q=0`, a small one is left alone; a
+  `*.name` reaches its app one label below and never two, and the name
+  itself is not the wildcard;
 - following a log (`logs.rs`): the answer is server-sent events, it opens
   with the lines the ring already has and says how many, a line written
   while the connection is open reaches it, an app that is not there is 404,

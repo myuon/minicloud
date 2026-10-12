@@ -64,11 +64,30 @@ impl ByHostname {
     }
 }
 
+impl ByHostname {
+    /// The app a hostname reaches: the name itself, or a `*.` pattern one
+    /// label below it.
+    ///
+    /// One label, never more: `*.example` is `a.example` and not
+    /// `a.b.example`, because a wildcard that crossed a dot would claim a
+    /// name whose own `*.b.example` is somebody else's.
+    fn app_for(&self, host: &str) -> Option<&String> {
+        if let Some(app) = self.hosts.get(host) {
+            return Some(app);
+        }
+        let (label, rest) = host.split_once('.')?;
+        if label.is_empty() || rest.is_empty() {
+            return None;
+        }
+        self.hosts.get(&format!("*.{rest}"))
+    }
+}
+
 impl Router for ByHostname {
     fn route(&self, host: Option<&str>, path: &str) -> Option<Route> {
         if let Some(host) = host {
             let host = host.trim_end_matches('.').to_ascii_lowercase();
-            if let Some(app) = self.hosts.get(&host) {
+            if let Some(app) = self.app_for(&host) {
                 return Some(Route {
                     app: app.clone(),
                     path: if path.is_empty() {

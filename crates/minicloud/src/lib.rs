@@ -58,6 +58,7 @@ pub mod server;
 pub mod sql;
 pub mod stats;
 pub mod sys;
+pub mod tls;
 pub mod toolchain;
 pub mod triggers;
 

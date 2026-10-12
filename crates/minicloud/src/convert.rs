@@ -84,6 +84,95 @@ pub enum BadResponse {
     TooLarge { bytes: usize, limit: usize },
 }
 
+/// Bodies smaller than this are sent as they are.
+///
+/// Compressing a few hundred bytes costs a pass over them and saves less
+/// than the header it has to add; the gain starts where a page does.
+pub const COMPRESS_FROM: usize = 1024;
+
+/// What is worth compressing, by content type.
+///
+/// Text, and the text-shaped application types. An image, a font and a
+/// `.wasm` are already compressed, and a second pass over one costs time
+/// to make it slightly larger.
+fn worth_compressing(content_type: &str) -> bool {
+    let kind = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    kind.starts_with("text/")
+        || matches!(
+            kind.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/manifest+json"
+                | "image/svg+xml"
+        )
+}
+
+/// Whether a client said it takes gzip.
+pub fn takes_gzip(accept_encoding: Option<&str>) -> bool {
+    accept_encoding.is_some_and(|accepted| {
+        accepted.split(',').any(|part| {
+            let mut fields = part.split(';');
+            let coding = fields.next().unwrap_or_default().trim();
+            // `gzip;q=0` is a client saying it does not want it.
+            let refused = fields.any(|field| field.trim().replace(' ', "") == "q=0");
+            (coding.eq_ignore_ascii_case("gzip") || coding == "*") && !refused
+        })
+    })
+}
+
+impl Reply {
+    /// This reply gzipped, if it is worth it and the client takes it.
+    ///
+    /// The body is already whole — an app's answer is a `String`, a file
+    /// is bytes the host holds — so this is one pass over one buffer and
+    /// not a stream. A reply that is already encoded, or that is not text,
+    /// is left as it is.
+    pub fn compressed(mut self, takes_gzip: bool) -> Reply {
+        use std::io::Write;
+        let content_type = self
+            .headers
+            .iter()
+            .find(|(name, _)| name == "content-type")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        let already = self
+            .headers
+            .iter()
+            .any(|(name, _)| name == "content-encoding");
+        if !takes_gzip
+            || already
+            || self.body.len() < COMPRESS_FROM
+            || !worth_compressing(&content_type)
+        {
+            return self;
+        }
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        if encoder.write_all(&self.body).is_err() {
+            return self;
+        }
+        let Ok(gzipped) = encoder.finish() else {
+            return self;
+        };
+        // Only if it actually helped; a body that grew is a body sent as
+        // it was.
+        if gzipped.len() >= self.body.len() {
+            return self;
+        }
+        self.body = Bytes::from(gzipped);
+        self.headers
+            .push(("content-encoding".to_string(), "gzip".to_string()));
+        self.headers
+            .push(("vary".to_string(), "accept-encoding".to_string()));
+        self
+    }
+}
+
 /// Headers an app may not set: the HTTP layer owns the framing.
 const FRAMING: [&str; 5] = [
     "content-length",
