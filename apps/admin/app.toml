@@ -37,3 +37,10 @@ fallback = "none"
 # without it.
 [secrets]
 admin = { env = "ADMIN_UI_TOKEN" }
+
+# `assets/` beside this file is served by the host itself, before any
+# request reaches the app: the stylesheet and the icons, as files, so that
+# the pages need no inline style and the CSP can say `style-src 'self'`. A
+# GET or HEAD for `/style.css` is `assets/style.css`. The host's defaults
+# for it (8 MiB in all, `cache-control: no-cache`) are right for a few small
+# files, so there is no `[assets]` section here.

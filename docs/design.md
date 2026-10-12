@@ -416,6 +416,61 @@ public origin's scheme, and its port if it has one) — the name the route
 matched, never one the client chose — so an app's same-origin check compares
 against the origin its own pages were served from.
 
+## Static files: the app's `assets/` directory
+
+A run answers a `web.Response` whose `body` is a `String`, and a Cove
+`String` is UTF-8 — `core.bytesFinish` refuses a `ByteBuffer` whose bytes
+are not. An app therefore **cannot answer an icon**, and until this the
+admin app inlined its whole stylesheet into every page with
+`style-src 'unsafe-inline'` in its policy, because it could not serve a
+`.css` file either.
+
+Serving a file does not need those bytes to cross the Cove boundary. The
+app's `assets/` directory is read by the host and answered by the host
+(`assets.rs`, and [`server::Front::reply`](../crates/minicloud/src/server.rs)
+before the request is admitted), and the app never sees the request.
+
+**The path below the app's prefix names the file**: `assets/style.css` is
+`/<app>/style.css`, or `/style.css` on an app reached by a hostname of its
+own. The directory is the app's root rather than a `/assets/` prefix of its
+own because `/favicon.ico` is a path a browser chooses, not one a page does.
+A file wins over the app for `GET` and `HEAD` alone, so a form may still be
+posted to a path a file has; a path that names no file reaches `handle`
+exactly as before, which is what keeps this from changing any app that has
+no `assets/`.
+
+**Read once, at load, into memory, and part of the version.** The files are
+in the version hash (`apps::content_hash`), so changing a stylesheet is a
+new version with everything that follows from it: an update switches the
+code and the files together, a request in flight keeps the files it started
+on, and a rollback takes both back. Reading them from disk per request would
+break that — the bytes an `ETag` names would stop being the bytes that are
+served — and would put a `read(2)` on the HTTP path. The cost is memory:
+the files of every live version, which is why `[assets] max_bytes` is 8 MiB
+by default and an app over it is refused at load, naming the file that
+crossed it.
+
+**The headers are the host's.** The content type comes from the extension,
+with `nosniff` beside it, since a browser guessing another type for a file
+the app did not choose the type of is the one way this could surprise. The
+`etag` is FNV-1a over the bytes — the hash the version id already uses —
+and `If-None-Match` is answered `304`. `cache-control` is `no-cache` by
+default: the files change with a deploy, and a stale stylesheet is worse
+than a conditional request that an `etag` makes cheap. An app whose file
+names carry a hash of their contents sets `[assets] cache_control` to
+something long instead.
+
+**They are public.** The answer happens before the app runs, so an app's
+own `auth.check` or `auth.identity` is not in front of its files. That is
+the point — a login page needs its stylesheet — but it means `assets/` is
+not a place for anything private. On the server the admin app's files are
+behind Cloudflare Access all the same, because Access is in front of the
+hostname rather than inside the app.
+
+What an app may **compute** as bytes — an uploaded image, a generated PNG —
+is a different question, and needs a byte type that can cross the host
+boundary; issue #57 says so and does not do it.
+
 ## `kv`: the app's persistent store
 
 Each app has its own store, `<data>/<app>/kv.sqlite3`, opened only for an app

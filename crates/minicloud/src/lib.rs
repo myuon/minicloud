@@ -11,6 +11,11 @@
 //! its slice is up and others wait, resumed on any worker, apps served round
 //! robin.
 //!
+//! A `GET` or `HEAD` whose path names a file in the app's `assets/`
+//! directory is answered from that directory ([`assets`]) and no run
+//! happens: an app's answer is a Cove `String`, which is UTF-8, so an image
+//! is the host's to serve.
+//!
 //! An app is updated in place ([`admin`], [`server::Host::update`]): the
 //! next version is loaded off the request path and routed to only if it
 //! loads; requests admitted to the old version finish on it, and it is
@@ -26,6 +31,7 @@ pub mod access;
 pub mod admin;
 pub mod admin_module;
 pub mod apps;
+pub mod assets;
 pub mod config;
 pub mod convert;
 pub mod deploy;

@@ -24,9 +24,10 @@ use cove_sema::package::{self, Module, Package, Unit};
 use cove_sema::resolve::{FnEntry, Program};
 use cove_sema::{Compiler, HostSchemas};
 
+use crate::assets::Assets;
 use crate::config::{
-    read_app_with, AppConfig, AppLimits, AppOverride, FetchPolicy, KvLimits, RemovedKeys,
-    SecretSource, Secrets, ADMIN_APP,
+    read_app_with, AppConfig, AppLimits, AppOverride, AssetPolicy, FetchPolicy, KvLimits,
+    RemovedKeys, SecretSource, Secrets, ADMIN_APP,
 };
 use crate::hosts::{AppContext, HostModules};
 use crate::logs::LogRing;
@@ -112,6 +113,13 @@ pub struct App {
     pub limits: AppLimits,
     pub kv: KvLimits,
     pub fetch: FetchPolicy,
+    /// `[assets]`: how the files below are answered.
+    pub asset_policy: AssetPolicy,
+    /// The app's `assets/` directory, read once here and answered by the
+    /// HTTP front without a run ([`crate::assets`]). It belongs to this
+    /// version: an update switches the files with the code, and a request
+    /// in flight keeps the ones it started on.
+    pub assets: Arc<Assets>,
     /// What `auth.check` compares against; never shown.
     pub secrets: Secrets,
     /// `[access]`: how `auth.identity` knows who is asking.
@@ -231,9 +239,19 @@ impl App {
     /// The one-line account printed at startup and by `minicloud check`.
     pub fn describe(&self) -> String {
         let open = if self.open { " (lower bound)" } else { "" };
+        // The files are worth a word: an app that lost its stylesheet to a
+        // deploy that left it out should say so here.
+        let assets = match self.assets.len() {
+            0 => String::new(),
+            files => format!(
+                ", {files} file(s) in {}/ ({} bytes)",
+                crate::assets::DIR,
+                self.assets.bytes()
+            ),
+        };
         let verdict = match &self.state {
             AppState::Ready(ready) => format!(
-                "ok: {} fn on {}, checked in {:.1} ms, prepared in {:.1} ms",
+                "ok: {} fn on {}, checked in {:.1} ms, prepared in {:.1} ms{assets}",
                 ready.cost.functions,
                 ready.tier,
                 ready.cost.check.as_secs_f64() * 1e3,
@@ -355,6 +373,8 @@ pub fn describe_as(
         limits: AppLimits::default(),
         kv: KvLimits::default(),
         fetch: FetchPolicy::default(),
+        asset_policy: AssetPolicy::default(),
+        assets: Arc::new(Assets::default()),
         secrets: Secrets::default(),
         access: crate::access::Access::default(),
         hosts: Vec::new(),
@@ -379,6 +399,19 @@ pub fn describe_as(
             app.fetch = config.fetch.clone();
             app.secrets = config.secrets.clone();
             app.access = config.access.clone();
+            app.asset_policy = config.assets.clone();
+            // The files are read here, with the config that bounds them, so
+            // that an `assets/` directory the host will not answer — a
+            // symbolic link, more than `[assets] max_bytes` — refuses the
+            // app at load with the reason, as a bad config does, rather
+            // than being found out by the first request for it.
+            match Assets::load(dir, config.assets.max_bytes) {
+                Ok(assets) => app.assets = Arc::new(assets),
+                Err(why) => {
+                    app.state = AppState::Refused(why);
+                    return (app, None);
+                }
+            }
             (app, Some(config))
         }
         Err(why) => {
@@ -388,11 +421,15 @@ pub fn describe_as(
     }
 }
 
-/// FNV-1a over the app's files — `app.toml` and every `.cove` file, with
-/// their paths — in a fixed order: the same files hash the same, so a
-/// version id says whether two loads were of the same code.
+/// FNV-1a over the app's files — `app.toml`, every `.cove` file and
+/// everything under `assets/`, with their paths — in a fixed order: the same
+/// files hash the same, so a version id says whether two loads were of the
+/// same app. A stylesheet is as much the app as its code is, so changing one
+/// is a new version ([`crate::assets`]); a hidden name is left out of the
+/// hash because it is left out of what is answered.
 fn content_hash(dir: &Path) -> u64 {
     let mut files = Vec::new();
+    let assets = dir.join(crate::assets::DIR);
     let mut walk = vec![dir.to_path_buf()];
     while let Some(at) = walk.pop() {
         let Ok(entries) = std::fs::read_dir(&at) else {
@@ -400,9 +437,17 @@ fn content_hash(dir: &Path) -> u64 {
         };
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if path.is_dir() && at == dir {
-                walk.push(path);
-            } else if path.extension().is_some_and(|e| e == "cove")
+            let under_assets = path.starts_with(&assets);
+            if under_assets && entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                // One level for the modules, every level under `assets/`.
+                if at == dir || under_assets {
+                    walk.push(path);
+                }
+            } else if under_assets
+                || path.extension().is_some_and(|e| e == "cove")
                 || path.file_name().is_some_and(|n| n == "app.toml")
             {
                 files.push(path);

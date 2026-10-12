@@ -60,6 +60,7 @@ grep -q '^ExecStart=/home/ioijoi/cove-tools/current/cove-host serve' "$root/curr
   || fail "the unit no longer runs current/cove-host, which the installed unit does"
 [ "$(stat -c %a "$root/env")" = 600 ] || fail "env is not mode 0600"
 [ -f "$root/apps/admin/app.toml" ] || fail "the admin app is not installed by default"
+[ -f "$root/apps/admin/assets/favicon.ico" ] || fail "the admin app's static files were not deployed"
 for app in webhooks ledger algo hello; do
   [ ! -e "$root/apps/$app" ] || fail "the example $app was installed unasked"
 done
@@ -173,6 +174,13 @@ header -H "$admin_host" http://127.0.0.1:8790/ | grep -qi '^www-authenticate' \
 [ "$(status -X POST --data hi http://127.0.0.1:8790/webhooks/in/0000000000000000)" = 404 ] \
   || fail "a receive URL asked for credentials"
 [ "$(status http://127.0.0.1:8790/admin/)" = 404 ] || fail "the admin app is on the main hostname"
+# Its static files are answered before the app runs, so they do not refuse a
+# request the pages would: on the server, Access in front of the hostname is
+# what covers them (README, "Static files").
+[ "$(status -H "$admin_host" http://127.0.0.1:8790/favicon.ico)" = 200 ] \
+  || fail "the admin app's icon is not served"
+[ "$(status -H "$admin_host" http://127.0.0.1:8790/style.css)" = 200 ] \
+  || fail "the admin app's stylesheet is not served"
 
 # Deploying onto the running host, as from another repository over ssh: an
 # archive on stdin, checked, written and updated to.
@@ -219,6 +227,13 @@ header -H "$admin_host" http://127.0.0.1:8790/ | grep -qi '^www-authenticate: ba
   || fail "the admin UI does not prompt for its token with Access off"
 [ "$(status -H "$admin_host" -u "admin:$admin_token" http://127.0.0.1:8790/)" = 200 ] || fail "the admin UI refused its token"
 [ "$(status http://127.0.0.1:8790/admin/)" = 404 ] || fail "the admin app is on the main hostname"
+# Its static files are answered before the app runs, so they do not refuse a
+# request the pages would: on the server, Access in front of the hostname is
+# what covers them (README, "Static files").
+[ "$(status -H "$admin_host" http://127.0.0.1:8790/favicon.ico)" = 200 ] \
+  || fail "the admin app's icon is not served"
+[ "$(status -H "$admin_host" http://127.0.0.1:8790/style.css)" = 200 ] \
+  || fail "the admin app's stylesheet is not served"
 [ "$(status -X POST -H "$admin_host" -u "admin:$admin_token" -H 'Origin: https://evil.example' \
   http://127.0.0.1:8790/apps/hello/disable)" = 403 ] || fail "the admin UI took a cross-site POST"
 

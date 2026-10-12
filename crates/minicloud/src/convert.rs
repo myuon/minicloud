@@ -1,5 +1,6 @@
 //! Between HTTP and the `web.Request` / `web.Response` values an app sees.
 
+use bytes::Bytes;
 use cove_runtime::value::MapKey;
 use cove_runtime::Value;
 
@@ -19,11 +20,16 @@ pub struct AppRequest {
 }
 
 /// What a worker hands back to the HTTP side.
+///
+/// The body is bytes rather than a `String` because not every reply comes
+/// from a run: an app's static file ([`crate::assets`]) is answered by the
+/// host as it is on disk, and a favicon is not UTF-8. What a *run* answers
+/// is still a Cove `String` — [`response_of`] is where that becomes bytes.
 #[derive(Clone, Debug)]
 pub struct Reply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    pub body: Bytes,
 }
 
 impl Reply {
@@ -35,7 +41,7 @@ impl Reply {
                 "content-type".to_string(),
                 "text/plain; charset=utf-8".to_string(),
             )],
-            body: body.into(),
+            body: Bytes::from(body.into()),
         }
     }
 
@@ -144,6 +150,6 @@ pub fn response_of(value: &Value, max_bytes: usize) -> Result<Reply, BadResponse
     Ok(Reply {
         status,
         headers,
-        body: body.to_string(),
+        body: Bytes::from(body.to_string()),
     })
 }

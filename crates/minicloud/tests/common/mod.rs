@@ -112,6 +112,13 @@ pub fn apps(specs: &[AppSpec]) -> Apps {
                 let file = file.replacen(source_module, spec.name, 1);
                 let text = std::fs::read_to_string(&path).unwrap();
                 std::fs::write(dir.join(file), text).unwrap();
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == minicloud::assets::DIR)
+            {
+                // The app's static files, copied whole: the host answers
+                // them, so a test over an app sees what it ships.
+                copy_tree(&path, &dir.join(path.file_name().unwrap()));
             } else if path.is_dir() {
                 // A module of the app's own, copied as it is.
                 let module = dir.join(path.file_name().unwrap());
@@ -133,6 +140,20 @@ pub fn apps(specs: &[AppSpec]) -> Apps {
     let data = root.with_extension("data");
     let _ = std::fs::remove_dir_all(&data);
     Apps { root, data }
+}
+
+/// Copies `from` to `to`, directories and all.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let into = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_tree(&path, &into);
+        } else {
+            std::fs::copy(&path, &into).unwrap();
+        }
+    }
 }
 
 /// The options a test host starts with: a free port, `workers` workers, the
@@ -163,7 +184,11 @@ pub fn start(apps: &Apps, workers: usize) -> Host {
 pub struct Answer {
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    /// The body as text: lossy, for the apps that answer text.
     pub body: String,
+    /// The body as it came over the connection, for a static file that is
+    /// not UTF-8 ([`minicloud::assets`]).
+    pub bytes: Vec<u8>,
 }
 
 impl Answer {
@@ -189,10 +214,14 @@ pub fn send_raw(addr: SocketAddr, raw: &[u8]) -> Answer {
 }
 
 fn parse(bytes: &[u8]) -> Answer {
-    let text = String::from_utf8_lossy(bytes);
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .unwrap_or_else(|| panic!("not an HTTP response: {text:?}"));
+    // Split on the bytes, not on the text: a body that is not UTF-8 would
+    // not survive a lossy conversion of the whole answer.
+    let at = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("not an HTTP response: {:?}", String::from_utf8_lossy(bytes)));
+    let head = String::from_utf8_lossy(&bytes[..at]).into_owned();
+    let body = &bytes[at + 4..];
     let mut lines = head.lines();
     let status = lines
         .next()
@@ -206,7 +235,8 @@ fn parse(bytes: &[u8]) -> Answer {
     Answer {
         status,
         headers,
-        body: body.to_string(),
+        body: String::from_utf8_lossy(body).into_owned(),
+        bytes: body.to_vec(),
     }
 }
 

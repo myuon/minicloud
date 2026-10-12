@@ -2,9 +2,12 @@
 //! `minicloud rollback`, and the files they move.
 //!
 //! An app travels as a **tar archive of the files it consists of**: its
-//! `app.toml` and its `.cove` files, at any depth. Nothing else is packed —
-//! a README, a sample, a `.git` — and anything hidden (a name starting with
-//! `.`, which includes macOS's `._` resource forks) is skipped. The archive is
+//! `app.toml`, its `.cove` files at any depth, and everything under its
+//! `assets/` directory, whatever the extension: the host serves those files
+//! as they are, so an image or a font travels as the bytes it is. Nothing
+//! else is packed — a README, a sample, a `.git` — and anything hidden (a
+//! name starting with `.`, which includes macOS's `._` resource forks) is
+//! skipped. The archive is
 //! refused, whole, if it holds a symbolic or hard link, a device or a pipe, a
 //! path that is absolute or climbs out with `..`, the same path twice, no
 //! `app.toml`, or more than [`Limits::standard`] allows. Packing a directory
@@ -58,8 +61,8 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// 16 MiB over at most 4096 files: far more than any app here (the
-    /// largest is under 1 MiB), far less than would hurt the host.
+    /// 16 MiB over at most 4096 files: far more than any app here needs for
+    /// its code and a handful of images, far less than would hurt the host.
     pub const fn standard() -> Limits {
         Limits {
             max_bytes: 16 << 20,
@@ -90,9 +93,16 @@ impl AppFiles {
     }
 }
 
-/// Whether a relative path names a file an app consists of.
+/// Whether a relative path names a file an app consists of: its `app.toml`,
+/// a `.cove` file, or anything under the `assets/` directory at its root
+/// (any extension, since the host serves those as they are). A file or a
+/// directory named `assets` anywhere deeper is not that directory.
 fn is_app_file(path: &str) -> bool {
-    path == "app.toml" || path.ends_with(".cove")
+    path == "app.toml"
+        || path.ends_with(".cove")
+        || path
+            .strip_prefix(crate::assets::DIR)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Whether a name is hidden: skipped, with whatever is under it.
@@ -100,9 +110,9 @@ fn is_hidden(name: &str) -> bool {
     name.starts_with('.')
 }
 
-/// Collects the app in `dir`: its `app.toml` and `.cove` files. Refuses a
-/// symbolic link anywhere in it, a directory without `app.toml`, and an app
-/// over `limits`.
+/// Collects the app in `dir`: its `app.toml`, `.cove` files and `assets/`.
+/// Refuses a symbolic link anywhere in it, a directory without `app.toml`,
+/// and an app over `limits`.
 pub fn collect(dir: &Path, limits: Limits) -> Result<AppFiles, String> {
     let meta = std::fs::symlink_metadata(dir)
         .map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?;
@@ -482,6 +492,10 @@ mod tests {
         dir
     }
 
+    /// Not UTF-8: a `String` could not hold it.
+    const FAVICON: [u8; 6] = [0x00, 0x00, 0x01, 0x00, 0xff, 0xfe];
+    const LOGO: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0xff];
+
     fn app_dir(label: &str) -> PathBuf {
         let dir = scratch(label).join("hello");
         std::fs::create_dir_all(dir.join("text")).unwrap();
@@ -492,6 +506,11 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join(".git/HEAD.cove"), "hidden\n").unwrap();
         std::fs::write(dir.join("._hello.cove"), "a resource fork\n").unwrap();
+        std::fs::create_dir_all(dir.join("assets/img")).unwrap();
+        std::fs::write(dir.join("assets/style.css"), "body { margin: 0 }\n").unwrap();
+        std::fs::write(dir.join("assets/favicon.ico"), FAVICON).unwrap();
+        std::fs::write(dir.join("assets/img/logo.png"), LOGO).unwrap();
+        std::fs::write(dir.join("assets/.DS_Store"), "hidden\n").unwrap();
         dir
     }
 
@@ -520,11 +539,79 @@ mod tests {
         let dir = app_dir("pack");
         let app = collect(&dir, Limits::standard()).unwrap();
         let paths: Vec<&str> = app.files.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(paths, ["app.toml", "hello.cove", "text/text.cove"]);
+        assert_eq!(
+            paths,
+            [
+                "app.toml",
+                "assets/favicon.ico",
+                "assets/img/logo.png",
+                "assets/style.css",
+                "hello.cove",
+                "text/text.cove"
+            ]
+        );
         assert_eq!(app.skipped, ["README.md"]);
         let back = unpack(&pack(&app).unwrap(), Limits::standard()).unwrap();
         assert_eq!(back.files, app.files);
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn everything_under_assets_is_packed_but_hidden_files_and_lookalikes_are_not() {
+        let dir = app_dir("assets-packed");
+        std::fs::create_dir_all(dir.join("text/assets")).unwrap();
+        std::fs::write(dir.join("text/assets/nested.css"), "nested\n").unwrap();
+        let app = collect(&dir, Limits::standard()).unwrap();
+        let paths: Vec<&str> = app.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(paths.contains(&"assets/style.css"));
+        assert!(paths.contains(&"assets/favicon.ico"));
+        assert!(paths.contains(&"assets/img/logo.png"));
+        assert!(!paths.iter().any(|p| p.contains(".DS_Store")));
+        assert!(!paths.contains(&"text/assets/nested.css"));
+        assert!(app.skipped.contains(&"README.md".to_string()));
+        assert!(app.skipped.contains(&"text/assets/nested.css".to_string()));
+        assert!(!app.skipped.iter().any(|p| p.contains(".DS_Store")));
+        let back = unpack(&pack(&app).unwrap(), Limits::standard()).unwrap();
+        assert!(!back.files.iter().any(|(p, _)| p.contains(".DS_Store")));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_survive_pack_unpack_and_write_unchanged() {
+        let dir = app_dir("assets-bytes");
+        let app = collect(&dir, Limits::standard()).unwrap();
+        let back = unpack(&pack(&app).unwrap(), Limits::standard()).unwrap();
+        let out = scratch("assets-bytes-out").join("hello");
+        write(&back, &out).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("assets/favicon.ico")).unwrap(),
+            FAVICON
+        );
+        assert_eq!(
+            std::fs::read(out.join("assets/img/logo.png")).unwrap(),
+            LOGO
+        );
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(out.parent().unwrap());
+    }
+
+    #[test]
+    fn a_file_two_directories_deep_under_assets_is_written_with_its_directories() {
+        let app = AppFiles {
+            files: vec![
+                ("app.toml".to_string(), b"grant = []\n".to_vec()),
+                ("assets/img/logo.png".to_string(), LOGO.to_vec()),
+            ],
+            skipped: vec![],
+        };
+        let out = scratch("assets-nested").join("hello");
+        write(&app, &out).unwrap();
+        assert!(out.join("assets/img").is_dir());
+        assert_eq!(
+            std::fs::read(out.join("assets/img/logo.png")).unwrap(),
+            LOGO
+        );
+        let _ = std::fs::remove_dir_all(out.parent().unwrap());
     }
 
     #[cfg(unix)]

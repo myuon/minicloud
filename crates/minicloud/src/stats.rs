@@ -147,6 +147,11 @@ pub struct AppCounters {
     pub fetches: AtomicU64,
     pub fetch_refused: AtomicU64,
     pub fetch_errors: AtomicU64,
+    /// Files from the app's `assets/` answered by the host, and those of
+    /// them answered `304 Not Modified`. No run happens for either, so
+    /// neither is in `served` ([`crate::assets`]).
+    pub assets: AtomicU64,
+    pub assets_not_modified: AtomicU64,
     /// Updates installed, and updates refused (the current version kept).
     pub updates: AtomicU64,
     pub updates_refused: AtomicU64,
@@ -155,6 +160,14 @@ pub struct AppCounters {
 }
 
 impl AppCounters {
+    /// A static file answered: `modified` is false for a `304`.
+    pub fn asset(&self, modified: bool) {
+        self.assets.fetch_add(1, Ordering::Relaxed);
+        if !modified {
+            self.assets_not_modified.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn error(&self, kind: ErrorKind) {
         self.served.fetch_add(1, Ordering::Relaxed);
         self.errors[kind as usize].fetch_add(1, Ordering::Relaxed);
@@ -237,6 +250,8 @@ impl AppCounters {
                 "refused": read(&self.fetch_refused),
                 "errors": read(&self.fetch_errors),
             },
+            "assets_served": read(&self.assets),
+            "assets_not_modified": read(&self.assets_not_modified),
         })
     }
 }

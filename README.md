@@ -10,6 +10,10 @@ shared pool of worker threads. A run that waits on I/O parks and holds no
 worker; a long run yields its worker at a safepoint when others are waiting;
 apps are served round robin, so one busy app cannot starve the rest.
 
+Files an app serves as they are — a stylesheet, an icon — go in an
+**`assets/` directory** beside its code and are answered by the host, bytes
+and all, before the app runs.
+
 Each app gets only the **capabilities** its `app.toml` grants (logging,
 timers, a persistent key-value store, outbound HTTP to an allowlist, the
 clock, randomness, authentication), and runs under **limits** — a deadline,
@@ -208,6 +212,10 @@ max_response_bytes = 4194304    # the decoded body
 # [fetch.headers."https://api.openai.com"]   # a secret the host adds as a header
 # authorization = { secret = "openai", prefix = "Bearer " }
 
+[assets]                        # the app's `assets/` directory, answered by the host
+max_bytes = 8388608             # its files together; a larger one refuses the app
+cache_control = "no-cache"      # what every one of them is answered with
+
 [route]
 hosts = []                      # e.g. ["admin.example"]: reached by these hostnames only
 
@@ -232,6 +240,47 @@ included), its entry requires a capability it is not granted, its code can
 printed). An `[access]` value is a setting, not a secret: an unset `team` or
 `aud` turns Access off for the app. The rules for `[fetch]`, `[secrets]`,
 `[route]` and `[access]` are in [docs/design.md](docs/design.md).
+
+### Static files
+
+An app's answer is a Cove `String`, which is UTF-8, so an icon cannot be
+one. What an app serves as it is — a stylesheet, an image, a font — goes in
+an **`assets/` directory** beside its code, and the host answers it itself:
+
+| on disk | reached at, by prefix | by hostname |
+| --- | --- | --- |
+| `assets/style.css` | `/<app>/style.css` | `/style.css` |
+| `assets/img/logo.png` | `/<app>/img/logo.png` | `/img/logo.png` |
+
+- The directory is the app's root, so `/favicon.ico` — which a browser asks
+  for by itself, whatever a page says — is `assets/favicon.ico`.
+- A file wins over the app for `GET` and `HEAD` and for nothing else: a
+  `POST` to a file's path, and any path naming no file, reaches `handle` as
+  before. There is no directory index and no `index.html`.
+- The answer carries the content type the extension says, a strong `etag`
+  (the next ask with `If-None-Match` is `304`), `x-content-type-options:
+  nosniff`, the `cache-control` `[assets]` asks for, and
+  `x-cove-app-version`. Nothing ran, so there are no `x-cove-run-*` headers
+  and the app's `served` does not count it — `assets_served` does.
+- The files are read once, at load, and **belong to that version**: they are
+  in the version's hash, a deploy or an update switches them with the code,
+  and a request in flight keeps the ones it started on. Nothing is read from
+  disk to answer one.
+- They are answered **before the app runs**, so whatever the app asks of its
+  users is not in front of them: `assets/` is public. Put nothing there that
+  should not be. (The admin app's are public on the machine; on the server
+  Cloudflare Access is in front of the hostname.)
+- `assets/` holds no `.cove` file, so it is not a module, and everything
+  under it travels with `minicloud deploy` — a hidden name (`.DS_Store`)
+  aside.
+
+An app whose `assets/` holds a symbolic link, or is larger than `[assets]
+max_bytes`, is refused at load with the reason, as any config error refuses
+it; every other app serves. The load line says what an app has:
+
+```console
+  admin      v1-17e8cb08  requires [admin, auth]  granted [admin, auth]  ok: 329 fn on native, checked in 24.1 ms, prepared in 19.9 ms, 3 file(s) in assets/ (10182 bytes)
+```
 
 ### Host modules
 
@@ -338,8 +387,9 @@ error[cove::parse::unexpected_token]: expected identifier, found `{`
 exit 1
 ```
 
-- Only `app.toml` and the `.cove` files are sent; symbolic links, paths
-  outside the directory, and more than 16 MiB or 4096 files are refused. The
+- Only `app.toml`, the `.cove` files and everything under `assets/` are
+  sent; symbolic links, paths outside the directory, and more than 16 MiB or
+  4096 files are refused. The
   app's name is the directory's (`--name` for another).
 - The deployed copy replaces `<apps>/<app>`; the one it replaced is kept in
   `<apps>/.previous/<app>`. `minicloud rollback <app>` swaps them back (a
@@ -574,8 +624,10 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `errors` by kind, `rejected` by reason, `in_flight`, `queued`, `parked`,
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms`, `heap_peak_words`,
-`fetch`, `kv` usage against its quota, `updates` and `versions_alive`; the
-full list is in [`ops.rs`](crates/minicloud/src/ops.rs).
+`fetch`, `kv` usage against its quota, `assets` (how many files and how many
+bytes) with `assets_served` and `assets_not_modified`, `updates` and
+`versions_alive`; the full list is in
+[`ops.rs`](crates/minicloud/src/ops.rs).
 
 ### Response headers
 
@@ -589,6 +641,9 @@ Every answer from a run carries what it cost:
 | `x-cove-run-wall-us` | admission to answer |
 | `x-cove-run-parks`, `x-cove-run-yields`, `x-cove-run-yields-declined` | how often the run parked, yielded, and declined to yield |
 | `x-cove-stop` | on a run a limit stopped: the error kind, below |
+
+A static file ([Static files](#static-files)) is not a run: it carries
+`x-cove-app-version` and none of the others.
 
 ### Limits and what they answer
 

@@ -14,6 +14,10 @@
 //! max_request_bytes = 1048576     # request body
 //! max_response_bytes = 1048576    # response body
 //!
+//! [assets]
+//! max_bytes = 8388608             # the files of `assets/` together
+//! cache_control = "no-cache"      # what every one of them is answered with
+//!
 //! [route]
 //! hosts = ["admin.example"]       # reached by these hostnames only, not /<name>/
 //!
@@ -90,6 +94,8 @@ pub struct AppFile {
     pub kv: KvFile,
     #[serde(default)]
     pub fetch: FetchFile,
+    #[serde(default)]
+    pub assets: AssetsFile,
     /// Named secrets the app may check a presented credential against
     /// (`auth.check`), or the host sends as a header (`[fetch.headers]`);
     /// never read.
@@ -351,6 +357,14 @@ pub struct KvFile {
     pub max_value_bytes: Option<usize>,
     pub max_keys: Option<u64>,
     pub max_bytes: Option<u64>,
+}
+
+/// `[assets]` as written.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetsFile {
+    pub max_bytes: Option<u64>,
+    pub cache_control: Option<String>,
 }
 
 /// `[fetch]` as written.
@@ -833,6 +847,39 @@ impl AppLimits {
     }
 }
 
+/// `[assets]`: how the host answers the files in the app's `assets/`
+/// directory.
+///
+/// An app can only return UTF-8 strings, so an image or a stylesheet cannot
+/// come out of its handler; the host serves the files of `assets/` itself,
+/// and this is how.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetPolicy {
+    /// The files together; an app whose `assets/` is larger is refused at
+    /// load. 8 MiB by default: the files are all held in memory once loaded,
+    /// and while an app is being updated the old version and the new one
+    /// are alive at the same time, so the default is kept modest. The
+    /// archive limits of a deploy (16 MiB, 4096 files) apply as well, and
+    /// are also the largest value this accepts.
+    pub max_bytes: u64,
+    /// The `cache-control` every file is answered with. `no-cache` by
+    /// default: the files change together with the app's version, and a
+    /// stale stylesheet left behind after a deploy does more harm than a
+    /// request to revalidate costs, which with an etag is cheap (a 304, no
+    /// body). It is the key to turn when the file names carry a hash, to
+    /// something like `public, max-age=31536000, immutable`.
+    pub cache_control: String,
+}
+
+impl Default for AssetPolicy {
+    fn default() -> AssetPolicy {
+        AssetPolicy {
+            max_bytes: 8 << 20,
+            cache_control: "no-cache".to_string(),
+        }
+    }
+}
+
 /// An app's configuration, read and validated.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -840,6 +887,7 @@ pub struct AppConfig {
     pub granted: BTreeSet<String>,
     pub limits: AppLimits,
     pub kv: KvLimits,
+    pub assets: AssetPolicy,
     pub fetch: FetchPolicy,
     pub secrets: Secrets,
     /// The secrets given a placeholder value because they could not be
@@ -1055,6 +1103,47 @@ pub fn parse_app_with(
         max_keys: file.kv.max_keys.unwrap_or(kv_defaults.max_keys),
         max_bytes: file.kv.max_bytes.unwrap_or(kv_defaults.max_bytes),
     };
+    let asset_defaults = AssetPolicy::default();
+    // No more than a deploy's archive can carry: a larger allowance could
+    // never be used.
+    let asset_ceiling = crate::deploy::Limits::standard().max_bytes;
+    let assets = AssetPolicy {
+        max_bytes: match file.assets.max_bytes {
+            Some(0) => {
+                return Err(
+                    "`[assets] max_bytes` is 0; an app with no assets leaves `assets/` out"
+                        .to_string(),
+                )
+            }
+            Some(bytes) if bytes > asset_ceiling => {
+                return Err(format!(
+                    "`[assets] max_bytes = {bytes}` is above {asset_ceiling}, the most a \
+                     deployed app can be, so the allowance could never be used"
+                ))
+            }
+            Some(bytes) => bytes,
+            None => asset_defaults.max_bytes,
+        },
+        cache_control: match file.assets.cache_control {
+            Some(text) => {
+                if text.trim().is_empty() {
+                    return Err("`[assets] cache_control` is empty; leave it out for \
+                         `no-cache`"
+                        .to_string());
+                }
+                if !text.bytes().all(|b| (0x20..0x7f).contains(&b))
+                    || reqwest::header::HeaderValue::from_str(&text).is_err()
+                {
+                    return Err(format!(
+                        "`[assets] cache_control = {text:?}` cannot be sent as a header value; \
+                         use printable ASCII only"
+                    ));
+                }
+                text
+            }
+            None => asset_defaults.cache_control,
+        },
+    };
     let (secrets, placeholders) = resolve_secrets(file.secrets, dir, source)?;
     let fetch_defaults = FetchPolicy::default();
     let fetch = FetchPolicy {
@@ -1084,6 +1173,7 @@ pub fn parse_app_with(
         granted: file.grant.into_iter().collect(),
         limits,
         kv,
+        assets,
         fetch,
         secrets,
         placeholders,
@@ -1212,6 +1302,52 @@ mod tests {
             RemovedKeys::Ignore,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn an_app_without_an_assets_section_gets_the_default_policy() {
+        let config = parse_app("", "a").unwrap();
+        assert_eq!(config.assets, AssetPolicy::default());
+        assert_eq!(config.assets.max_bytes, 8 << 20);
+        assert_eq!(config.assets.cache_control, "no-cache");
+    }
+
+    #[test]
+    fn the_assets_size_and_cache_control_are_read() {
+        let config = parse_app(
+            "[assets]\nmax_bytes = 1048576\ncache_control = \"public, max-age=31536000, immutable\"\n",
+            "a",
+        )
+        .unwrap();
+        assert_eq!(config.assets.max_bytes, 1 << 20);
+        assert_eq!(
+            config.assets.cache_control,
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn an_unknown_assets_key_is_refused_by_name() {
+        let error = parse_app("[assets]\nmaxbytes = 1024\n", "a").unwrap_err();
+        assert!(error.contains("maxbytes"), "{error}");
+    }
+
+    #[test]
+    fn an_assets_size_of_zero_or_above_what_a_deploy_can_carry_is_refused() {
+        let error = parse_app("[assets]\nmax_bytes = 0\n", "a").unwrap_err();
+        assert!(error.contains("`[assets] max_bytes` is 0"), "{error}");
+        let error = parse_app("[assets]\nmax_bytes = 16777217\n", "a").unwrap_err();
+        assert!(error.contains("could never be used"), "{error}");
+        // The ceiling itself is a size like any other.
+        parse_app("[assets]\nmax_bytes = 16777216\n", "a").unwrap();
+    }
+
+    #[test]
+    fn a_cache_control_that_cannot_be_sent_is_refused() {
+        let error = parse_app("[assets]\ncache_control = \"no-cache\\nx: y\"\n", "a").unwrap_err();
+        assert!(error.contains("cannot be sent"), "{error}");
+        let error = parse_app("[assets]\ncache_control = \"\"\n", "a").unwrap_err();
+        assert!(error.contains("cache_control"), "{error}");
     }
 
     #[test]
