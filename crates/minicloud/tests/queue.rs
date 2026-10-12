@@ -92,6 +92,20 @@ fn a_delivery_that_is_refused_is_tried_again_and_then_buried() {
 }
 
 #[test]
+fn a_delivery_says_which_try_it_is_and_how_many_there_will_be() {
+    let apps = post(TWICE);
+    let host = start(&apps, 2);
+    assert_eq!(get(host.addr, "/post/send?body=count").status, 202);
+    // Two attempts, a second apart, and the consumer refuses both: it sees
+    // which try each one is, which is how a consumer tells the last
+    // failure — the one about to become a dead letter — from the others.
+    wait_until("the message to be buried", || {
+        count(&host, "post", "queue_buried") == 1
+    });
+    assert_eq!(get(host.addr, "/post/tries").body.trim(), "1/2;2/2;");
+}
+
+#[test]
 fn a_queue_the_app_does_not_declare_is_the_apps_err() {
     let apps = post(TWICE);
     let host = start(&apps, 2);

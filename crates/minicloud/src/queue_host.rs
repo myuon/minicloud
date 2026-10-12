@@ -250,7 +250,7 @@ fn start(
     message: crate::queue::Message,
     store: Arc<Mutex<Queues>>,
 ) {
-    let answer = crate::internal::admit(
+    let answer = crate::internal::admit_with(
         &front.engine,
         crate::internal::Asked {
             app,
@@ -261,6 +261,21 @@ fn start(
             path: &policy.path,
             body: message.body.clone(),
         },
+        "",
+        // Which try this is, and how many there will be: a consumer that
+        // wants to say something only when the message is about to become
+        // a dead letter compares the two. `lease` raised `attempts` to
+        // count this one.
+        &[
+            (
+                crate::internal::ATTEMPT_HEADER,
+                message.attempts.to_string(),
+            ),
+            (
+                crate::internal::ATTEMPTS_HEADER,
+                policy.max_attempts.to_string(),
+            ),
+        ],
     );
     let counters = Arc::clone(&app.counters);
     let logs = Arc::clone(&app.logs);

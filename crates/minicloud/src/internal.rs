@@ -16,7 +16,7 @@
 //! | --- | --- |
 //! | `x-minicloud-trigger` | a `[[triggers]]` schedule, to the path it asked for |
 //! | `x-minicloud-deferred` | `defer.run`, to the path the app asked for |
-//! | `x-minicloud-queue` | a message being delivered, to the queue's name |
+//! | `x-minicloud-queue` | a message being delivered, to the queue's name, with `x-minicloud-attempt` and `x-minicloud-attempts` beside it |
 //! | `x-minicloud-alarm` | a due alarm, to the key it is about |
 //!
 //! The answer comes back on a `oneshot`, which the caller may wait on to
@@ -44,13 +44,26 @@ pub const DEFERRED_HEADER: &str = "x-minicloud-deferred";
 /// The header a queue's delivery carries, naming the queue.
 pub const QUEUE_HEADER: &str = "x-minicloud-queue";
 
+/// The headers a queue's delivery carries beside it: which try this is,
+/// counting from 1, and how many there will be. A consumer that wants to
+/// say something only when the message is about to become a dead letter
+/// compares the two.
+pub const ATTEMPT_HEADER: &str = "x-minicloud-attempt";
+pub const ATTEMPTS_HEADER: &str = "x-minicloud-attempts";
+
 /// The header a due alarm's run carries, naming the key it is about.
 pub const ALARM_HEADER: &str = "x-minicloud-alarm";
 
 /// Every header the host sets on a run of its own and never takes from a
 /// client.
-pub const INTERNAL_HEADERS: [&str; 4] =
-    [TRIGGER_HEADER, DEFERRED_HEADER, QUEUE_HEADER, ALARM_HEADER];
+pub const INTERNAL_HEADERS: [&str; 6] = [
+    TRIGGER_HEADER,
+    DEFERRED_HEADER,
+    QUEUE_HEADER,
+    ALARM_HEADER,
+    ATTEMPT_HEADER,
+    ATTEMPTS_HEADER,
+];
 
 /// What the host wants run, and what to tell the app about it.
 pub struct Asked<'a> {
@@ -72,17 +85,18 @@ pub struct Asked<'a> {
 /// it, so a job that writes a link to itself writes the same one a page
 /// would.
 pub fn admit(engine: &Engine, asked: Asked<'_>) -> Result<oneshot::Receiver<Reply>, Rejection> {
-    admit_with(engine, asked, "", None)
+    admit_with(engine, asked, "", &[])
 }
 
-/// [`admit`], with a query the app will see and a header of its own: a
-/// due alarm hands the app its key the way that app's `[keyed] by` says,
-/// so the app reads one key the same way whoever asked.
+/// [`admit`], with a query the app will see and headers of its own: a due
+/// alarm hands the app its key the way that app's `[keyed] by` says, so
+/// the app reads one key the same way whoever asked, and a queue's
+/// delivery says which try it is.
 pub fn admit_with(
     engine: &Engine,
     asked: Asked<'_>,
     query: &str,
-    header: Option<(&str, &str)>,
+    extra: &[(&str, String)],
 ) -> Result<oneshot::Receiver<Reply>, Rejection> {
     let Asked {
         app,
@@ -95,8 +109,8 @@ pub fn admit_with(
     } = asked;
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
     headers.insert(by.0.to_string(), by.1.to_string());
-    if let Some((name, value)) = header {
-        headers.insert(name.to_string(), value.to_string());
+    for (name, value) in extra {
+        headers.insert(name.to_string(), value.clone());
     }
     forwarding.apply(&mut headers, app.hosts.first().map(String::as_str));
     headers.insert(
