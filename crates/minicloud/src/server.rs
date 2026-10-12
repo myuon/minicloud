@@ -99,6 +99,13 @@ pub struct ServeOptions {
     /// (`--tls-cert`, `--tls-key`); `None` is plain HTTP, for a host
     /// behind a proxy that holds them ([`crate::tls`]).
     pub tls: Option<crate::tls::Pair>,
+    /// What the host asks an authority for, so that it holds its own
+    /// certificate ([`crate::acme`]); `None` for a pair something else
+    /// renews, or no TLS at all.
+    pub acme: Option<crate::acme::Order>,
+    /// Where the plain listener that answers ACME challenges and redirects
+    /// everything else to `https://` listens; `None` has none.
+    pub acme_http: Option<String>,
 }
 
 impl ServeOptions {
@@ -121,6 +128,8 @@ impl ServeOptions {
             ops_listener: OpsListener::Public,
             forwarding: Forwarding::default(),
             tls: None,
+            acme: None,
+            acme_http: None,
         }
     }
 }
@@ -279,6 +288,8 @@ impl Host {
         // nothing: an app may still send, into a store that lives and dies
         // with the process (`minicloud test`).
         let options_data_kept = options.data.is_some();
+        let options_acme = options.acme.clone();
+        let options_acme_http = options.acme_http.clone();
         // The history is the host's own state, beside the admin's changes
         // and the secret store, and is lost with the data directory as they
         // are. A host that keeps nothing still answers every current value.
@@ -296,10 +307,25 @@ impl Host {
         };
         // Read before anything is served: a certificate that does not read
         // is a host that does not start, rather than one that listens and
-        // refuses every connection.
-        let certificates = match &options.tls {
-            Some(pair) => Some(Arc::new(crate::tls::Certificates::load(pair.clone())?)),
-            None => None,
+        // refuses every connection. With `--acme-domain` the host may have
+        // none yet, which is not an error: it is what the first order is
+        // for, and the listener waits for it.
+        let challenges = Arc::new(crate::acme::Challenges::default());
+        let pair = match (&options.tls, &options.acme) {
+            (Some(pair), _) => Some(pair.clone()),
+            (None, Some(order)) => Some(order.pair()),
+            (None, None) => None,
+        };
+        let certificates = match (&pair, &options.acme) {
+            (Some(pair), None) => Some(Arc::new(crate::tls::Certificates::load(pair.clone())?)),
+            (Some(pair), Some(_)) => match crate::tls::Certificates::load(pair.clone()) {
+                Ok(certificates) => Some(Arc::new(certificates)),
+                Err(why) => {
+                    eprintln!("minicloud: no certificate yet ({why}); ordering one");
+                    Some(Arc::new(crate::tls::Certificates::none(pair.clone())))
+                }
+            },
+            (None, _) => None,
         };
         let triggers = Arc::new(crate::triggers::Triggers::new(
             Arc::clone(&engine),
@@ -346,6 +372,26 @@ impl Host {
         }
         if front.series.is_some() {
             runtime.spawn(crate::ops::sample(Arc::clone(&front)));
+        }
+        if let (Some(order), Some(certificates)) = (&options_acme, &front.certificates) {
+            runtime.spawn(crate::acme::keep(
+                order.clone(),
+                Arc::clone(&challenges),
+                Arc::clone(certificates),
+            ));
+        }
+        if let Some(at) = &options_acme_http {
+            let listener = std::net::TcpListener::bind(at)
+                .map_err(|e| format!("cannot listen on `{at}` for ACME: {e}"))?;
+            listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+            let listener = {
+                let _entered = runtime.enter();
+                tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?
+            };
+            runtime.spawn(crate::acme::serve_challenges(
+                listener,
+                Arc::clone(&challenges),
+            ));
         }
         runtime.spawn(Arc::clone(&front).accept(listener));
         if let Some(admin) = admin {
@@ -445,6 +491,19 @@ impl Host {
                 OpsListener::Public => "",
             }
         ));
+        if let Some(order) = &options.acme {
+            out.push_str(&format!(
+                "  ACME: {} from the {} authority, kept in {}\n",
+                order.domains.join(", "),
+                if order.staging { "staging" } else { "live" },
+                order.dir.display()
+            ));
+            if let Some(at) = &options.acme_http {
+                out.push_str(&format!(
+                    "  challenges and redirects to https on http://{at}\n"
+                ));
+            }
+        }
         if let Some(pair) = &options.tls {
             out.push_str(&format!(
                 "  TLS: {} with {} — HTTP/1.1 and HTTP/2; SIGHUP reads them again\n",

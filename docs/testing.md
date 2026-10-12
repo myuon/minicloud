@@ -171,6 +171,14 @@ so, and what it asserts is counted.
   behind it too; five ways of writing it wrong refuse that app alone; and
   the buckets refill, are swept when there are too many, and are forgotten
   with the app;
+- ACME (`acme.rs`, and `acme.rs`'s unit tests): the plain listener answers
+  a challenge the host is offering and redirects everything else to
+  `https://` keeping the path and the query; a token that is not being
+  offered is not an answer, and one that was withdrawn stops being one; a
+  host with no certificate yet starts; one with a certificate already on
+  disk serves it and makes no account. **The exchange with an authority is
+  not covered**: it needs an authority, a public name and port 80.
+  `--acme-staging` is what a first deployment finds out with;
 - the front door (`ingress.rs`, and `tls.rs`'s unit tests): the host
   terminates TLS itself and the answer comes back over HTTP/2, a plain
   request to that port is not served and does not take the host down; a

@@ -611,11 +611,31 @@ not read keeps what is serving, because an old certificate beats none. The
 handshake itself is on the connection's own task, under a timeout, so one
 that never finishes costs that task and nothing else.
 
-**ACME is deliberately not here.** Getting a certificate is an account, a
-challenge served from a path the host would have to answer before it has a
-certificate at all, and a renewal clock — a protocol, not a feature.
-Reading a pair that certbot renews is the smaller half and is the half that
-takes the proxy out of the picture today.
+**ACME is the other half**, and is `--acme-domain`. The protocol itself is
+`instant-acme`'s; what this host owns is where the account and the pair are
+kept, when to order, and the door the authority knocks on.
+
+- **The account is kept** (`<data>/_host/acme/account.json`, mode 0600). A
+  new account on every start is a new rate-limit allowance on every start,
+  which an authority is right to refuse.
+- **A certificate with more than thirty days left is served, not
+  reordered.** The certificate on disk is the one thing that has to survive
+  a restart, and renewing with a third of its life left turns a month of
+  failures into a month of warnings rather than an outage.
+- **The challenge is HTTP-01 on a listener of its own**, because it has to
+  be answered in the clear on port 80 by a host that does not have a
+  certificate yet. That listener redirects everything else to `https://`,
+  which is the thing every deployment was going to want from it anyway.
+- A host whose certificate has not been ordered yet **starts**, with a
+  resolver that offers nothing: refusing a handshake is the honest answer
+  when the host has nothing to prove who it is with, and the first order is
+  usually seconds away.
+
+The exchange with an authority is the one part of this host no test covers:
+a test has no authority, no public name and no port 80. What is tested is
+what this host owns — the challenge listener, what is written and read
+back, the renewal clock, and that a certificate already on disk is served
+without an order.
 
 **Compression is one pass over one buffer**, because the bodies are already
 whole: an app's answer is a `String` and a file is bytes the host holds. It

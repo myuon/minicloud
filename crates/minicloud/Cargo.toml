@@ -40,11 +40,14 @@ tar = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal", "io-util"] }
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 jsonwebtoken = "9"
+# ACME, so the host can get its own certificate ([`minicloud::acme`]).
+instant-acme = { version = "0.7", default-features = false, features = ["hyper-rustls", "ring"] }
+# The key and the signing request an order is made with; also the TLS
+# tests' certificate.
+rcgen = "0.13"
 
 [dev-dependencies]
 base64 = "0.22"
-# A certificate for the TLS tests, written as a renewal would write one.
-rcgen = "0.13"
 brotli = "8"
 rand = "0.8"
 rsa = "0.9"

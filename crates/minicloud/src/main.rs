@@ -87,6 +87,24 @@ enum Command {
         /// The private key for `--tls-cert`, in PEM.
         #[arg(long, value_name = "FILE", requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+        /// Get a certificate for this name from an ACME authority (Let's
+        /// Encrypt) and renew it, instead of being given one with
+        /// `--tls-cert`. Repeat for more names; the first is the subject.
+        /// Needs `--acme-http` reachable on port 80 from the internet.
+        #[arg(long, value_name = "NAME", conflicts_with = "tls_cert")]
+        acme_domain: Vec<String>,
+        /// The address the authority is told about, for its warnings that a
+        /// certificate is running out.
+        #[arg(long, value_name = "EMAIL")]
+        acme_email: Option<String>,
+        /// Use Let's Encrypt's staging authority, whose certificates are
+        /// not trusted and whose rate limits are kind. Use it first.
+        #[arg(long)]
+        acme_staging: bool,
+        /// Where the plain listener that answers ACME challenges — and
+        /// redirects everything else to https — listens.
+        #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:80")]
+        acme_http: String,
         /// On SIGTERM or Ctrl-C, how long to wait for requests in flight, in
         /// seconds; new ones are answered 503 meanwhile.
         #[arg(long, default_value_t = 10.0)]
@@ -415,6 +433,10 @@ fn main() -> ExitCode {
             trust_proxy,
             tls_cert,
             tls_key,
+            acme_domain,
+            acme_email,
+            acme_staging,
+            acme_http,
             shutdown_grace,
         } => {
             let mut options = ServeOptions::new(apps);
@@ -439,6 +461,22 @@ fn main() -> ExitCode {
                 (Some(cert), Some(key)) => Some(minicloud::tls::Pair { cert, key }),
                 _ => None,
             };
+            if !acme_domain.is_empty() {
+                let Some(data) = options.data.clone() else {
+                    eprintln!(
+                        "minicloud: --acme-domain needs a data directory to keep the \
+                               account and the certificate in"
+                    );
+                    return ExitCode::FAILURE;
+                };
+                options.acme = Some(minicloud::acme::Order {
+                    domains: acme_domain,
+                    email: acme_email,
+                    staging: acme_staging,
+                    dir: data.join("_host").join("acme"),
+                });
+                options.acme_http = Some(acme_http);
+            }
             eprintln!("minicloud: loading apps from {}", options.apps.display());
             let host = match Host::start(options) {
                 Ok(host) => host,

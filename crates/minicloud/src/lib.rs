@@ -28,6 +28,7 @@
 //! in-process on a free port.
 
 pub mod access;
+pub mod acme;
 pub mod admin;
 pub mod admin_module;
 pub mod apps;
