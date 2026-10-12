@@ -204,6 +204,16 @@ max_value_bytes = 1048576
 max_keys = 100000
 max_bytes = 67108864            # keys and values, summed
 
+[[queues]]                      # a durable queue, with `queue` granted
+name = "mail"                   # what `queue.send` names
+path = "/queue/mail"            # where a message is delivered
+max_attempts = 5                # deliveries before it becomes a dead letter
+retry = "30s"                   # after a failure; doubles each attempt
+lease = "60s"                   # how long one delivery may take
+max_depth = 10000               # messages waiting
+max_body_bytes = 65536
+batch = 8                       # deliveries of this queue at once
+
 [defer]                         # work that outlives a request, with `defer` granted
 max_in_flight = 8               # deferred runs of this app that have not finished
 
@@ -377,6 +387,44 @@ match sql.query("SELECT title FROM books WHERE pages > ? ORDER BY pages DESC", [
   held and not yielded: it is 20 ms by default for that reason, and a query
   that needs longer wants an index.
 
+### Queues
+
+`defer` is work the host will do in a moment and forget if it fails. A
+**queue** is work that is written down first:
+
+```toml
+[[queues]]
+name = "mail"
+max_attempts = 5
+retry = "30s"
+```
+
+```cove
+use queue
+
+queue.send("mail", "{id}")      // on disk when this answers
+```
+
+- A queue must be **declared in `app.toml`** before it can be sent to, so a
+  misspelt name is an `Err` at the call and not a queue nobody reads.
+- Sending is a write to the app's own SQLite file (`<data>/<app>/queue.sqlite3`)
+  and nothing else: the message is **on disk when `send` answers**, so a
+  host that stops between the send and the delivery still has it.
+- **Delivery is a run of the app** at the queue's `path`, with the message
+  as the body and `x-minicloud-queue` saying which queue (the host sets it,
+  and strips it from anything off a connection). A run that answers 2xx–4xx
+  has taken the message; one that answers 5xx or does not answer has not.
+- A delivery that is not taken is **tried again after `retry`, doubling**
+  each time, until `max_attempts` — then the message is a **dead letter**,
+  kept with the reason rather than dropped. `minicloud queues <app>` shows
+  what each queue holds and the last 50 dead letters; `--revive <id>` puts
+  one back.
+- **A delivery may happen twice.** A run that takes longer than `lease` is
+  taken to be lost and the message is tried again; if the first run then
+  finishes, the work has been done twice. The alternative — never retrying
+  — loses a message whenever the host stops mid-delivery, which is worse.
+  A consumer must be able to be asked twice.
+
 ### Work that outlives a request
 
 An app answers and is done: its isolate ends with its answer, so anything
@@ -462,6 +510,7 @@ path = "/cron/rollup"
 | `log` | `log` | `info`, `warn`, `error`: a line on stdout (`[app] level: line`) and in the app's log |
 | `timer` | `timer` | `sleep(millis)`: parks the run, at most 60 s |
 | `kv` | `kv` | the app's own SQLite store: `get`, `put`, `delete`, `increment`, `list`, `listDesc`; a `put` past a quota is the app's `Err` |
+| `queue` | `queue` | `send(name, body)`, `depth(name)`: a durable queue the host delivers from ([Queues](#queues)) |
 | `defer` | `defer` | `run(path, body)`: the host runs this app at `path` after this answer ([Work that outlives a request](#work-that-outlives-a-request)) |
 | `sql` | `sql` | the app's own SQL store, beside its `kv`: `query`, `exec`, one statement a call, parameters bound as text ([The SQL store](#the-sql-store)) |
 | `fetch` | `fetch` | `get(url)`, `request(method, url, headers, body)` to the `[fetch] allow` list only; parks the run; redirects are not followed |
@@ -494,7 +543,7 @@ error[minicloud::spawn]: `spawner.handle` can spawn a task, which minicloud does
   rule: A spawned task runs outside the host's worker pool and keeps its parent from parking or yielding; minicloud refuses an app that can spawn.
 greedy     requires [log]  granted [-]  REFUSED: `greedy.handle` requires `log`, which app.toml does not grant
 spawner    requires [-]  granted [-]  REFUSED: `spawner.handle` can spawn a task, which minicloud does not run
-checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, fetch, time, random, auth, host); 0 warning(s), 2 refused
+checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, fetch, time, random, auth, host); 0 warning(s), 2 refused
 ```
 
 `test` runs every `test fn` the way `cove test` does, with the app's grant,
@@ -585,7 +634,7 @@ were admitted to; the old version is dropped with its last request. The
 app's store, log and counters carry over.
 
 The other admin subcommands are `remove`, `enable`, `disable`, `reset`,
-`logs` and `secret` ([Operating](#operating)); `minicloud <command> --help` describes
+`logs`, `queues` and `secret` ([Operating](#operating)); `minicloud <command> --help` describes
 each. The listener's HTTP endpoints are listed in
 [docs/design.md](docs/design.md#updates-and-versions).
 
@@ -802,6 +851,9 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `errors` by kind, `rejected` by reason, `in_flight`, `queued`, `parked`,
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms`, `heap_peak_words`,
+`queues` (each queue's name, path, waiting and dead) with `queue_sent`,
+`queue_refused`, `queue_in_flight`, `queue_delivered`, `queue_retried` and
+`queue_buried`,
 `deferred_runs`, `deferred_in_flight`, `deferred_failed` and
 `deferred_refused`,
 `latency_us` (how long its answered requests took: the count, the mean and

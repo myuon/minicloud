@@ -116,6 +116,15 @@ so, and what it asserts is counted.
   stats. `cron.rs` holds the parser and the calendar to 32 cases of their
   own — the epoch, leap days, negative seconds, the day-or-weekday rule,
   the aliases, and every way a field can be wrong;
+- queues (`queue.rs`, and `queue.rs`'s 11 unit tests): a message outlives
+  the request that sent it, is delivered as a run, is on disk and is off
+  the queue once taken; a client cannot deliver one itself; a delivery that
+  is refused is tried again and then buried with its reason in the log,
+  while the app and its neighbour go on; a queue the app does not declare
+  is an `Err` that says which it has; a queue past `max_depth` refuses the
+  send; the messages survive a restart; five ways of writing `[[queues]]`
+  wrong refuse that app alone. The store's own tests hold the lease, the
+  retry, the burying and reviving, the depths and the pruning;
 - `defer` (`defer.rs`): the client is answered at once and the work is done
   after it, as a run of its own counted in `served`; a client that sends
   `x-minicloud-deferred` itself is still refused by an app that only

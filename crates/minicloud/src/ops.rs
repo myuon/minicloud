@@ -542,6 +542,36 @@ pub fn app_json(context: &OpsContext, slot: &Slot) -> Json {
                     "max_queued": app.limits.max_queued,
                 }),
             );
+            if !app.queues.is_empty() {
+                let depths = context
+                    .data
+                    .and_then(|data| {
+                        crate::queue::usage(&data.join(&slot.name).join("queue.sqlite3"))
+                    })
+                    .unwrap_or_default();
+                object.insert(
+                    "queues".into(),
+                    json!(app
+                        .queues
+                        .iter()
+                        .map(|queue| {
+                            let (waiting, dead) = depths
+                                .iter()
+                                .find(|(name, _, _)| *name == queue.name)
+                                .map(|(_, waiting, dead)| (*waiting, *dead))
+                                .unwrap_or((0, 0));
+                            json!({
+                                "name": queue.name,
+                                "path": queue.path,
+                                "waiting": waiting,
+                                "dead": dead,
+                                "max_depth": queue.max_depth,
+                                "max_attempts": queue.max_attempts,
+                            })
+                        })
+                        .collect::<Vec<Json>>()),
+                );
+            }
             if app.granted.contains("sql") {
                 let bytes = context
                     .data

@@ -19,6 +19,8 @@
 //! | `GET /apps` | the stats, as `GET /_host/stats` |
 //! | `GET /changes?n=50` | the change history, newest first, as JSON |
 //! | `GET /secrets` | the secret store ([`crate::secrets`]), as JSON: each secret stored or used — `name`, `set`, `updated_ms`, `apps` (those that use it) — **never a value** |
+//! | `GET /apps/<app>/queues` | what each of its queues holds and its dead letters, as JSON |
+//! | `POST /apps/<app>/queues/revive/<id>` | puts a dead letter back on its queue |
 //! | `GET /apps/<app>/logs?n=&follow=1` | its recent log lines as text, or — with `follow` — those and every line as it is written, as server-sent events (`minicloud logs`) |
 //! | `PUT /secrets/<name>` | body: the value. Stores it (mode 0600, atomically), then reloads every app that uses it. 200 with each app's reload; 422 for a name or value refused |
 //! | `DELETE /secrets/<name>` | removes it. 409 while an app uses it, unless `?force=1`, which reloads those apps without it (they are refused); 404 if it is not set |
@@ -101,6 +103,20 @@ async fn handle(front: &Front, request: Request<Incoming>) -> Response<crate::se
         }
     }
     to_response(reply(front, request).await)
+}
+
+/// The queue store of `name`, for the admin listener's queue routes.
+fn queues_of(
+    front: &Front,
+    name: &str,
+) -> Result<std::sync::Arc<std::sync::Mutex<crate::queue::Queues>>, String> {
+    let Some(data) = front.options.data.as_deref() else {
+        return Err("this host keeps no queues".to_string());
+    };
+    if front.engine.slot_named(name).is_none() {
+        return Err(format!("no app named `{name}`"));
+    }
+    crate::queue::shared(&data.join(name).join("queue.sqlite3"))
 }
 
 /// How many lines `?n=` asks for, bounded by what the ring keeps.
@@ -200,6 +216,50 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
     });
     match (method, path.as_str()) {
         (Method::GET, "/apps") => json_reply(&ops::stats(&front_ops(front))),
+        (Method::GET, _) if verb == "queues" && !name.is_empty() => match queues_of(front, &name) {
+            Ok(store) => {
+                let store = store.lock().unwrap_or_else(|p| p.into_inner());
+                let depths = store.depths().unwrap_or_default();
+                let dead = store.dead(None, 50).unwrap_or_default();
+                json_reply(&json!({
+                    "queues": depths.iter().map(|(name, waiting, dead)| json!({
+                        "name": name, "waiting": waiting, "dead": dead,
+                    })).collect::<Vec<_>>(),
+                    "dead": dead.iter().map(|(message, why)| json!({
+                        "id": message.id,
+                        "queue": message.queue,
+                        "attempts": message.attempts,
+                        "sent_unix": message.sent_unix,
+                        "body": message.body,
+                        "why": why,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+            Err(why) => Reply::text(404, format!("{why}\n")),
+        },
+        (Method::POST, _) if verb.starts_with("queues/revive/") && !name.is_empty() => {
+            let id = verb.trim_start_matches("queues/revive/").parse::<i64>();
+            match (queues_of(front, &name), id) {
+                (Ok(store), Ok(id)) => {
+                    let store = store.lock().unwrap_or_else(|p| p.into_inner());
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_secs() as i64);
+                    match store.revive(id, now) {
+                        Ok(true) => Reply::text(
+                            200,
+                            format!("dead letter {id} of `{name}` is on its queue again\n"),
+                        ),
+                        Ok(false) => {
+                            Reply::text(404, format!("`{name}` has no dead letter {id}\n"))
+                        }
+                        Err(why) => Reply::text(500, format!("{why}\n")),
+                    }
+                }
+                (Err(why), _) => Reply::text(404, format!("{why}\n")),
+                (_, Err(_)) => Reply::text(400, "the id is a number\n".to_string()),
+            }
+        }
         (Method::GET, _) if verb == "logs" && !name.is_empty() => {
             match front.engine.slot_named(&name) {
                 Some(slot) => Reply::text(200, slot.logs.tail(log_lines(request.uri()))),

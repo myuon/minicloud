@@ -18,6 +18,16 @@
 //! max_bytes = 8388608             # the files of `assets/` together
 //! cache_control = "no-cache"      # what every one of them is answered with
 //!
+//! [[queues]]                      # a durable queue, with `queue` granted
+//! name = "mail"                   # what `queue.send` names
+//! path = "/queue/mail"            # where a message is delivered
+//! max_attempts = 5                # deliveries before it becomes a dead letter
+//! retry = "30s"                   # after a failure; doubles each attempt
+//! lease = "60s"                   # how long one delivery may take
+//! max_depth = 10000               # messages waiting
+//! max_body_bytes = 65536
+//! batch = 8                       # deliveries of this queue at once
+//!
 //! [defer]                         # work that outlives a request, with `defer` granted
 //! max_in_flight = 8               # deferred runs of this app that have not finished
 //!
@@ -123,6 +133,10 @@ pub struct AppFile {
     pub rate: RateFile,
     #[serde(default)]
     pub defer: DeferFile,
+    /// `[[queues]]`: the queues this app may send to, and how the host
+    /// delivers them ([`crate::queue`]).
+    #[serde(default)]
+    pub queues: Vec<QueueFile>,
     /// Named secrets the app may check a presented credential against
     /// (`auth.check`), or the host sends as a header (`[fetch.headers]`);
     /// never read.
@@ -424,6 +438,20 @@ pub struct KvFile {
     pub max_value_bytes: Option<usize>,
     pub max_keys: Option<u64>,
     pub max_bytes: Option<u64>,
+}
+
+/// One `[[queues]]` entry as written.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueFile {
+    pub name: String,
+    pub path: Option<String>,
+    pub max_attempts: Option<u32>,
+    pub retry: Option<String>,
+    pub lease: Option<String>,
+    pub max_depth: Option<i64>,
+    pub max_body_bytes: Option<u64>,
+    pub batch: Option<u32>,
 }
 
 /// `[defer]` as written.
@@ -1035,6 +1063,32 @@ impl Default for SqlLimits {
     }
 }
 
+/// How many queues one app may declare.
+pub const MAX_QUEUES: usize = 16;
+
+/// One queue of an app: where its messages go, and what the host does when
+/// one is not taken.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuePolicy {
+    pub name: String,
+    /// The path a message is delivered to, below the app's prefix.
+    pub path: String,
+    /// Deliveries of one message before it is buried as a dead letter.
+    pub max_attempts: u32,
+    /// How long after a failed delivery the next one is due. It doubles
+    /// with each attempt, so a consumer that is down is asked less and
+    /// less often rather than every `retry` for as long as it is down.
+    pub retry: Duration,
+    /// How long one delivery may take before the message is taken to be
+    /// lost and tried again. A delivery that outlives it and then succeeds
+    /// has been done twice, which is why a consumer must be able to be.
+    pub lease: Duration,
+    pub max_depth: i64,
+    pub max_body_bytes: u64,
+    /// Messages of this queue the host may have in flight at once.
+    pub batch: u32,
+}
+
 /// `[defer]`: how much work an app may have outstanding
 /// ([`crate::defer`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1086,6 +1140,8 @@ pub struct AppConfig {
     pub assets: AssetPolicy,
     pub sql: SqlLimits,
     pub defer: DeferLimits,
+    /// `[[queues]]`: the queues this app may send to.
+    pub queues: Vec<QueuePolicy>,
     /// `[rate]`: how often one caller may reach this app; `None` for no
     /// limit of its own, which is the default.
     pub rate: Option<RatePolicy>,
@@ -1394,6 +1450,90 @@ pub fn parse_app_with(
             })
         }
     };
+    if file.queues.len() > MAX_QUEUES {
+        return Err(format!(
+            "`[[queues]]`: {} queues, which is more than {MAX_QUEUES}",
+            file.queues.len()
+        ));
+    }
+    let mut queues: Vec<QueuePolicy> = Vec::new();
+    for queue in file.queues {
+        let named = queue.name.len() <= 64
+            && !queue.name.is_empty()
+            && queue
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+        if !named {
+            return Err(format!(
+                "`[[queues]] name = \"{}\"` is not a queue name: 1 to 64 of a-z, 0-9, `-` \
+                 and `_`",
+                queue.name
+            ));
+        }
+        if queues.iter().any(|other| other.name == queue.name) {
+            return Err(format!(
+                "`[[queues]]`: two queues named `{}`; a name is one queue",
+                queue.name
+            ));
+        }
+        let path = queue
+            .path
+            .unwrap_or_else(|| format!("/queue/{}", queue.name));
+        if !path.starts_with('/')
+            || path.len() > 1024
+            || !path.chars().all(|c| c.is_ascii_graphic())
+        {
+            return Err(format!(
+                "`[[queues]] path = \"{path}\"` is not a path: it starts with `/` and holds \
+                 no space"
+            ));
+        }
+        let duration = |key: &str, written: Option<String>, fallback: Duration| match written {
+            Some(text) => {
+                let value =
+                    parse_duration(&text).map_err(|why| format!("`[[queues]] {key}`: {why}"))?;
+                if value.is_zero() {
+                    return Err(format!("`[[queues]] {key}` is 0; it is a length of time"));
+                }
+                Ok(value)
+            }
+            None => Ok(fallback),
+        };
+        let max_attempts = match queue.max_attempts {
+            Some(0) => {
+                return Err(
+                    "`[[queues]] max_attempts` is 0; a message nobody tries is a message \
+                     nobody should send"
+                        .to_string(),
+                )
+            }
+            Some(attempts) => attempts,
+            None => 5,
+        };
+        queues.push(QueuePolicy {
+            name: queue.name,
+            path,
+            max_attempts,
+            retry: duration("retry", queue.retry, Duration::from_secs(30))?,
+            lease: duration("lease", queue.lease, Duration::from_secs(60))?,
+            max_depth: match queue.max_depth {
+                Some(depth) if depth <= 0 => {
+                    return Err("`[[queues]] max_depth` is not 1 or more".to_string())
+                }
+                Some(depth) => depth,
+                None => 10_000,
+            },
+            max_body_bytes: positive("[queues]", "max_body_bytes", queue.max_body_bytes, 64 << 10)?,
+            batch: u32::try_from(positive(
+                "[queues]",
+                "batch",
+                queue.batch.map(u64::from),
+                8,
+            )?)
+            .unwrap_or(8),
+        });
+    }
     let defer = DeferLimits {
         max_in_flight: positive(
             "defer",
@@ -1503,6 +1643,7 @@ pub fn parse_app_with(
         assets,
         sql,
         defer,
+        queues,
         rate,
         triggers,
         fetch,

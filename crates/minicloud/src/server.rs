@@ -265,6 +265,10 @@ impl Host {
         }
         let workers = engine.start_workers()?;
         runtime.spawn(Arc::clone(&engine).monitor());
+        // A queue is a file, so a host with nowhere to keep one delivers
+        // nothing: an app may still send, into a store that lives and dies
+        // with the process (`minicloud test`).
+        let options_data_kept = options.data.is_some();
         // The history is the host's own state, beside the admin's changes
         // and the secret store, and is lost with the data directory as they
         // are. A host that keeps nothing still answers every current value.
@@ -317,6 +321,9 @@ impl Host {
         // a minute to find nothing due costs nothing.
         runtime.spawn(crate::triggers::tick(Arc::clone(&triggers)));
         runtime.spawn(crate::defer::deliver(Arc::clone(&front), deferred));
+        if options_data_kept {
+            runtime.spawn(crate::queue_host::deliver(Arc::clone(&front)));
+        }
         if front.series.is_some() {
             runtime.spawn(crate::ops::sample(Arc::clone(&front)));
         }

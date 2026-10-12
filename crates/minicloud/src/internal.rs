@@ -16,6 +16,7 @@
 //! | --- | --- |
 //! | `x-minicloud-trigger` | a `[[triggers]]` schedule, to the path it asked for |
 //! | `x-minicloud-deferred` | `defer.run`, to the path the app asked for |
+//! | `x-minicloud-queue` | a message being delivered, to the queue's name |
 //!
 //! The answer comes back on a `oneshot`, which the caller may wait on to
 //! count and log the outcome, or drop — dropping it does not cancel the
@@ -39,9 +40,12 @@ pub const TRIGGER_HEADER: &str = "x-minicloud-trigger";
 /// The header a deferred run carries, naming the path the app asked for.
 pub const DEFERRED_HEADER: &str = "x-minicloud-deferred";
 
+/// The header a queue's delivery carries, naming the queue.
+pub const QUEUE_HEADER: &str = "x-minicloud-queue";
+
 /// Every header the host sets on a run of its own and never takes from a
 /// client.
-pub const INTERNAL_HEADERS: [&str; 2] = [TRIGGER_HEADER, DEFERRED_HEADER];
+pub const INTERNAL_HEADERS: [&str; 3] = [TRIGGER_HEADER, DEFERRED_HEADER, QUEUE_HEADER];
 
 /// What the host wants run, and what to tell the app about it.
 pub struct Asked<'a> {
