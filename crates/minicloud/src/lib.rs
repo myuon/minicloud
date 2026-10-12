@@ -44,6 +44,7 @@ pub mod manage;
 pub mod ops;
 pub mod overrides;
 pub mod proxy;
+pub mod rate;
 pub mod router;
 pub mod sched;
 pub mod secrets;

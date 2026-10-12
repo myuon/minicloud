@@ -100,6 +100,8 @@ pub enum Rejection {
     BadRequest,
     /// The app is disabled by the administrator (503).
     Disabled,
+    /// The caller is past the app's `[rate]` (429, with `Retry-After`).
+    RateLimited,
 }
 
 /// One app's counters.
@@ -115,6 +117,8 @@ pub struct AppCounters {
     pub rejected_too_large: AtomicU64,
     pub rejected_bad_request: AtomicU64,
     pub rejected_disabled: AtomicU64,
+    /// Requests turned away at the door by `[rate]` ([`crate::rate`]).
+    pub rejected_rate_limited: AtomicU64,
     /// Runs parked at a host call, now.
     pub parked: AtomicU64,
     /// Parks, summed over every run.
@@ -214,6 +218,7 @@ impl AppCounters {
             Rejection::TooLarge => &self.rejected_too_large,
             Rejection::BadRequest => &self.rejected_bad_request,
             Rejection::Disabled => &self.rejected_disabled,
+            Rejection::RateLimited => &self.rejected_rate_limited,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -236,6 +241,7 @@ impl AppCounters {
                 "too_large": read(&self.rejected_too_large),
                 "bad_request": read(&self.rejected_bad_request),
                 "disabled": read(&self.rejected_disabled),
+                "rate_limited": read(&self.rejected_rate_limited),
             },
             "in_flight": in_flight,
             "queued": queued,

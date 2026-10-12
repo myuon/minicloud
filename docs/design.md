@@ -481,6 +481,32 @@ should not depend on where `--ops-listener` put the views.
 **This is not an app streaming.** An app still answers one `String`, and
 making a run able to write as it goes is the rest of #51.
 
+## `[rate]`: how often one caller may ask
+
+`max_queued` bounds how many requests may wait for an app and
+`--max-in-flight` how many the host holds at once, and neither stops one
+caller filling an app's queue by itself: the app's neighbours are fine, and
+the app is not.
+
+A token bucket per caller, checked in the HTTP front before anything else
+is done for the request — before the body is read, before a file is looked
+for, before the queue is touched — so a caller over its allowance costs a
+map lookup and a 429. Tokens are a `f64`: "sixty a minute" is one token a
+second, and an integer count could not say that.
+
+**Who a caller is, is configured, because the host cannot know.** The
+connection's address is the honest default and is the proxy's address
+behind a proxy; `header:<name>` names a header instead, for a host behind
+something that sets one, and the host does not verify it because a header
+is only as good as whoever is allowed to set it. `app` is one bucket for
+everyone.
+
+**The buckets are the host's.** They live in the `Front`, not on an `App`,
+so an update does not reset an allowance — a deploy loop would otherwise be
+a way around the limit — and the host keeps at most ten thousand of them,
+sweeping those that are back to full first, because a full bucket is the
+same as no bucket at all.
+
 ## Static files: the app's `assets/` directory
 
 A run answers a `web.Response` whose `body` is a `String`, and a Cove
