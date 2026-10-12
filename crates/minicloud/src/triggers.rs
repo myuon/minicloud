@@ -190,6 +190,11 @@ impl Triggers {
             use std::sync::atomic::Ordering::Relaxed;
             let outcome = answer.await;
             let took = began.elapsed().as_millis();
+            // Let the next tick through *before* counting this run, so
+            // that a counter saying the run has ended means the schedule
+            // can fire again. The other order leaves a window where it has
+            // been counted and the tick is still let go by.
+            running.lock().unwrap().remove(&key);
             counters.trigger_runs.fetch_add(1, Relaxed);
             match outcome {
                 // A status the app chose: 5xx is the runtime's or the app's
@@ -216,7 +221,6 @@ impl Triggers {
                     logs.push("host", &format!("{what}: no answer after {took} ms"));
                 }
             }
-            running.lock().unwrap().remove(&key);
         });
     }
 }

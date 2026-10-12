@@ -66,9 +66,14 @@ fn a_minute_the_schedule_does_not_name_runs_nothing_and_a_minute_fires_once() {
     // The same minute again — a timer that wakes twice — fires nothing.
     assert_eq!(host.fire_due(DUE + 1), 0);
     assert_eq!(host.fire_due(DUE + 59), 0);
-    wait_until("the first tick", || count(&host) == "1");
+    wait_until("the first tick to end", || {
+        common::count(&host, "ticker", "trigger_runs") == 1
+    });
     assert_eq!(host.fire_due(AGAIN), 1);
-    wait_until("the second tick", || count(&host) == "2");
+    wait_until("the second tick to end", || {
+        common::count(&host, "ticker", "trigger_runs") == 2
+    });
+    assert_eq!(count(&host), "2");
     assert_eq!(common::count(&host, "ticker", "trigger_runs"), 2);
 }
 
@@ -97,12 +102,17 @@ fn a_tick_whose_run_has_not_finished_is_let_go_by() {
     // The run sleeps, so the next hour's tick finds it still going: it is
     // let go by rather than run beside it.
     assert_eq!(host.fire_due(AGAIN), 0);
-    wait_until("the slow tick to finish", || count(&host) == "1");
+    wait_until("the slow tick to finish", || {
+        common::count(&host, "ticker", "trigger_runs") == 1
+    });
+    assert_eq!(count(&host), "1");
     assert_eq!(common::count(&host, "ticker", "trigger_skipped"), 1);
-    assert_eq!(common::count(&host, "ticker", "trigger_runs"), 1);
     // Once it has finished, the schedule runs again.
     assert_eq!(host.fire_due(AGAIN + 3600), 1);
-    wait_until("the tick after it", || count(&host) == "2");
+    wait_until("the tick after it", || {
+        common::count(&host, "ticker", "trigger_runs") == 2
+    });
+    assert_eq!(count(&host), "2");
 }
 
 #[test]
