@@ -149,7 +149,8 @@ so, and what it asserts is counted.
 - queues (`queue.rs`, and `queue.rs`'s 11 unit tests): a message outlives
   the request that sent it, is delivered as a run, is on disk and is off
   the queue once taken; a client cannot deliver one itself; a delivery that
-  is refused is tried again and then buried with its reason in the log,
+  is refused is tried again and then buried with its reason in the log, and
+  each delivery says which try it is and how many there will be,
   while the app and its neighbour go on; a queue the app does not declare
   is an `Err` that says which it has; a queue past `max_depth` refuses the
   send; the messages survive a restart; five ways of writing `[[queues]]`

@@ -483,10 +483,11 @@ pub(crate) async fn ring(front: Arc<crate::server::Front>) {
                         &query,
                         match &policy.by {
                             crate::config::KeyIn::Header(name) => {
-                                Some((name.as_str(), key.as_str()))
+                                vec![(name.as_str(), key.clone())]
                             }
-                            crate::config::KeyIn::Query(_) => None,
-                        },
+                            crate::config::KeyIn::Query(_) => Vec::new(),
+                        }
+                        .as_slice(),
                     );
                     app.counters
                         .alarms_run

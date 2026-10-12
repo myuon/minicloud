@@ -29,12 +29,24 @@ export fn handle(request: web.Request) -> web.Response {
       Err(error) => answer(500, error.message)
     }
   }
+  if request.path == "/tries" {
+    return answer(200, kv.get("tries").unwrapOr(""))
+  }
   if request.path == "/taken" {
     return answer(200, kv.get("taken").unwrapOr(""))
   }
   if request.path == "/queue/mail" {
     if request.headers.get("x-minicloud-queue").isNone() {
       return answer(403, "not the host")
+    }
+    let attempt = request.headers.get("x-minicloud-attempt").unwrapOr("?")
+    let attempts = request.headers.get("x-minicloud-attempts").unwrapOr("?")
+    if request.body == "count" {
+      let before = kv.get("tries").unwrapOr("")
+      return match kv.put("tries", "{before}{attempt}/{attempts};") {
+        Ok(_) => answer(500, "not yet")
+        Err(error) => answer(507, error.message)
+      }
     }
     if request.body == "fail" {
       log.warn("refusing {request.body}")

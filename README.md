@@ -541,8 +541,11 @@ queue.send("mail", "{id}")      // on disk when this answers
   and nothing else: the message is **on disk when `send` answers**, so a
   host that stops between the send and the delivery still has it.
 - **Delivery is a run of the app** at the queue's `path`, with the message
-  as the body and `x-minicloud-queue` saying which queue (the host sets it,
-  and strips it from anything off a connection). A run that answers 2xx–4xx
+  as the body and `x-minicloud-queue` saying which queue, beside
+  `x-minicloud-attempt` and `x-minicloud-attempts` — which try this is and
+  how many there will be, so a consumer can tell the failure that is about
+  to become a dead letter from the ones before it. The host sets all three
+  and strips them from anything off a connection. A run that answers 2xx–4xx
   has taken the message; one that answers 5xx or does not answer has not.
 - A delivery that is not taken is **tried again after `retry`, doubling**
   each time, until `max_attempts` — then the message is a **dead letter**,
