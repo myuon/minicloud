@@ -416,6 +416,49 @@ public origin's scheme, and its port if it has one) — the name the route
 matched, never one the client chose — so an app's same-origin check compares
 against the origin its own pages were served from.
 
+## One run at a time for one key
+
+Issue #55 asked for "a single writer per key holding state and an alarm,
+as Cloudflare's Durable Objects are", and said it needed a design note
+first. This is it.
+
+**What a Durable Object is, is three things**: an address, a single writer,
+and state held in memory between requests. The third one cannot exist here
+and should not: a run's heap ends with the run, which is what makes a
+request's cost a request's cost, and an object that lived between requests
+would be a heap with no owner and no budget. The first two can, and they
+are the two that make the state safe.
+
+So: **the key is in the request** and the host takes that key's turn before
+admitting it, holding it until the answer. The app reads, decides and
+writes into its own `kv` or `sql` with nobody in the middle — which is what
+the object was for — and the state is on disk rather than in a heap, which
+is where state that outlives a request belongs anyway.
+
+The key has to come from the request rather than from the app's code,
+because the waiting happens **before** the run starts; it is a query
+parameter or a header that `[keyed] by` names. That is a real limit: the
+key cannot be computed. It is also what keeps the whole feature out of the
+scheduler — the turn is taken on the HTTP task, which is already waiting
+for the answer, and nothing in `sched.rs` knows any of this happened.
+
+**The lock is `tokio`'s**, which is fair, so a key's requests are served in
+the order they arrived rather than whichever wakes first. `max_waiting`
+bounds the queue behind one key: without it, one hot key could fill the
+host's admission limit with requests that are all waiting for each other.
+A key nobody is holding or waiting for is swept, because it is the same as
+a key that was never there.
+
+**An alarm is a key with a time on it.** One per key — a key is one thing —
+in the app's own SQLite file, taken when it goes off, and run under the
+key's turn like everything else about that key. An alarm that fires while a
+request about the same key is running waits for it, which is the only
+behaviour that makes an alarm as safe as a request.
+
+The one deadlock is an app that calls itself with the same key from inside
+a keyed run. It waits for itself and its deadline ends it; there is nothing
+else to do about it, and saying so is better than pretending.
+
 ## Queues: work that is written down first
 
 `defer` hands the host work and forgets it: if the host stops before the

@@ -27,7 +27,8 @@ use cove_sema::{Compiler, HostSchemas};
 use crate::assets::Assets;
 use crate::config::{
     read_app_with, AppConfig, AppLimits, AppOverride, AssetPolicy, DeferLimits, FetchPolicy,
-    KvLimits, QueuePolicy, RatePolicy, RemovedKeys, SecretSource, Secrets, Trigger, ADMIN_APP,
+    KeyedPolicy, KvLimits, QueuePolicy, RatePolicy, RemovedKeys, SecretSource, Secrets, Trigger,
+    ADMIN_APP,
 };
 use crate::hosts::{AppContext, HostModules};
 use crate::logs::LogRing;
@@ -121,6 +122,8 @@ pub struct App {
     pub defer: DeferLimits,
     /// `[[queues]]`: the queues it may send to, and how they are delivered.
     pub queues: Vec<QueuePolicy>,
+    /// `[keyed]`: one run at a time for one key ([`crate::keyed`]).
+    pub keyed: Option<KeyedPolicy>,
     pub fetch: FetchPolicy,
     /// `[assets]`: how the files below are answered.
     pub asset_policy: AssetPolicy,
@@ -243,6 +246,7 @@ impl App {
             defer: self.defer.clone(),
             defer_to: defer_to.cloned(),
             queues: self.queues.clone(),
+            keyed: self.keyed.clone(),
             max_response_bytes: self.limits.max_response_bytes,
             fetch: self.fetch.clone(),
             secrets: self.secrets.clone(),
@@ -398,6 +402,7 @@ pub fn describe_as(
         sql: crate::config::SqlLimits::default(),
         defer: DeferLimits::default(),
         queues: Vec::new(),
+        keyed: None,
         fetch: FetchPolicy::default(),
         asset_policy: AssetPolicy::default(),
         assets: Arc::new(Assets::default()),
@@ -427,6 +432,7 @@ pub fn describe_as(
             app.sql = config.sql.clone();
             app.defer = config.defer.clone();
             app.queues = config.queues.clone();
+            app.keyed = config.keyed.clone();
             app.fetch = config.fetch.clone();
             app.secrets = config.secrets.clone();
             app.access = config.access.clone();

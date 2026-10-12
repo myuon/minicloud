@@ -125,6 +125,16 @@ so, and what it asserts is counted.
   app's `Err` while the rest of the run goes on; a client that goes away is
   told to the run, which ends; an app not granted `stream` is refused at
   load;
+- one run at a time for one key (`keyed.rs`, and `keyed.rs`'s unit tests):
+  five requests about one key that each read, wait and write back end with
+  the count at five, where without a turn they would all write one; another
+  key is not waiting for this one and a request with no key is not keyed;
+  more waiting for one key than `max_waiting` is 429 with `Retry-After`
+  while another app answers; an alarm wakes the app once at its key, is one
+  per key, can be taken back, survives a restart, and is the host's to ring;
+  four ways of writing `[keyed]` wrong refuse that app alone. The store's
+  own tests hold the upsert, the taking in time order and the limit, and
+  the lock's hold that one turn waits and another key does not;
 - queues (`queue.rs`, and `queue.rs`'s 11 unit tests): a message outlives
   the request that sent it, is delivered as a run, is on disk and is off
   the queue once taken; a client cannot deliver one itself; a delivery that
