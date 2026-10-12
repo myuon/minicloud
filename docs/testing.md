@@ -155,7 +155,9 @@ so, and what it asserts is counted.
   send; the messages survive a restart; five ways of writing `[[queues]]`
   wrong refuse that app alone. The store's own tests hold the lease, the
   retry, the burying and reviving, the depths and the pruning;
-- `defer` (`defer.rs`): the client is answered at once and the work is done
+- `defer` (`defer.rs`): a query in the path reaches the app as a query —
+  which `[keyed]` needs, since the key is read out of it; the client is
+  answered at once and the work is done
   after it, as a run of its own counted in `served`; a client that sends
   `x-minicloud-deferred` itself is still refused by an app that only
   answers the host; more outstanding work than `max_in_flight` is the app's

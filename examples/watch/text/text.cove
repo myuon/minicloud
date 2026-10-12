@@ -1,0 +1,190 @@
+// Pure text helpers the webhook lab needs and the standard library does not
+// have: HTML escaping, form decoding, and calendar dates.
+
+/// `text` with `&`, `<`, `>`, `"` and `'` written as HTML entities, so that it
+/// reads as text inside an element or a quoted attribute, whatever it holds.
+export fn escapeHtml(text: String) -> String {
+  if !needsHtmlEscaping(text) {
+    return text
+  }
+  text.replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+    .replace("\"", "&quot;")
+    .replace("'", "&#39;")
+}
+
+/// Whether `text` holds a character `escapeHtml` would replace.
+fn needsHtmlEscaping(text: String) -> Bool {
+  let end = text.byteLength()
+  var at = 0
+  while at < end {
+    let byte = text.byteAt(at)
+    if byte == 38 || byte == 60 || byte == 62 || byte == 34 || byte == 39 {
+      return true
+    }
+    at += 1
+  }
+  false
+}
+
+/// Decodes `application/x-www-form-urlencoded` text: `+` is a space and
+/// `%XX` a byte, and the bytes are read as UTF-8 (a byte sequence that is not
+/// UTF-8 becomes U+FFFD).
+export fn urlDecode(text: String) -> String {
+  var bytes = Vector.of()
+  let end = text.byteLength()
+  var at = 0
+  while at < end {
+    let byte = text.byteAt(at)
+    if byte == 43 {
+      bytes.push(32)
+      at += 1
+    } else if byte == 37 && at + 2 < end {
+      match Int.parseRadix(text.sliceBytes(at + 1, at + 3).unwrapOr("zz"), 16) {
+        Ok(value) => {
+          if value >= 0 {
+            bytes.push(value)
+            at += 3
+          } else {
+            bytes.push(byte)
+            at += 1
+          }
+        }
+        Err(_) => {
+          bytes.push(byte)
+          at += 1
+        }
+      }
+    } else {
+      bytes.push(byte)
+      at += 1
+    }
+  }
+  decodeUtf8(bytes.freeze())
+}
+
+/// UTF-8 bytes as text; a sequence that is not UTF-8 is U+FFFD.
+export fn decodeUtf8(bytes: Array<Int>) -> String {
+  var parts = Vector.of()
+  let end = bytes.length()
+  var at = 0
+  while at < end {
+    let first = bytes.get(at).unwrapOr(0)
+    var need = 0
+    var point = 0
+    if first < 128 {
+      point = first
+    } else if first >= 194 && first < 224 {
+      need = 1
+      point = first - 192
+    } else if first >= 224 && first < 240 {
+      need = 2
+      point = first - 224
+    } else if first >= 240 && first < 245 {
+      need = 3
+      point = first - 240
+    } else {
+      point = -1
+    }
+    at += 1
+    var taken = 0
+    while taken < need && point >= 0 {
+      let next = bytes.get(at).unwrapOr(-1)
+      if next >= 128 && next < 192 {
+        point = point * 64 + (next - 128)
+        at += 1
+        taken += 1
+      } else {
+        point = -1
+      }
+    }
+    parts.push(String.fromCodePoint(point).unwrapOr(replacement()))
+  }
+  "".join(parts.freeze())
+}
+
+/// U+FFFD, what a byte sequence that is not UTF-8 decodes to.
+fn replacement() -> String {
+  String.fromCodePoint(65533).unwrapOr("?")
+}
+
+/// A form body (`a=1&b=two+words`) as a map; for a repeated name the last
+/// value wins.
+export fn parseForm(body: String) -> Map<String, String> {
+  var fields: Map<String, String> = Map.of()
+  for pair in body.split("&") {
+    if pair != "" {
+      let parts = pair.split("=")
+      let name = urlDecode(parts.get(0).unwrapOr(""))
+      let value = urlDecode("=".join(parts.slice(1, parts.length())))
+      fields = fields.inserted(name, value)
+    }
+  }
+  fields
+}
+
+/// `value` written in decimal with at least `width` digits, zero-padded.
+export fn padded(value: Int, width: Int) -> String {
+  var text = "{value}"
+  while text.length() < width {
+    text = "0{text}"
+  }
+  text
+}
+
+/// Milliseconds since the Unix epoch as an ISO 8601 UTC time:
+/// `2026-10-05T03:13:54.123Z`.
+export fn isoTime(millis: Int) -> String {
+  let days = floorDiv(millis, 86400000)
+  let ofDay = millis - days * 86400000
+  // Howard Hinnant's `civil_from_days`.
+  let z = days + 719468
+  let era = floorDiv(z, 146097)
+  let doe = z - era * 146097
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp = (5 * doy + 2) / 153
+  let day = doy - (153 * mp + 2) / 5 + 1
+  let month = if mp < 10 { mp + 3 } else { mp - 9 }
+  let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 }
+  let hour = ofDay / 3600000
+  let minute = ofDay / 60000 % 60
+  let second = ofDay / 1000 % 60
+  let milli = ofDay % 1000
+  "{padded(year, 4)}-{padded(month, 2)}-{padded(day, 2)}T{padded(hour, 2)}:{padded(minute, 2)}:{padded(second, 2)}.{padded(milli, 3)}Z"
+}
+
+/// Division rounding toward negative infinity.
+fn floorDiv(value: Int, by: Int) -> Int {
+  let quotient = value / by
+  if value % by < 0 { quotient - 1 } else { quotient }
+}
+
+/// A byte count as people read one: `512 B`, `1.5 KiB`, `2.0 MiB`.
+export fn bytes(count: Int) -> String {
+  if count < 1024 {
+    return "{count} B"
+  }
+  if count < 1048576 {
+    return "{count / 1024}.{count % 1024 * 10 / 1024} KiB"
+  }
+  "{count / 1048576}.{count % 1048576 * 10 / 1048576} MiB"
+}
+
+/// At most the first `limit` bytes of `text`, cut at a character boundary.
+export fn truncateBytes(text: String, limit: Int) -> String {
+  if text.byteLength() <= limit {
+    return text
+  }
+  var end = limit
+  while end > 0 {
+    match text.sliceBytes(0, end) {
+      Ok(prefix) => return prefix
+      Err(_) => {
+        end -= 1
+      }
+    }
+  }
+  ""
+}

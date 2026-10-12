@@ -1,0 +1,53 @@
+/* The watch's one stylesheet, answered by the host from `assets/` before
+   the app runs: the page links it, and no run is spent on it. */
+:root {
+  color-scheme: light dark;
+  --bg: #f4f6f8; --card: #fff; --line: #e1e5ea; --text: #191c21; --quiet: #67707c;
+  --up: #0f7a38; --up-bg: #e7f6ec; --down: #b32318; --down-bg: #fdeceb;
+  --new: #58606c; --new-bg: #eaedf1; --link: #3a4bb0;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --card: #191d23; --line: #2b313a; --text: #e7e9ec; --quiet: #98a1ad;
+    --up: #52cc84; --up-bg: #13301f; --down: #ff8f82; --down-bg: #3a1c19;
+    --new: #aab3bf; --new-bg: #262b33; --link: #a3b2ff;
+  }
+}
+* { box-sizing: border-box }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--card) }
+main { max-width: 56rem; margin: 0 auto; padding: 1.25rem }
+h2 { font-size: 1.05rem; margin: 2rem 0 .75rem }
+a { color: var(--link) }
+table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line) }
+th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid var(--line); vertical-align: top }
+th { font-weight: 600; font-size: .85rem; color: var(--quiet) }
+tr:last-child td { border-bottom: 0 }
+.quiet { color: var(--quiet); font-size: .85rem }
+.state { display: inline-block; padding: .1rem .5rem; border-radius: 1rem; font-size: .8rem; font-weight: 600 }
+.state.up { color: var(--up); background: var(--up-bg) }
+.state.down { color: var(--down); background: var(--down-bg) }
+.state.new { color: var(--new); background: var(--new-bg) }
+form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end }
+label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: var(--quiet) }
+input {
+  padding: .4rem .5rem; border: 1px solid var(--line); border-radius: .25rem;
+  background: var(--card); color: var(--text); min-width: 14rem;
+}
+button {
+  padding: .4rem .75rem; border: 1px solid var(--line); border-radius: .25rem;
+  background: var(--card); color: var(--text); cursor: pointer; font: inherit;
+}
+button:hover { border-color: var(--link); color: var(--link) }
+td form { display: inline-flex }
+@media (max-width: 40rem) {
+  table, tbody, tr, td, th { display: block }
+  thead { display: none }
+  tr { border-bottom: 1px solid var(--line); padding: .5rem 0 }
+  td { border: 0; padding: .25rem .75rem }
+  input { min-width: 0; width: 100% }
+  label { width: 100% }
+}

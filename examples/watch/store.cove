@@ -1,0 +1,212 @@
+use sql
+use time
+
+/// What the watch keeps, and the questions it asks of it.
+///
+/// Two tables in the app's own SQL store: the targets, and every check ever
+/// made. `kv` could hold the targets and could not answer "how many of the
+/// last day's checks were good, by target", which is the question a watch
+/// exists to answer — so this is `sql`'s.
+
+/// One target: a name, where it is, and where to say so when it changes.
+struct Target {
+  id: String
+  url: String
+  notify: String
+}
+
+/// The last thing known about a target.
+struct Status {
+  target: String
+  url: String
+  ok: Bool
+  status: Int
+  ms: Int
+  at: Int
+  why: String
+  // Checks kept for this target over the window, and how many were good.
+  checks: Int
+  good: Int
+}
+
+/// Makes the tables if they are not there. Every path calls it first: it is
+/// two statements SQLite answers from its own schema, and an app that made
+/// its tables in one place would have a place that has to run first.
+fn prepare() -> Result<Unit, Error> {
+  sql.exec(
+    "CREATE TABLE IF NOT EXISTS target (
+       id TEXT PRIMARY KEY,
+       url TEXT NOT NULL,
+       notify TEXT NOT NULL,
+       added INTEGER NOT NULL
+     )",
+    [],
+  )?
+  sql.exec(
+    "CREATE TABLE IF NOT EXISTS checks (
+       id INTEGER PRIMARY KEY,
+       target TEXT NOT NULL,
+       at INTEGER NOT NULL,
+       ok INTEGER NOT NULL,
+       status INTEGER NOT NULL,
+       ms INTEGER NOT NULL,
+       why TEXT NOT NULL
+     )",
+    [],
+  )?
+  // The index the dashboard's question needs: a target's checks, newest
+  // first. Without it every page would be a scan of everything ever
+  // checked.
+  sql.exec("CREATE INDEX IF NOT EXISTS checks_by_target ON checks (target, at DESC)", [])?
+  Ok(())
+}
+
+/// The value at `at` of a row, or `""` for a column that is null.
+fn cell(row: sql.Row, at: Int) -> String {
+  match row.values.get(at) {
+    Some(value) => value.unwrapOr("")
+    None => ""
+  }
+}
+
+/// The value at `at` as a number.
+fn number(row: sql.Row, at: Int) -> Int {
+  Int.parse(cell(row, at)).unwrapOr(0)
+}
+
+/// Adds a target, or replaces where it is.
+fn addTarget(id: String, url: String, notify: String) -> Result<Unit, Error> {
+  prepare()?
+  sql.exec(
+    "INSERT INTO target (id, url, notify, added) VALUES (?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET url = excluded.url, notify = excluded.notify",
+    [id, url, notify, "{time.nowMillis()}"],
+  )?
+  Ok(())
+}
+
+fn removeTarget(id: String) -> Result<Unit, Error> {
+  prepare()?
+  sql.exec("DELETE FROM target WHERE id = ?", [id])?
+  sql.exec("DELETE FROM checks WHERE target = ?", [id])?
+  Ok(())
+}
+
+/// Every target, by name.
+fn targets() -> Result<Array<Target>, Error> {
+  prepare()?
+  let answer = sql.query("SELECT id, url, notify FROM target ORDER BY id", [])?
+  var out = Vector.of()
+  for row in answer.rows {
+    out.push(Target(id: cell(row, 0), url: cell(row, 1), notify: cell(row, 2)))
+  }
+  Ok(out.freeze())
+}
+
+/// One target, if there is one.
+fn target(id: String) -> Result<Option<Target>, Error> {
+  prepare()?
+  let answer = sql.query("SELECT id, url, notify FROM target WHERE id = ?", [id])?
+  match answer.rows.get(0) {
+    Some(row) => Ok(Some(Target(id: cell(row, 0), url: cell(row, 1), notify: cell(row, 2))))
+    None => Ok(None)
+  }
+}
+
+/// Writes down what a check found.
+fn record(target: String, ok: Bool, status: Int, ms: Int, why: String) -> Result<Unit, Error> {
+  prepare()?
+  sql.exec(
+    "INSERT INTO checks (target, at, ok, status, ms, why) VALUES (?, ?, ?, ?, ?, ?)",
+    [target, "{time.nowMillis()}", if ok { "1" } else { "0" }, "{status}", "{ms}", why],
+  )?
+  Ok(())
+}
+
+/// Whether the last check before this one was good, for a target that has
+/// been checked twice. `None` for one that has not: the first check of a
+/// target is not a change.
+fn wasOk(target: String) -> Result<Option<Bool>, Error> {
+  prepare()?
+  let answer = sql.query(
+    "SELECT ok FROM checks WHERE target = ? ORDER BY at DESC LIMIT 1 OFFSET 1",
+    [target],
+  )?
+  match answer.rows.get(0) {
+    Some(row) => Ok(Some(number(row, 0) == 1))
+    None => Ok(None)
+  }
+}
+
+/// Every target with the last thing known about it, and how much of the
+/// last day was good.
+///
+/// One query, with a join and an aggregate: the thing `kv` could not do.
+fn statuses(since: Int) -> Result<Array<Status>, Error> {
+  prepare()?
+  let answer = sql.query(
+    "SELECT t.id, t.url,
+            (SELECT ok FROM checks c WHERE c.target = t.id ORDER BY c.at DESC LIMIT 1),
+            (SELECT status FROM checks c WHERE c.target = t.id ORDER BY c.at DESC LIMIT 1),
+            (SELECT ms FROM checks c WHERE c.target = t.id ORDER BY c.at DESC LIMIT 1),
+            (SELECT at FROM checks c WHERE c.target = t.id ORDER BY c.at DESC LIMIT 1),
+            (SELECT why FROM checks c WHERE c.target = t.id ORDER BY c.at DESC LIMIT 1),
+            (SELECT count(*) FROM checks c WHERE c.target = t.id AND c.at >= ?),
+            (SELECT sum(ok) FROM checks c WHERE c.target = t.id AND c.at >= ?)
+     FROM target t ORDER BY t.id",
+    ["{since}", "{since}"],
+  )?
+  var out = Vector.of()
+  for row in answer.rows {
+    out.push(
+      Status(
+        target: cell(row, 0),
+        url: cell(row, 1),
+        ok: number(row, 2) == 1,
+        status: number(row, 3),
+        ms: number(row, 4),
+        at: number(row, 5),
+        why: cell(row, 6),
+        checks: number(row, 7),
+        good: number(row, 8),
+      ),
+    )
+  }
+  Ok(out.freeze())
+}
+
+/// A target's last checks, newest first.
+fn history(target: String, limit: Int) -> Result<Array<Status>, Error> {
+  prepare()?
+  let answer = sql.query(
+    "SELECT at, ok, status, ms, why FROM checks WHERE target = ? ORDER BY at DESC LIMIT ?",
+    [target, "{limit}"],
+  )?
+  var out = Vector.of()
+  for row in answer.rows {
+    out.push(
+      Status(
+        target: target,
+        url: "",
+        ok: number(row, 1) == 1,
+        status: number(row, 2),
+        ms: number(row, 3),
+        at: number(row, 0),
+        why: cell(row, 4),
+        checks: 0,
+        good: 0,
+      ),
+    )
+  }
+  Ok(out.freeze())
+}
+
+/// Drops checks older than `before`, and answers how many went.
+///
+/// A watch that kept every check for ever would fill its store with
+/// yesterday; a day is what the dashboard asks about.
+fn prune(before: Int) -> Result<Int, Error> {
+  prepare()?
+  let gone = sql.exec("DELETE FROM checks WHERE at < ?", ["{before}"])?
+  Ok(gone.rows)
+}

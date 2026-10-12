@@ -38,6 +38,23 @@ fn the_work_happens_after_the_answer_and_as_a_run_of_its_own() {
 }
 
 #[test]
+fn a_query_in_the_path_reaches_the_app_as_a_query() {
+    let apps = errand(None);
+    let host = start(&apps, 2);
+    assert_eq!(get(host.addr, "/errand/ask-with-query").status, 202);
+    wait_until("the deferred run", || {
+        count(&host, "errand", "deferred_runs") == 1
+    });
+    // The app sees the path and the query apart, as it does for a request
+    // off a connection — and `[keyed]` could not read a key out of a query
+    // that had stayed in the path.
+    assert_eq!(
+        get(host.addr, "/errand/asked-for").body.trim(),
+        "/work about=a thing n=2"
+    );
+}
+
+#[test]
 fn only_the_host_can_claim_to_be_a_deferred_run() {
     let apps = errand(None);
     let host = start(&apps, 2);
