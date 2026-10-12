@@ -18,6 +18,11 @@
 //! max_bytes = 8388608             # the files of `assets/` together
 //! cache_control = "no-cache"      # what every one of them is answered with
 //!
+//! [[triggers]]                   # the host runs the app itself, on a schedule
+//! cron = "0 * * * *"             # UTC, to the minute; or @hourly, @daily, …
+//! path = "/cron/hourly"          # the path the run is given; `/` by default
+//! method = "POST"                # the method it is given
+//!
 //! [route]
 //! hosts = ["admin.example"]       # reached by these hostnames only, not /<name>/
 //!
@@ -103,6 +108,10 @@ pub struct AppFile {
     pub secrets: BTreeMap<String, SecretFile>,
     #[serde(default)]
     pub route: RouteFile,
+    /// `[[triggers]]`: when the host runs the app itself
+    /// ([`crate::triggers`]).
+    #[serde(default)]
+    pub triggers: Vec<TriggerFile>,
     /// Cloudflare Access, for `auth.identity` ([`crate::access`]).
     #[serde(default)]
     pub access: AccessFile,
@@ -136,6 +145,42 @@ pub struct RouteFile {
     /// it.
     #[serde(default)]
     pub hosts: Vec<String>,
+}
+
+/// One `[[triggers]]` entry as written.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerFile {
+    /// A cron expression, or one of `@hourly`, `@daily`, `@weekly`,
+    /// `@monthly`, `@yearly` ([`crate::cron`]).
+    pub cron: String,
+    /// The path the run is given; `/` by default.
+    pub path: Option<String>,
+    /// The method the run is given; `POST` by default.
+    pub method: Option<String>,
+}
+
+/// How many schedules one app may have.
+///
+/// A tick asks every app's schedules whether they are due, so the cost of a
+/// schedule is paid every minute whether it fires or not; an app that wants
+/// more than this wants one schedule and a path that decides.
+pub const MAX_TRIGGERS: usize = 16;
+
+/// When the host runs an app itself, and as what.
+///
+/// The run is the app's own entry over a request the host builds, so an app
+/// routes a trigger as it routes anything else; what it cannot do is
+/// mistake one for a request from outside, because the host sets
+/// `x-minicloud-trigger` on the one and strips it from the other
+/// ([`crate::triggers`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trigger {
+    pub cron: crate::cron::Schedule,
+    /// Where the run is sent, below the app's prefix: starts with `/`.
+    pub path: String,
+    /// The method the run is made with.
+    pub method: String,
 }
 
 /// One `[secrets]` entry: where its value comes from.
@@ -888,6 +933,8 @@ pub struct AppConfig {
     pub limits: AppLimits,
     pub kv: KvLimits,
     pub assets: AssetPolicy,
+    /// `[[triggers]]`: when the host runs this app itself.
+    pub triggers: Vec<Trigger>,
     pub fetch: FetchPolicy,
     pub secrets: Secrets,
     /// The secrets given a placeholder value because they could not be
@@ -1089,6 +1136,40 @@ pub fn parse_app_with(
             hosts.push(host);
         }
     }
+    if file.triggers.len() > MAX_TRIGGERS {
+        return Err(format!(
+            "`[[triggers]]`: {} schedules, which is more than {MAX_TRIGGERS}",
+            file.triggers.len()
+        ));
+    }
+    let mut triggers = Vec::new();
+    for trigger in file.triggers {
+        let cron = crate::cron::Schedule::parse(&trigger.cron)
+            .map_err(|why| format!("`[[triggers]] cron`: {why}"))?;
+        let path = trigger.path.unwrap_or_else(|| "/".to_string());
+        // The path is a path the app would see, so it is held to what one
+        // looks like: a query is the schedule's to put in the path it asks
+        // for, not a field of its own.
+        let usable = path.starts_with('/')
+            && path.len() <= 1024
+            && path
+                .chars()
+                .all(|c| c.is_ascii_graphic() && c != '?' && c != '#');
+        if !usable {
+            return Err(format!(
+                "`[[triggers]] path = \"{path}\"` is not a path: it starts with `/` and holds \
+                 no space, `?` or `#`"
+            ));
+        }
+        let method = trigger.method.unwrap_or_else(|| "POST".to_string());
+        if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(format!(
+                "`[[triggers]] method = \"{method}\"` is not a method: upper-case letters, \
+                 such as `POST` or `GET`"
+            ));
+        }
+        triggers.push(Trigger { cron, path, method });
+    }
     let entry = file.entry.unwrap_or_else(|| format!("{name}.handle"));
     if entry.split_once('.').is_none() {
         return Err(format!("`entry = \"{entry}\"` is not `module.function`"));
@@ -1174,6 +1255,7 @@ pub fn parse_app_with(
         limits,
         kv,
         assets,
+        triggers,
         fetch,
         secrets,
         placeholders,
@@ -1302,6 +1384,61 @@ mod tests {
             RemovedKeys::Ignore,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_trigger_takes_its_path_and_method_or_their_defaults() {
+        let config = parse_app("[[triggers]]\ncron = \"@daily\"\n", "a").unwrap();
+        assert_eq!(config.triggers.len(), 1);
+        assert_eq!(config.triggers[0].path, "/");
+        assert_eq!(config.triggers[0].method, "POST");
+        assert_eq!(config.triggers[0].cron.as_str(), "@daily");
+        let config = parse_app(
+            "[[triggers]]\ncron = \"*/5 * * * *\"\npath = \"/cron/x\"\nmethod = \"GET\"\n",
+            "a",
+        )
+        .unwrap();
+        assert_eq!(config.triggers[0].path, "/cron/x");
+        assert_eq!(config.triggers[0].method, "GET");
+    }
+
+    #[test]
+    fn a_schedule_that_does_not_parse_refuses_the_app_naming_the_key() {
+        let why = parse_app("[[triggers]]\ncron = \"0 0 * *\"\n", "a").unwrap_err();
+        assert!(why.contains("`[[triggers]] cron`"), "{why}");
+        assert!(
+            why.contains("5"),
+            "it says how many fields a schedule has: {why}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_triggers_key_is_refused_by_name() {
+        let why = parse_app("[[triggers]]\ncron = \"@daily\"\nwhen = \"noon\"\n", "a").unwrap_err();
+        assert!(why.contains("when"), "{why}");
+    }
+
+    #[test]
+    fn a_trigger_path_or_method_that_could_not_be_a_request_is_refused() {
+        for bad in [
+            "[[triggers]]\ncron = \"@daily\"\npath = \"cron\"\n",
+            "[[triggers]]\ncron = \"@daily\"\npath = \"/a b\"\n",
+            "[[triggers]]\ncron = \"@daily\"\npath = \"/a?b=1\"\n",
+        ] {
+            let why = parse_app(bad, "a").unwrap_err();
+            assert!(why.contains("is not a path"), "{why}");
+        }
+        let why =
+            parse_app("[[triggers]]\ncron = \"@daily\"\nmethod = \"post\"\n", "a").unwrap_err();
+        assert!(why.contains("is not a method"), "{why}");
+    }
+
+    #[test]
+    fn more_schedules_than_an_app_may_have_are_refused() {
+        let one = "[[triggers]]\ncron = \"@daily\"\n";
+        assert!(parse_app(&one.repeat(MAX_TRIGGERS), "a").is_ok());
+        let why = parse_app(&one.repeat(MAX_TRIGGERS + 1), "a").unwrap_err();
+        assert!(why.contains(&MAX_TRIGGERS.to_string()), "{why}");
     }
 
     #[test]

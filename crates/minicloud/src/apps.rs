@@ -27,7 +27,7 @@ use cove_sema::{Compiler, HostSchemas};
 use crate::assets::Assets;
 use crate::config::{
     read_app_with, AppConfig, AppLimits, AppOverride, AssetPolicy, FetchPolicy, KvLimits,
-    RemovedKeys, SecretSource, Secrets, ADMIN_APP,
+    RemovedKeys, SecretSource, Secrets, Trigger, ADMIN_APP,
 };
 use crate::hosts::{AppContext, HostModules};
 use crate::logs::LogRing;
@@ -127,6 +127,10 @@ pub struct App {
     /// `[route] hosts`: the hostnames that reach this app, and the only
     /// way to it when there are any.
     pub hosts: Vec<String>,
+    /// `[[triggers]]`: when the host runs this app itself
+    /// ([`crate::triggers`]). Of this version, like everything else here: a
+    /// schedule changed by an update takes effect with the version.
+    pub triggers: Vec<Trigger>,
     /// `[fetch] allow` as configured, for the admin app to show and edit.
     pub fetch_allow: Vec<String>,
     /// The admin's changes this version was loaded with, if any.
@@ -378,6 +382,7 @@ pub fn describe_as(
         secrets: Secrets::default(),
         access: crate::access::Access::default(),
         hosts: Vec::new(),
+        triggers: Vec::new(),
         fetch_allow: Vec::new(),
         overridden: over.filter(|over| over.changes_config()).cloned(),
         counters: lineage.counters,
@@ -400,6 +405,7 @@ pub fn describe_as(
             app.secrets = config.secrets.clone();
             app.access = config.access.clone();
             app.asset_policy = config.assets.clone();
+            app.triggers = config.triggers.clone();
             // The files are read here, with the config that bounds them, so
             // that an `assets/` directory the host will not answer — a
             // symbolic link, more than `[assets] max_bytes` — refuses the

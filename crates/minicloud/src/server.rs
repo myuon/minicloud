@@ -133,6 +133,8 @@ pub(crate) struct Front {
     pub(crate) updating: tokio::sync::Mutex<()>,
     /// The admin's changes and their history ([`crate::overrides`]).
     pub(crate) control: Arc<Control>,
+    /// What runs an app on a schedule ([`crate::triggers`]).
+    pub(crate) triggers: Arc<crate::triggers::Triggers>,
     pub(crate) admin_token: String,
     /// Set by [`Host::shutdown`]: new requests are answered 503.
     draining: AtomicBool,
@@ -245,6 +247,11 @@ impl Host {
         }
         let workers = engine.start_workers()?;
         runtime.spawn(Arc::clone(&engine).monitor());
+        let triggers = Arc::new(crate::triggers::Triggers::new(
+            Arc::clone(&engine),
+            options.forwarding.clone(),
+            runtime.handle().clone(),
+        ));
         let front = Arc::new(Front {
             engine,
             counters: ServerCounters::default(),
@@ -256,6 +263,7 @@ impl Host {
             admin_token,
             draining: AtomicBool::new(false),
             control: Arc::clone(&control),
+            triggers: Arc::clone(&triggers),
         });
         control.attach(&front);
         let (listener, admin) = {
@@ -268,6 +276,10 @@ impl Host {
                     .map_err(|e| e.to_string())?,
             )
         };
+        // Always, whether an app has a schedule or not: an app deployed
+        // onto the running host brings its own, and a timer that wakes once
+        // a minute to find nothing due costs nothing.
+        runtime.spawn(crate::triggers::tick(Arc::clone(&triggers)));
         runtime.spawn(Arc::clone(&front).accept(listener));
         if let Some(admin) = admin {
             runtime.spawn(crate::admin::serve(Arc::clone(&front), admin));
@@ -290,6 +302,15 @@ impl Host {
             .iter()
             .filter_map(|slot| slot.current())
             .collect()
+    }
+
+    /// Runs every `[[triggers]]` schedule due in the minute
+    /// `unix_seconds` is in, and answers how many runs it started.
+    ///
+    /// The host's own clock calls this a moment after each minute begins
+    /// ([`crate::triggers::tick`]); a test calls it with a time of its own.
+    pub fn fire_due(&self, unix_seconds: i64) -> usize {
+        self.front.triggers.fire_due(unix_seconds)
     }
 
     /// What `GET /_host/stats` answers.
@@ -574,6 +595,10 @@ impl Front {
                 })
                 .or_insert(value);
         }
+        // Whatever a client sends, it did not come from the host's clock:
+        // the header is the host's alone ([`crate::triggers`]), so an app
+        // may trust it to tell a scheduled run from a request.
+        headers.remove(crate::triggers::TRIGGER_HEADER);
         // How the client reached the host: see `crate::proxy`.
         self.options
             .forwarding

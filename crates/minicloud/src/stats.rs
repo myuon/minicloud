@@ -152,6 +152,12 @@ pub struct AppCounters {
     /// neither is in `served` ([`crate::assets`]).
     pub assets: AtomicU64,
     pub assets_not_modified: AtomicU64,
+    /// Runs the host started on a schedule ([`crate::triggers`]): how many
+    /// it ran, how many ticks it let go by because the run before had not
+    /// finished, and how many ran and did not answer 2xx-4xx.
+    pub trigger_runs: AtomicU64,
+    pub trigger_skipped: AtomicU64,
+    pub trigger_failed: AtomicU64,
     /// Updates installed, and updates refused (the current version kept).
     pub updates: AtomicU64,
     pub updates_refused: AtomicU64,
@@ -252,6 +258,9 @@ impl AppCounters {
             },
             "assets_served": read(&self.assets),
             "assets_not_modified": read(&self.assets_not_modified),
+            "trigger_runs": read(&self.trigger_runs),
+            "trigger_skipped": read(&self.trigger_skipped),
+            "trigger_failed": read(&self.trigger_failed),
         })
     }
 }

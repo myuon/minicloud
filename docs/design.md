@@ -416,6 +416,42 @@ public origin's scheme, and its port if it has one) — the name the route
 matched, never one the client chose — so an app's same-origin check compares
 against the origin its own pages were served from.
 
+## Running an app on a schedule
+
+A trigger could have been a second entry — Cloudflare's `scheduled()` — and
+is not. An app's entry is the one function the checker derives its required
+capabilities from (`apps::admit`), the scheduler's `Start` carries a
+`web.Request` and expects a `web.Response` back, and both would have had to
+learn a second shape for a run that differs from a request in nothing but
+who asked. **So the host makes the request itself**: `triggers.rs` builds an
+`AppRequest` and admits it to the app's queue exactly as the HTTP front
+does. Everything downstream — round robin, the slice, parking, the deadline,
+the host-call budget, the counters, the version a run is pinned to — is the
+same code, and the app routes a trigger with the routing it already has.
+
+What a second entry would have given for free is **knowing who called**,
+and that is bought with one header: the host sets `x-minicloud-trigger` on
+a trigger's request and **removes it from every request that comes off a
+connection** (`server.rs`, beside the forwarding headers). A client cannot
+send it, so an app may trust it. The path stays an ordinary path of the
+app's, which is deliberate: it is how a scheduled job is run by hand while
+it is being written, and an app that does not want that refuses the path
+for anyone but the clock, in one line.
+
+**Minutes, UTC, and no catching up.** `cron.rs` is a five-field cron over
+`std` alone — no date library is in the tree, and `civil_from_days` is
+thirty lines. A tick looks at each minute once (a timer that wakes twice in
+a minute fires nothing twice), and a minute the host was not running for is
+gone rather than run late: a host that was down for an hour should not
+answer by running an hour of jobs at once. A schedule whose last run has
+not finished lets the tick go by and counts it, because a job that takes
+longer than its period would otherwise fill its app's queue with copies of
+itself.
+
+**A trigger belongs to the app's version**, like its limits and its files:
+an update changes a schedule with the code, and a run that is in flight when
+the version changes finishes on the version it started on.
+
 ## Static files: the app's `assets/` directory
 
 A run answers a `web.Response` whose `body` is a `String`, and a Cove
