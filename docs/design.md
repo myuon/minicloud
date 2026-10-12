@@ -452,6 +452,35 @@ itself.
 an update changes a schedule with the code, and a run that is in flight when
 the version changes finishes on the version it started on.
 
+## An answer written as it goes
+
+Every answer used to be a `Full<Bytes>`: the host had all of it before it
+wrote any of it, which is true of a run's answer — an app's response is a
+Cove `String` — and false of a log being followed, which has no end.
+
+The HTTP front's answers are a `BoxBody` now (`server.rs`), and one of them
+is fed from a channel: `to_streamed` writes the headers at once and each
+`Bytes` sent afterwards as a chunk. The connection ends the answer by being
+dropped, which the send on the channel is what notices, so a client that
+goes away costs one failed send and a task that returns. Nothing is
+cancelled and nothing is cleaned up, because there is nothing but the task.
+
+`GET /_host/apps/<app>/logs?follow=1` is the first user: the ring's last
+lines, then every line as `LogRing::push` writes it, over a
+`tokio::sync::broadcast` the ring hands out. A broadcast with no receiver
+costs a failed send, so nothing has to know whether anybody is watching; a
+reader that falls more than 1,000 lines behind is **told** (`: N line(s)
+missed`) rather than quietly skipping them, because a log with an unmarked
+hole in it is worse than one that says it has a hole. A `: ping` every 15
+seconds keeps a proxy from closing the connection as idle.
+
+The same answer is on the admin listener at `GET /apps/<app>/logs?follow=1`
+with the token, which is what `minicloud logs --follow` asks for: the CLI
+should not depend on where `--ops-listener` put the views.
+
+**This is not an app streaming.** An app still answers one `String`, and
+making a run able to write as it goes is the rest of #51.
+
 ## Static files: the app's `assets/` directory
 
 A run answers a `web.Response` whose `body` is a `String`, and a Cove

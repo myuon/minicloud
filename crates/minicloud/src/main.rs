@@ -148,6 +148,19 @@ enum Command {
         #[command(flatten)]
         admin: AdminArgs,
     },
+    /// An app's recent log lines, and with `--follow` every line as it is
+    /// written, until Ctrl-C.
+    Logs {
+        app: String,
+        /// How many lines to show first.
+        #[arg(short, long, default_value_t = 200)]
+        n: usize,
+        /// Keep the connection open and print every line as it happens.
+        #[arg(short, long)]
+        follow: bool,
+        #[command(flatten)]
+        admin: AdminArgs,
+    },
     /// Check apps against the host's schemas and grants; non-zero if any
     /// would be refused.
     Check {
@@ -295,6 +308,75 @@ fn admin_with(
     }
 }
 
+/// `minicloud logs --follow`: the lines as the host writes them, until the
+/// connection is broken or the program is interrupted.
+///
+/// The answer is server-sent events ([`minicloud::ops::follow`]), which is
+/// a line prefixed `data: ` for each log line and a line starting with `:`
+/// for the host's own remarks — a heartbeat, or a notice that the log
+/// outran this reader. The remarks go to standard error so that the log
+/// itself can be piped.
+fn logs_follow(args: &AdminArgs, app: &str, n: usize) -> ExitCode {
+    let token = match std::fs::read_to_string(&args.token_file) {
+        Ok(token) => token.trim().to_string(),
+        Err(e) => {
+            eprintln!(
+                "minicloud: cannot read the admin token from `{}`: {e}",
+                args.token_file.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let url = format!("http://{}/apps/{app}/logs?n={n}&follow=1", args.admin);
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("minicloud: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let followed = runtime.block_on(async {
+        let response = reqwest::Client::new()
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            eprint!("minicloud: {status}\n{}", response.text().await?);
+            return Ok(false);
+        }
+        let mut response = response;
+        let mut pending = String::new();
+        while let Some(chunk) = response.chunk().await? {
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(at) = pending.find('\n') {
+                let line: String = pending.drain(..=at).collect();
+                let line = line.trim_end_matches('\n');
+                if let Some(said) = line.strip_prefix("data: ") {
+                    println!("{said}");
+                } else if let Some(remark) = line.strip_prefix(": ") {
+                    if remark != "ping" {
+                        eprintln!("minicloud: {remark}");
+                    }
+                }
+            }
+        }
+        Ok::<bool, reqwest::Error>(true)
+    });
+    match followed {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("minicloud: cannot follow `{app}`'s log at {url}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Serve {
@@ -379,6 +461,22 @@ fn main() -> ExitCode {
         ),
         Command::Reset { app, admin: args } => {
             admin(&args, reqwest::Method::POST, &format!("/apps/{app}/reset"))
+        }
+        Command::Logs {
+            app,
+            n,
+            follow,
+            admin: args,
+        } => {
+            if follow {
+                logs_follow(&args, &app, n)
+            } else {
+                admin(
+                    &args,
+                    reqwest::Method::GET,
+                    &format!("/apps/{app}/logs?n={n}"),
+                )
+            }
         }
         Command::Check {
             apps,

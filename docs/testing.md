@@ -116,6 +116,11 @@ so, and what it asserts is counted.
   stats. `cron.rs` holds the parser and the calendar to 32 cases of their
   own — the epoch, leap days, negative seconds, the day-or-weekday rule,
   the aliases, and every way a field can be wrong;
+- following a log (`logs.rs`): the answer is server-sent events, it opens
+  with the lines the ring already has and says how many, a line written
+  while the connection is open reaches it, an app that is not there is 404,
+  and the admin listener's own route answers the lines and follows them to
+  the token and to nobody else;
 - static files (`assets.rs`, and `assets.rs`'s and `config.rs`'s unit
   tests): a file is answered with the type its extension says and the
   host's headers while the app's `served` stays at zero; **bytes that are

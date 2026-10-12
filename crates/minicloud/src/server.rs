@@ -38,6 +38,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -480,9 +481,52 @@ impl Front {
         }
     }
 
-    async fn handle(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
+    async fn handle(&self, request: Request<Incoming>) -> Response<OutBody> {
+        // An answer written as it goes, before the ones the host has whole.
+        if self.options.ops_listener == OpsListener::Public {
+            if let Some(streamed) = self.follow_logs(request.uri()) {
+                return streamed;
+            }
+        }
         let reply = self.reply(request).await;
         to_response(reply)
+    }
+
+    /// `GET /_host/apps/<app>/logs?follow=1`: the app's recent lines, then
+    /// every line as it is written, as server-sent events.
+    ///
+    /// `None` for any other request, which is answered the ordinary way.
+    pub(crate) fn follow_logs(&self, uri: &hyper::Uri) -> Option<Response<OutBody>> {
+        let name = uri
+            .path()
+            .strip_prefix("/_host/apps/")?
+            .strip_suffix("/logs")?;
+        if name.is_empty() || name.contains('/') {
+            return None;
+        }
+        let query: BTreeMap<String, String> = uri
+            .query()
+            .map(|query| {
+                form_urlencoded::parse(query.as_bytes())
+                    .into_owned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !matches!(query.get("follow").map(String::as_str), Some("1" | "true")) {
+            return None;
+        }
+        let n = query
+            .get("n")
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(50)
+            .min(crate::logs::LOG_LINES);
+        let Some(slot) = self.engine.slot_named(name) else {
+            return Some(to_response(Reply::text(
+                404,
+                format!("no app named `{name}`\n"),
+            )));
+        };
+        Some(crate::ops::follow(&slot, n))
     }
 
     async fn reply(&self, request: Request<Incoming>) -> Reply {
@@ -1096,17 +1140,70 @@ fn asset_reply(asset: &crate::assets::Asset, if_none_match: Option<&str>, app: &
     reply
 }
 
+/// The body of every answer the host sends.
+///
+/// Boxed because not every answer is bytes the host already has: an
+/// operations view that follows an app's log writes lines as they happen
+/// ([`Front::follow_logs`]), and a body written as it goes cannot be a
+/// `Full`. A run's answer is still one buffer — an app's response is a Cove
+/// `String`, so there is nothing of an app's to stream yet (#51).
+pub(crate) type OutBody = BoxBody<Bytes, Infallible>;
+
+/// A body fed from a channel: each [`Bytes`] sent is a chunk written out,
+/// and the end of the channel is the end of the body.
+struct ChannelBody {
+    chunks: tokio::sync::mpsc::Receiver<Bytes>,
+}
+
+impl hyper::body::Body for ChannelBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Infallible>>> {
+        self.chunks
+            .poll_recv(context)
+            .map(|chunk| chunk.map(|bytes| Ok(hyper::body::Frame::data(bytes))))
+    }
+}
+
+/// An answer whose body is written as it goes: the headers now, the chunks
+/// as they are sent on `chunks`.
+pub(crate) fn to_streamed(
+    status: u16,
+    headers: &[(&str, &str)],
+    chunks: tokio::sync::mpsc::Receiver<Bytes>,
+) -> Response<OutBody> {
+    let mut builder = Response::builder().status(status);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    builder
+        .body(BodyExt::boxed(ChannelBody { chunks }))
+        .unwrap_or_else(|_| {
+            let mut response = Response::new(BodyExt::boxed(Full::new(Bytes::from_static(
+                b"minicloud: cannot build the response\n",
+            ))));
+            *response.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        })
+}
+
 /// A reply as the hyper response.
-pub(crate) fn to_response(reply: Reply) -> Response<Full<Bytes>> {
+pub(crate) fn to_response(reply: Reply) -> Response<OutBody> {
     let mut builder = Response::builder().status(reply.status);
     for (name, value) in &reply.headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
-    builder.body(Full::new(reply.body)).unwrap_or_else(|error| {
-        let mut response = Response::new(Full::new(Bytes::from(format!(
-            "minicloud: cannot build the response: {error}\n"
-        ))));
-        *response.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
-        response
-    })
+    builder
+        .body(BodyExt::boxed(Full::new(reply.body)))
+        .unwrap_or_else(|error| {
+            let mut response = Response::new(BodyExt::boxed(Full::new(Bytes::from(format!(
+                "minicloud: cannot build the response: {error}\n"
+            )))));
+            *response.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        })
 }

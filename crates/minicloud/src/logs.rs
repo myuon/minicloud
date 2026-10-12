@@ -9,6 +9,9 @@
 //! `<data>/<app>/log.txt`, rotated to `log.1.txt` past [`ROTATE_BYTES`] (one
 //! old file is kept). The appends are made by one writer thread, fed by a
 //! channel, so a worker or the I/O runtime never waits on a file.
+//!
+//! [`LogRing::follow`] is the same lines as they are written, for
+//! `GET /_host/apps/<app>/logs?follow=1` and `minicloud logs --follow`.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -26,15 +29,41 @@ pub const LOG_LINES: usize = 1000;
 /// The longest line kept; longer lines are cut, saying so.
 const MAX_LINE: usize = 4096;
 
+/// How many lines a follower may fall behind before it is told it missed
+/// some. A reader that cannot keep up with a thousand lines is not reading.
+pub const FOLLOW_BACKLOG: usize = 1024;
+
 /// One app's recent lines.
-#[derive(Default)]
 pub struct LogRing {
     lines: Mutex<VecDeque<String>>,
     /// Where the lines are also written, once a data directory is known.
     file: OnceLock<PathBuf>,
+    /// Every line, as it is written, to whoever is following
+    /// ([`LogRing::follow`]). A broadcast with no receiver costs a failed
+    /// send, which is why nothing has to know whether anyone is watching.
+    live: tokio::sync::broadcast::Sender<String>,
+}
+
+impl Default for LogRing {
+    fn default() -> LogRing {
+        LogRing {
+            lines: Mutex::new(VecDeque::new()),
+            file: OnceLock::new(),
+            live: tokio::sync::broadcast::channel(FOLLOW_BACKLOG).0,
+        }
+    }
 }
 
 impl LogRing {
+    /// Every line written from now on.
+    ///
+    /// The receiver is told when it has fallen more than [`FOLLOW_BACKLOG`]
+    /// lines behind rather than quietly skipping them, so a follower can say
+    /// so instead of showing a log with a hole in it.
+    pub fn follow(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.live.subscribe()
+    }
+
     /// Appends `line` at `level` (`info`, `warn`, `error`, or `host` for the
     /// host's own), stamped with the wall clock.
     pub fn push(&self, level: &str, line: &str) {
@@ -55,6 +84,7 @@ impl LogRing {
         if let Some(file) = self.file.get() {
             let _ = writer().send((file.clone(), entry.clone()));
         }
+        let _ = self.live.send(entry.clone());
         let mut lines = self.lines.lock().unwrap();
         if lines.len() == LOG_LINES {
             lines.pop_front();
