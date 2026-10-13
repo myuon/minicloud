@@ -236,6 +236,163 @@ test fn listsTheTablesWithAStatementForEach() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// One message of a queue, as the host answers one: the fields a dead
+/// letter has are empty for a message that is still waiting.
+fn waitingMessage(body: String, state: String) -> host.QueueMessage {
+  host.QueueMessage(
+    id: 7,
+    queue: "mail",
+    body: body,
+    bytes: body.byteLength(),
+    cut: false,
+    attempts: 1,
+    state: state,
+    dueMs: 1760000000000,
+    sentMs: 1759999000000,
+    why: "",
+    buriedMs: 0,
+  )
+}
+
+test fn saysWhatAMessageIsAndWhatHeldMeans() -> Result<Unit, Error> {
+  assert(queueState("due").contains(">due<"))?
+  // The one that has to be explained: the store keeps one due time for a
+  // lease and for a retry's wait, so the page does not claim to know which.
+  let held = queueState("held")
+  assert(held.contains(">held<"))?
+  assert(held.contains("lease"))?
+  assert(held.contains("retry"))?
+  assert(queueState("dead").contains(">dead<"))?
+  Ok(())
+}
+
+test fn escapesABodyWhateverWasSentToTheQueue() -> Result<Unit, Error> {
+  // A body is whatever an app sent — a webhook's payload, a form somebody
+  // filled in — so it is the likeliest markup on these pages.
+  let said = queueBodyCell(waitingMessage("<img src=y>&\"'", "due"))
+  assert(!said.contains("<img"))?
+  assert(said.contains("&lt;img src=y&gt;&amp;&quot;&#39;"))?
+  // An empty body is said in words rather than shown as an empty cell.
+  assert(queueBodyCell(waitingMessage("", "due")).contains("empty"))?
+  Ok(())
+}
+
+test fn cutsALongBodyToTheColumnAndSaysSo() -> Result<Unit, Error> {
+  var long = ""
+  while long.byteLength() < 400 {
+    long = "{long}x"
+  }
+  let said = queueBodyCell(waitingMessage(long, "due"))
+  assert(said.contains("…"))?
+  assertEqual(said.contains(text.truncateBytes(long, 141)), false)?
+  Ok(())
+}
+
+test fn listsTheMessagesWaitingWithTheirTriesAndTheirDueTime() -> Result<Unit, Error> {
+  let said = queueMessagesTable(
+    "/apps/post",
+    Vector.of(waitingMessage("one", "due"), waitingMessage("two", "held")).freeze(),
+  )
+  assert(said.contains("<code>one</code>"))?
+  assert(said.contains(">held<"))?
+  assert(said.contains("<th>tries</th>"))?
+  // The whole stamp, not the time of day: a retry's delay doubles, so a
+  // message can be due days off and a clock alone would read as today.
+  assert(said.contains("2025-10-09T08:53:20.000Z"))?
+  // Nothing waiting is said in words, not shown as an empty table.
+  assert(queueMessagesTable("/apps/post", Vector.of().freeze()).contains("Nothing is waiting"))?
+  // The id is the way to the whole of a body, which a row cuts.
+  assert(said.contains("<a href=\"/apps/post/queues?message=7\">"))?
+  Ok(())
+}
+
+test fn saysWhyADeadLetterWasBuriedAndEscapesThat() -> Result<Unit, Error> {
+  let buried = host.QueueMessage(
+    id: 9,
+    queue: "mail",
+    body: "payload",
+    bytes: 7,
+    cut: false,
+    attempts: 5,
+    state: "dead",
+    dueMs: 1760000000000,
+    sentMs: 1759999000000,
+    // The consumer's own words: a status and the first line of its answer.
+    why: "500 <img src=y>",
+    buriedMs: 1760000500000,
+  )
+  let said = queueDeadTable("/apps/post", Vector.of(buried).freeze())
+  assert(said.contains("<th>why</th>"))?
+  assert(!said.contains("<img"))?
+  assert(said.contains("500 &lt;img src=y&gt;"))?
+  assert(said.contains("<code>payload</code>"))?
+  assert(said.contains("2025-10-09T09:01:40.000Z"))?
+  assert(queueDeadTable("/apps/post", Vector.of().freeze()).contains("No dead letters"))?
+  Ok(())
+}
+
+test fn namesEachQueueWithWhatItHoldsAndHowItIsDelivered() -> Result<Unit, Error> {
+  let said = queuesTable(
+    Vector.of(
+      host.Queue(
+        name: "mail",
+        path: "/queue/mail",
+        due: 2,
+        held: 1,
+        dead: 3,
+        declared: true,
+        maxDepth: 1000,
+        maxAttempts: 5,
+        retryMs: 30000,
+        leaseMs: 60000,
+        batch: 8,
+        maxBodyBytes: 65536,
+      ),
+      // A queue the store holds messages for that the app no longer
+      // declares: nothing will ever deliver it, which is the thing to see.
+      host.Queue(
+        name: "gone",
+        path: "",
+        due: 4,
+        held: 0,
+        dead: 0,
+        declared: false,
+        maxDepth: 0,
+        maxAttempts: 0,
+        retryMs: 0,
+        leaseMs: 0,
+        batch: 0,
+        maxBodyBytes: 0,
+      ),
+    )
+      .freeze(),
+  )
+  assert(said.contains("<code>mail</code>"))?
+  assert(said.contains("<code>/queue/mail</code>"))?
+  assert(said.contains(">2</td>"))?
+  assert(said.contains("5 attempts, retry 30s"))?
+  assert(said.contains("lease 60s"))?
+  assert(said.contains("not declared"))?
+  Ok(())
+}
+
+test fn writesADurationAsAppTomlWritesIt() -> Result<Unit, Error> {
+  assertEqual(queueDuration(30000), "30s")?
+  assertEqual(queueDuration(1000), "1s")?
+  assertEqual(queueDuration(1500), "1500ms")?
+  Ok(())
+}
+
+test fn saysWhenAListingReachedTheWindowsLimit() -> Result<Unit, Error> {
+  // Under the limit: the listing is the whole of it, and there is nothing
+  // to say.
+  assertEqual(queueMore(3, 3, "of what is waiting"), "")?
+  let said = queueMore(queueListSize(), 4000, "of what is waiting")
+  assert(said.contains("The first 200"))?
+  assert(said.contains("minicloud queues"))?
+  Ok(())
+}
+
 fn asking(query: Map<String, String>) -> web.Request {
   web.Request(method: "GET", path: "/", query: query, headers: Map.of(), body: "")
 }

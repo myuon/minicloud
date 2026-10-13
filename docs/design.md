@@ -446,6 +446,93 @@ declared in the `host` namespace and not reused from `sql.`, because the
 admin app is granted `admin` and not `sql`. It has no `fetch`, so the `host`
 module is the only way anything reaches it.
 
+### Seeing what is on an app's queues
+
+`minicloud queues <app>` says how deep each queue is, and a depth is a
+number: a queue with 400 messages on it says `400`, and *which* 400 was not
+a question the host could answer. `GET /apps/<app>/queues` is that question
+answered — each declared queue with what it holds, the messages waiting, and
+the dead letters with why each was buried.
+
+**Listing what is waiting had to be built.** `Queues::depths`,
+`Queues::dead` and `Queues::revive` were already there; the only way to see
+a *waiting* message was `Queues::lease`, which is a side effect — it takes
+the message, counts the try and starts the lease. A read that changes what
+it reads is no good for a page, and a page that leased what it showed would
+take the message the next delivery was about to take. So `queue.rs` has
+three reads of its own (`peek_depths`, `peek_waiting`, `peek_dead`) that
+lease nothing, count nothing and move no due time. There is a test that
+reads a message three times and then watches the delivery happen exactly as
+it would have.
+
+**A message is `due` or it is `held`, and the store says no more than
+that.** `due` is what the next tick may take, oldest sent first, which is
+the order the listing is in. `held` is a message whose `due` is ahead — and
+that is either a delivery holding it on lease (`lease` pushes `due` out by
+the queue's `lease`) or a failed delivery waiting for its retry (`retry`
+pushes it out by the delay, doubling). **One column carries both**, so
+nothing can tell them apart, and the window says `held` rather than calling
+a backoff a lease. The honest version of a number is worth more here than
+the number somebody expected: `attempts` beside it is the real difference —
+a message with two tries behind it has had two whatever it is waiting on.
+Giving the store a second column to say which would be a write on the
+delivery path to make an admin page prettier, which is the wrong way round.
+
+**The queues are the app's `[[queues]]`, not the store's rows.** A queue
+declared and never sent to has no rows, and leaving it out would read as
+"there is no such queue" when the answer is "nothing is waiting on it". The
+other way round matters too: a queue the store holds messages for that the
+app *no longer declares* is listed after the declared ones, saying so,
+because nothing will ever deliver it and that is exactly the thing a window
+like this is for. The settings beside each queue are the host's own values,
+after `[[queues]]`'s defaults — so the page says `retry 30s` where the file
+says nothing at all.
+
+**The reader goes through the store the app has open**, and opens the file
+`SQLITE_OPEN_READ_ONLY` only where nothing has, as the `kv` and `sql`
+windows do and for the same reasons: a second connection on a WAL database
+reads the snapshot its transaction started with, so a message sent a moment
+ago would be missing from a window whose whole job is to say what is
+waiting, and two connections on one file take locks against each other. A
+file that is not there is **no queue** rather than an error: an app not
+granted `queue` has no file, and looking at it must not create one. The app
+is resolved through the host's slots, so no name is joined to a path.
+
+**The limits are the window's own.** At most 200 messages in a listing,
+each body cut to 512 characters and again to 140 by the page. The counts are
+whole — they are `count(*)`, not the length of the listing — so a page
+showing the first 200 of 4000 says which it is doing. A queue's `max_depth`
+is the app's business and may be thousands; a page is one person reading.
+
+**A body is opened by its id**, as a value is by its key in the `kv` window
+(`?message=<id>`, 64 KiB of text), because a queue's body is a payload: a
+webhook's JSON is routinely longer than the 512 characters a listing
+carries, so a window that could only cut would be answering the question
+with half an answer. The id is enough to find it in either table — ids are
+never reused, a dead letter keeps the one it had, and reviving moves it back
+— and an id no queue of the app holds is the page's `Err` rather than the
+host's error, because a link to a message that has since been delivered is
+an ordinary thing to click.
+
+**Reviving is not here.** `minicloud queues <app> --revive <id>` exists and
+the listener behind it does too, so a button would be small — but it is a
+*change*, and a change on these pages has a confirmation and a line in the
+change history. Half of that is worse than none, so the page says where
+reviving is done instead. **Nor is pruning**: `Queues::prune_dead` still has
+no caller in the host, so a dead letter is kept until somebody deals with
+it. That is the decision, and this page is what makes it visible — a number
+under "dead" that grows is work nobody has looked at, which is the state a
+retention rule would have hidden.
+
+The admin app reaches this through `host.queues`, `host.queueMessages` and
+`host.queueDead`. A waiting message and a dead letter are **one type**: a
+`TypeSchema`'s cases carry no payload, so "waiting, or buried with this
+reason" cannot be declared as one type whichever way it is cut, and two
+types would be eleven fields written twice for a difference of two. `state`
+says which a message is, so nothing is inferred from an empty `why`. Times
+are carried in milliseconds, as every other time the module carries, though
+the store keeps seconds.
+
 ## Secrets set at run time
 
 An API key used to mean ssh, an edit of `~/cove-tools/env` and a restart.
@@ -610,7 +697,8 @@ better than a guarantee that would be a lie.
 the message is buried as a dead letter with the reason. Burying rather than
 dropping is the point of the feature: a queue that silently loses what
 nobody could take is a queue that cannot be debugged. `minicloud queues`
-reads them and puts one back.
+reads them and puts one back, and the admin app has a page of what is on
+each queue ([Seeing what is on an app's queues](#seeing-what-is-on-an-apps-queues)).
 
 `batch` bounds how many of a queue are in flight at once, counted on the
 app's counters, so a slow consumer cannot be given the whole queue at once;

@@ -551,7 +551,8 @@ queue.send("mail", "{id}")      // on disk when this answers
   each time, until `max_attempts` — then the message is a **dead letter**,
   kept with the reason rather than dropped. `minicloud queues <app>` shows
   what each queue holds and the last 50 dead letters; `--revive <id>` puts
-  one back.
+  one back. The admin app has the same as a page — every declared queue,
+  the messages waiting, and the dead letters with why — for reading only.
 - **A delivery may happen twice.** A run that takes longer than `lease` is
   taken to be lost and the message is tried again; if the first run then
   finishes, the work has been done twice. The alternative — never retrying
@@ -653,7 +654,7 @@ path = "/cron/rollup"
 | `time` | `time` | `nowMillis()`, `nowMicros()` |
 | `random` | `random` | `hex(bytes)`: 1–64 bytes from the operating system |
 | `auth` | `auth` | `check(secret, authorization)` against a `[secrets]` entry the app never reads; `identity(headers)`, the Cloudflare Access user the host verified; `usesAccess()` |
-| `host` | `admin` | the admin app's view of the host and its changes, what the version of an app it is running is made of ([`code.rs`](crates/minicloud/src/code.rs)), and what an app's SQL store holds, for reading only ([`sql.rs`](crates/minicloud/src/sql.rs)); only the app named `admin` may be granted it |
+| `host` | `admin` | the admin app's view of the host and its changes, what the version of an app it is running is made of ([`code.rs`](crates/minicloud/src/code.rs)), what an app's SQL store holds and what is on its queues, for reading only ([`sql.rs`](crates/minicloud/src/sql.rs), [`queue.rs`](crates/minicloud/src/queue.rs)); only the app named `admin` may be granted it |
 
 The exact signatures are the schemas in the source:
 [`hosts.rs`](crates/minicloud/src/hosts.rs) (`web`, `log`, `timer`),
@@ -922,7 +923,12 @@ the app's directory is not the one that is running. And it shows **what an
 app's SQL store holds** — its tables and how many rows each has, and the
 answer to one statement that only reads. The refusal of a statement that
 writes is the host's own, the one the app's `sql.query` meets, so the window
-has no way to write and nothing typed there is kept. It is reached only by
+has no way to write and nothing typed there is kept. And it shows **what is
+on an app's queues** — each declared queue with what is due, what is held
+and what is dead, the messages waiting with how many tries they have had and
+when they are next due, and the dead letters with why each was buried; one
+message's id opens its body whole. That window leases nothing, so a queue
+somebody looks at is delivered exactly as it would have been. It is reached only by
 its own hostnames (`[route] hosts`): on the server `https://covtools-admin.ramda.io`
 behind Cloudflare Access, and locally `http://admin.localhost:8080/` with
 `ADMIN_UI_TOKEN` as the password:
