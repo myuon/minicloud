@@ -80,6 +80,87 @@ test fn asksForTheLinesItIsAskedFor() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// One file of a deploy, as `host.code` gives one.
+fn aFile(name: String, kind: String, isText: Bool, onDisk: String) -> host.CodeFile {
+  host.CodeFile(name: name, kind: kind, bytes: 0, text: "", isText: isText, cut: false, onDisk: onDisk)
+}
+
+/// An app as the host lists one: enough of it for the pages that only ask
+/// its name and how it is reached.
+fn anApp(name: String, hosts: Array<String>) -> host.App {
+  host.App(
+    name: name,
+    state: "serving",
+    reason: "",
+    version: "v1-abcdef01",
+    tier: "vm",
+    entry: "{name}.handle",
+    hosts: hosts,
+    required: Vector.of().freeze(),
+    requiredOpen: false,
+    granted: Vector.of().freeze(),
+    grantAdded: Vector.of().freeze(),
+    grantRemoved: Vector.of().freeze(),
+    fetchAllow: Vector.of().freeze(),
+    limits: host.Limits(
+      maxHostCalls: 0,
+      deadlineMs: 2000,
+      maxHeapWords: 0,
+      maxInFlight: 1,
+      maxQueued: 0,
+      maxRequestBytes: 0,
+      maxResponseBytes: 0,
+    ),
+    limitsChanged: Vector.of().freeze(),
+    isAdmin: false,
+    served: 0,
+    ok: 0,
+    errors: 0,
+    rejected: 0,
+    inFlight: 0,
+    queued: 0,
+    kvKeys: -1,
+    kvBytes: -1,
+    recentErrors: Vector.of().freeze(),
+  )
+}
+
+test fn saysWhichPartOfADeployAFileIs() -> Result<Unit, Error> {
+  assert(codeKind(aFile("app.toml", "config", true, "same")).contains("configuration"))?
+  assert(codeKind(aFile("admin.cove", "cove", true, "same")).contains(">code<"))?
+  assert(codeKind(aFile("assets/style.css", "asset", true, "same")).contains(">asset<"))?
+  // Not text, so there is no body of it to show: the listing says so where
+  // it says what the file is.
+  assert(codeKind(aFile("assets/logo.png", "asset", false, "same")).contains("asset, not text"))?
+  Ok(())
+}
+
+test fn saysWhenTheFileOnDiskIsNotTheOneRunning() -> Result<Unit, Error> {
+  // app.toml is read from the app's directory, so there is nothing for it
+  // to disagree with.
+  assert(onDisk(aFile("app.toml", "config", true, "same")).contains("read from there"))?
+  assert(onDisk(aFile("a.cove", "cove", true, "same")).contains(">same<"))?
+  assert(onDisk(aFile("a.cove", "cove", true, "differs")).contains(">differs<"))?
+  assert(onDisk(aFile("a.cove", "cove", true, "missing")).contains(">missing<"))?
+  assert(onDisk(aFile("a.cove", "cove", true, "unread")).contains(">unread<"))?
+  // A word the host grows later still reads, as a log level does.
+  assert(onDisk(aFile("a.cove", "cove", true, "elsewhere")).contains(">unread<"))?
+  Ok(())
+}
+
+test fn saysWhereTheHostAnswersAnAssetItCannotShow() -> Result<Unit, Error> {
+  let logo = aFile("assets/img/logo.png", "asset", false, "same")
+  let byPath = anApp("notes", Vector.of().freeze())
+  assertEqual(servedAt(byPath, logo), "/notes/img/logo.png")?
+  assert(servedOn(byPath).contains("by path"))?
+  // A hostname reaches its app with the whole path, so the app's name is
+  // not part of it.
+  let byName = anApp("watch", Vector.of("watch.example").freeze())
+  assertEqual(servedAt(byName, logo), "/img/logo.png")?
+  assert(servedOn(byName).contains("watch.example"))?
+  Ok(())
+}
+
 fn asking(query: Map<String, String>) -> web.Request {
   web.Request(method: "GET", path: "/", query: query, headers: Map.of(), body: "")
 }

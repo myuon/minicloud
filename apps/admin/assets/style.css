@@ -61,6 +61,9 @@ table.log td.said{width:100%;white-space:pre-wrap;word-break:break-word}
 table.log td.said .lvl{margin-right:.6em}
 table.log tr:nth-child(odd) td{background:var(--soft)}
 table.log tr:hover td{background:var(--line)}
+/* a file of a deploy, whole: no box to scroll inside, and the lines wrap
+   rather than scroll sideways, as every other table here does */
+pre.code{max-height:none;tab-size:2}
 td.value{max-width:52em}
 td.value code{display:inline-block;max-width:100%;white-space:pre-wrap;word-break:break-all}
 @media (min-width:761px){td.nowrap{white-space:nowrap}}

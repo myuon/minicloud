@@ -4,7 +4,9 @@ What the host runs, and the forms that change it (issue #17): enable or
 disable an app, change its grant, its fetch allowlist and its limits, reset
 it to its `app.toml`, and read the change history. What each app holds and
 what it said are there to read as well — a page of its `kv` store and the
-last lines of its log — and only to read. Pages, form reading,
+last lines of its log — and what the version it is running *is*: its
+`app.toml`, its `.cove` files and its `assets/` (issue #89). All of that is
+only to read. Pages, form reading,
 validation and rendering are Cove; everything it learns of the host and every
 change it makes go through one host module, `host`, whose capability is
 `admin` — and **only this app may be granted `admin`**. The startup banner
@@ -25,6 +27,7 @@ in [docs/design.md, Administering apps at run time](../../docs/design.md#adminis
 | `POST /apps/<app>/configure` | the grant (`cap.<name>` checkboxes), the allowlist (`allow`, one per line) and every limit (`maxHostCalls`, `deadlineMs`, `maxHeapWords`, `maxInFlight`, `maxQueued`, `maxRequestBytes`, `maxResponseBytes`) |
 | `POST /apps/<app>/reset` | drops the changes made here, back to `app.toml` |
 | `GET /apps/<app>/kv` | a page of the app's store: 50 keys at a time (`prefix` to narrow, `after` to go on), each value cut to a line; `?key=<key>` is one key, its value whole. **Reading only** — nothing here writes to another app's store |
+| `GET /apps/<app>/code` | what the version it is running is made of: its `app.toml` first, then its `.cove` files at any depth, then its `assets/` — each with its size and how the file of the same name in the app's directory compares; `?file=<name>` is one file's text, cut past 128 KiB, which the page says. **Reading only** |
 | `GET /apps/<app>/logs` | the last lines the app logged and the host said of it, oldest first, with their level; `?n=` how many (1–1000, 200 by default). The ring is in memory, so a restart empties it |
 | `GET /history` | every change, made here or by `minicloud` on the machine, refused ones included |
 | `GET /secrets` | the host's secret store: each secret stored or used by an app — set or unset, when it was set, which apps use it — **never a value** |
@@ -32,7 +35,10 @@ in [docs/design.md, Administering apps at run time](../../docs/design.md#adminis
 | `POST /secrets/delete` | `name`, `confirm` (a required checkbox: there is no script for a dialog), and `force` for a secret an app uses, which leaves those apps refused |
 
 The secret store and what a change to it does are in
-[docs/design.md, Secrets set at run time](../../docs/design.md#secrets-set-at-run-time).
+[docs/design.md, Secrets set at run time](../../docs/design.md#secrets-set-at-run-time);
+the code window, and why it shows what is in memory rather than what is on
+disk, is in
+[docs/design.md, Seeing the code that is deployed](../../docs/design.md#seeing-the-code-that-is-deployed).
 
 A change that went through redirects back to the app's page (`?done=`); one
 that did not answers 422 with the reasons — the form's own (a field that is

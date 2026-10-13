@@ -33,6 +33,7 @@ pub mod admin;
 pub mod admin_module;
 pub mod apps;
 pub mod assets;
+pub mod code;
 pub mod config;
 pub mod convert;
 pub mod cron;

@@ -13,6 +13,9 @@ use text
 /// - `GET /apps/<app>/kv` is a page of the app's store, `?key=` one key
 ///   whole; `GET /apps/<app>/logs` is the last lines it logged. Both read:
 ///   nothing here writes to another app's store.
+/// - `GET /apps/<app>/code` is what the version it is running is made of —
+///   its `app.toml`, its `.cove` files and its `assets/` — and `?file=` is
+///   one file's text.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -76,6 +79,13 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if action == "logs" && get {
     return htmlResponse(200, logPage(at, app, request))
+  }
+  // And what the version it is running *is*: the files of the deploy, from
+  // the host's own copies again — the source map the app was compiled with
+  // and the assets it serves — with `app.toml` read from the app's
+  // directory, the one part a load does not keep.
+  if action == "code" && get {
+    return htmlResponse(200, codePage(at, app, request))
   }
   if get || parts.length() > 4 {
     return textResponse(404, "no such page\n")

@@ -11,6 +11,8 @@
 //! | --- | --- |
 //! | `host.apps()` | `Array<host.App>`: every app the host has, in load order — its state (`serving`, `disabled`, `refused`, `removed`) and why, version, tier, hostnames, what its entry requires and what it is granted (and which of those grants the admin changed), its fetch allowlist, its limits, its counters and its recent errors |
 //! | `host.capabilities()` | `Array<String>`: every capability the host's modules declare, the ones a grant may name |
+//! | `host.code(app, limit)` | `Array<host.CodeFile>`: the files of the version the app is running ([`crate::code`]) — `app.toml`, then its `.cove` files, then its `assets/` — at most `limit` (0–[`crate::code::CODE_FILES`]), with each file's size and how the one on disk compares, and no text |
+//! | `host.codeFile(app, file)` | `Result<host.CodeFile, Error>`: one of those files with its text, cut past [`crate::code::READ_TEXT_BYTES`]; an `Err` for a name the deploy has no file under |
 //! | `host.history(limit)` | `Array<host.Change>`: the newest `limit` changes, newest first |
 //! | `host.kv(app, prefix, after, limit)` | `Array<host.KvEntry>`: keys of the app's store starting with `prefix` and greater than `after` (`""` for the first page), ascending, at most `limit` (0–500); each value cut to [`crate::kv::PEEK_VALUE_CHARS`] — read only, and empty for an app with no store |
 //! | `host.kvValue(app, key)` | `Result<host.KvEntry, Error>`: one key, its value cut past [`crate::kv::READ_VALUE_CHARS`]; an `Err` when the app has no such key |
@@ -42,6 +44,7 @@ use cove_runtime::{
     RuntimeError, Transfer, TypeSchema, Value,
 };
 
+use crate::code::CodeFile;
 use crate::config::{LimitsFile, ADMIN_CAPABILITY};
 use crate::hosts::{AppContext, HostModule, PendingWork};
 use crate::logs::Line;
@@ -98,6 +101,18 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             Effect::Read,
         ),
         op("capabilities", &[], STRINGS, Effect::Read),
+        op(
+            "code",
+            &[STR, INT],
+            HostType::Array(&HostType::Named("host.CodeFile")),
+            Effect::Read,
+        ),
+        op(
+            "codeFile",
+            &[STR, STR],
+            HostType::Result(&HostType::Named("host.CodeFile"), &HostType::Error),
+            Effect::Read,
+        ),
         op(
             "history",
             &[INT],
@@ -247,6 +262,36 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("bytes", INT),
                 // Whether `value` is shorter than the whole.
                 field("cut", HostType::Bool),
+            ],
+        },
+        // One file of what an app's deploy carries ([`crate::code`]).
+        // Whether the file is text is `isText` beside `text` rather than
+        // two cases of one type: a `TypeSchema`'s `cases` are names and
+        // carry no payload, so a schema cannot say "text, or these bytes"
+        // — the same reason `sql` answers a cell as an `Option<String>`.
+        TypeSchema {
+            name: "CodeFile",
+            cases: &[],
+            fields: &[
+                // Within the app: `app.toml`, `admin.cove`,
+                // `text/text.cove`, `assets/style.css`.
+                field("name", STR),
+                // `config` for `app.toml`, `cove` or `asset`.
+                field("kind", STR),
+                // The whole file's length in bytes.
+                field("bytes", INT),
+                // The text; "" in a listing, which carries none, and ""
+                // for a file that is not UTF-8.
+                field("text", STR),
+                // Whether the file is UTF-8, so `text` is the file. A PNG
+                // or a font in `assets/` is not, and is to be looked at
+                // where the host serves it.
+                field("isText", HostType::Bool),
+                // Whether `text` is shorter than the whole.
+                field("cut", HostType::Bool),
+                // How the file of the same name in the app's directory
+                // compares: `same`, `differs`, `missing` or `unread`.
+                field("onDisk", STR),
             ],
         },
         TypeSchema {
@@ -399,6 +444,21 @@ fn kv_value(row: KvRow) -> Value {
             ("value", Value::string(row.value)),
             ("bytes", int(row.bytes)),
             ("cut", Value::bool(row.cut)),
+        ],
+    )
+}
+
+fn code_file_value(file: CodeFile) -> Value {
+    Value::structure(
+        "host.CodeFile",
+        vec![
+            ("name", Value::string(file.name)),
+            ("kind", Value::string(file.kind)),
+            ("bytes", int(file.bytes)),
+            ("text", Value::string(file.text)),
+            ("isText", Value::bool(file.is_text)),
+            ("cut", Value::bool(file.cut)),
+            ("onDisk", Value::string(file.on_disk)),
         ],
     )
 }
@@ -608,6 +668,26 @@ impl HostApi for AdminHost {
                 Ok(Value::array(
                     front.secret_infos().into_iter().map(secret_value),
                 ))
+            }
+            "code" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                let limit = args.get(1).and_then(Value::as_int).unwrap_or(0);
+                Ok(Value::array(
+                    front.app_code(app, limit).into_iter().map(code_file_value),
+                ))
+            }
+            "codeFile" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let text = |at: usize| args.get(at).and_then(Value::as_str).unwrap_or_default();
+                Ok(match front.app_code_file(text(0), text(1)) {
+                    Ok(file) => Value::ok(code_file_value(file)),
+                    Err(why) => Value::err(Value::error(why)),
+                })
             }
             "kv" => {
                 let front = control
