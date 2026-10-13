@@ -199,6 +199,19 @@ fn sum(group: &Json) -> u64 {
         .unwrap_or_default()
 }
 
+/// Why the SQL window answered no rows, as the page says it.
+///
+/// The statement's own refusals are SQLite's words and the limits' names,
+/// which are what a person reading the page can act on; a failure of the
+/// file is said as the host's, so that the two are not mistaken for each
+/// other.
+fn sql_why(error: crate::sql::SqlError) -> String {
+    match error {
+        crate::sql::SqlError::App(why) => why,
+        crate::sql::SqlError::Storage(why) => format!("admin: the store failed: {why}"),
+    }
+}
+
 /// One key of an app's store, as the admin app sees it.
 pub(crate) struct KvRow {
     pub key: String,
@@ -360,6 +373,44 @@ impl Front {
             return Ok(None);
         };
         Ok(crate::kv::read(&path, key)?.map(KvRow::from))
+    }
+
+    /// The file of `app`'s SQL store, under the same guard as
+    /// [`Front::kv_path`]: a name that is not one of the host's slots names
+    /// no path, so nothing a request can write reaches outside the data
+    /// directory.
+    fn sql_path(&self, app: &str) -> Option<std::path::PathBuf> {
+        self.engine.slot_named(app)?;
+        let data = self.options.data.as_ref()?;
+        Some(data.join(app).join("sql.sqlite3"))
+    }
+
+    /// The tables of `app`'s SQL store and how many rows each holds. Empty
+    /// for an app that has none — not granted `sql`, never written to, or a
+    /// host with no data directory ([`crate::sql::peek_tables`]).
+    pub(crate) fn app_sql_tables(&self, app: &str) -> Result<Vec<crate::sql::Table>, String> {
+        let Some(path) = self.sql_path(app) else {
+            return Ok(Vec::new());
+        };
+        crate::sql::peek_tables(&path).map_err(sql_why)
+    }
+
+    /// Runs one read-only statement against `app`'s SQL store
+    /// ([`crate::sql::peek_query`]).
+    ///
+    /// Both kinds of failure come back as the window's `Err` rather than the
+    /// host's error: a store that cannot be read is exactly what somebody on
+    /// this page came to find out, and a page that answered 500 would say
+    /// less than the message does.
+    pub(crate) fn app_sql_query(
+        &self,
+        app: &str,
+        statement: &str,
+    ) -> Result<crate::sql::Answer, String> {
+        let Some(path) = self.sql_path(app) else {
+            return Err(format!("the host has no app `{app}`"));
+        };
+        crate::sql::peek_query(&path, statement).map_err(sql_why)
     }
 
     /// The version of `app` new requests go to, for an app the host has: a

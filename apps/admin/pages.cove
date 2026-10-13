@@ -179,7 +179,14 @@ fn appPage(
   }
   let held = if app.kvKeys < 0 { "<span class=muted>–</span>" } else { "{app.kvKeys} keys, {text.bytes(app.kvBytes)}" }
   let store = if app.granted.contains("kv") { "{held} · <a href=\"{h(at)}/kv\">browse</a>" } else { held }
-  let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>state</th><td>{badge(app.state)}</td></tr><tr><th>version</th><td><code>{h(app.version)}</code> <span class=muted>{h(app.tier)}</span> · <a href=\"{h(at)}/code\">what it is</a></td></tr><tr><th>entry</th><td><code>{h(app.entry)}</code></td></tr><tr><th>reached</th><td>{if app.hosts.length() > 0 { "by hostname {names(app.hosts)} only" } else { "<code>/{h(app.name)}/</code>" }}</td></tr><tr><th>code requires</th><td>{names(app.required)}{if app.requiredOpen { " <span class=muted>(at least: it makes a call the checker cannot follow)</span>" } else { "" }}</td></tr><tr><th>granted</th><td>{grantList(app)}</td></tr><tr><th>fetch allowlist</th><td>{names(app.fetchAllow)}</td></tr><tr><th>requests</th><td>{app.served} served, {app.ok} ok, {app.errors} errors, {app.rejected} rejected; {app.inFlight} in flight, {app.queued} queued</td></tr><tr><th>store</th><td>{store}</td></tr></table></div><h2>Limits</h2><div class=\"scroll narrow\"><table class=facts>{"".join(limitRows.freeze())}</table></div>"
+  // Only for an app that has one: the host keeps no file for an app that is
+  // not granted `sql`, so there would be nothing on the other end of it.
+  let relational = if app.granted.contains("sql") {
+    "<tr><th>sql store</th><td><a href=\"{h(at)}/sql\">tables, and a statement to read them</a></td></tr>"
+  } else {
+    ""
+  }
+  let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>state</th><td>{badge(app.state)}</td></tr><tr><th>version</th><td><code>{h(app.version)}</code> <span class=muted>{h(app.tier)}</span> · <a href=\"{h(at)}/code\">what it is</a></td></tr><tr><th>entry</th><td><code>{h(app.entry)}</code></td></tr><tr><th>reached</th><td>{if app.hosts.length() > 0 { "by hostname {names(app.hosts)} only" } else { "<code>/{h(app.name)}/</code>" }}</td></tr><tr><th>code requires</th><td>{names(app.required)}{if app.requiredOpen { " <span class=muted>(at least: it makes a call the checker cannot follow)</span>" } else { "" }}</td></tr><tr><th>granted</th><td>{grantList(app)}</td></tr><tr><th>fetch allowlist</th><td>{names(app.fetchAllow)}</td></tr><tr><th>requests</th><td>{app.served} served, {app.ok} ok, {app.errors} errors, {app.rejected} rejected; {app.inFlight} in flight, {app.queued} queued</td></tr><tr><th>store</th><td>{store}</td></tr>{relational}</table></div><h2>Limits</h2><div class=\"scroll narrow\"><table class=facts>{"".join(limitRows.freeze())}</table></div>"
   layout(
     base,
     "apps",
@@ -592,6 +599,165 @@ fn codeFilePage(base: String, app: host.App, name: String) -> String {
       "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>file</span></h1><div class=problem><b>Not read.</b> The host said:<pre>{h(error.message)}</pre></div>{back}",
     )
   }
+}
+
+// ------------------------------------------- an app's SQL store
+//
+// Reading only, and not by a check of this app's own: the host runs the
+// statement through the same `sql.query` the app's own calls go through,
+// which refuses one that writes before it is stepped. The page says so and
+// shows the refusal as it came.
+//
+// The form is a GET, and the statement is in the URL. A read changes
+// nothing, so there is nothing here for a form on another site to make
+// happen — the origin check the host app does is for the POSTs that change
+// it — and the page can be linked, reloaded and gone back to.
+
+/// The most rows the host's window answers (`crate::sql::PEEK_ROWS`), so
+/// that the page can say what it is bounded by rather than leaving somebody
+/// to find out.
+fn sqlRowLimit() -> Int {
+  200
+}
+
+/// How long one of its statements may run (`crate::sql::PEEK_STATEMENT_MS`).
+fn sqlStatementMs() -> Int {
+  1000
+}
+
+/// How much of a cell a column shows, as the store's page cuts a value.
+fn sqlCellBytes() -> Int {
+  140
+}
+
+/// One cell of an answer.
+///
+/// `None` is SQL's `NULL` and `Some("")` is the empty string: the store
+/// keeps the two apart, and a window that showed them alike — both as an
+/// empty cell — would hide the one thing a nullable column is about. So
+/// each is said in words, and neither is said in nothing.
+fn sqlCell(value: Option<String>) -> String {
+  match value {
+    Some(said) => {
+      if said == "" {
+        "<span class=muted title=\"the empty string, not NULL\">empty</span>"
+      } else {
+        let preview = text.truncateBytes(said, sqlCellBytes())
+        if preview.byteLength() < said.byteLength() {
+          // Longer than the column: `substr` is how to ask for the rest,
+          // which is a statement and not a page of its own.
+          "<code>{h(preview)}<span class=muted>…</span></code>"
+        } else {
+          "<code>{h(said)}</code>"
+        }
+      }
+    }
+    None => "<span class=muted title=\"SQL NULL, not the empty string\">NULL</span>"
+  }
+}
+
+/// What a statement answered, as a table: the column names, then a row
+/// each. Every name and every value came from the host and goes through
+/// `h` — a row of an app's data is the likeliest markup on these pages.
+fn sqlAnswerTable(answer: host.SqlAnswer) -> String {
+  if answer.columns.length() == 0 {
+    return "<p class=muted>The statement answered no columns.</p>"
+  }
+  var heads = Vector.of()
+  for column in answer.columns {
+    heads.push("<th>{h(column)}</th>")
+  }
+  var rows = Vector.of()
+  for row in answer.rows {
+    var cells = Vector.of()
+    var at = 0
+    for value in row.values {
+      let label = answer.columns.get(at).unwrapOr("")
+      cells.push("<td class=\"value block\" data-label=\"{h(label)}\">{sqlCell(value)}</td>")
+      at = at + 1
+    }
+    rows.push("<tr>{"".join(cells.freeze())}</tr>")
+  }
+  if rows.length() == 0 {
+    return "<p class=muted>No rows.</p>"
+  }
+  let counted = if rows.length() == 1 { "1 row." } else { "{rows.length()} rows." }
+  "<div class=\"scroll cardwrap\"><table class=cards><tr class=head>{"".join(heads.freeze())}</tr>{"".join(rows.freeze())}</table></div><p class=muted>{h(counted)}</p>"
+}
+
+/// The tables of a store and how many rows each holds, with a statement
+/// written for each: the first rows of a table are what somebody wants next,
+/// and a link is less to type than a `SELECT`.
+fn sqlTablesTable(at: String, tables: Array<host.SqlTable>) -> String {
+  if tables.length() == 0 {
+    return "<p class=muted>This store has no tables yet.</p>"
+  }
+  var rows = Vector.of()
+  for table in tables {
+    let count = if table.counted {
+      "{table.rows}"
+    } else {
+      "<span class=muted title=\"counting its rows ran out of the window's time\">not counted</span>"
+    }
+    // A name is an identifier in the statement's text, which is where
+    // SQLite takes one: quoted, with a `"` in it doubled.
+    let quoted = table.name.replace("\"", "\"\"")
+    let statement = "SELECT * FROM \"{quoted}\" LIMIT 50"
+    let link = "{at}/sql?q={text.urlEncode(statement)}"
+    rows.push(
+      "<tr><td class=title data-label=table><a href=\"{h(link)}\"><code>{h(table.name)}</code></a></td><td class=nums data-label=rows>{count}</td></tr>",
+    )
+  }
+  "<div class=\"scroll cardwrap\"><table class=cards><tr class=head><th>table</th><th>rows</th></tr>{"".join(rows.freeze())}</table></div>"
+}
+
+/// The box a statement is typed into, with the statement in it again.
+///
+/// This is the one place on these pages where something somebody typed goes
+/// back inside an attribute's quotes. `h` writes `"` as `&quot;` and `'` as
+/// `&#39;` as well as the angle brackets, so the statement stays the
+/// attribute's value whatever it holds; without that, a statement holding a
+/// quote would end the attribute and the rest of it would be markup.
+fn sqlForm(at: String, statement: String) -> String {
+  "<form class=inline method=get action=\"{h(at)}/sql\"><label for=q>statement</label><input class=sql id=q name=q value=\"{h(statement)}\" placeholder=\"SELECT * FROM … LIMIT 20\" spellcheck=false autocapitalize=off><button>Run</button></form>"
+}
+
+/// What the page says above the box, which is what the window is and what it
+/// will not do.
+fn sqlLead(app: host.App) -> String {
+  "<p class=lead>What is in <code>{h(app.name)}</code>'s relational store. The box runs one statement that <b>only reads</b>: a statement that writes is refused by the host, the same refusal the app's own <code>sql.query</code> gets, so there is nothing here that can change this app's data — repairing data is done on the machine, where it is deliberate. At most {sqlRowLimit()} rows come back, and an answer with more rows than that says so rather than showing the first {sqlRowLimit()} of them; a statement still running after {sqlStatementMs()} ms is stopped where it is. A value is text: <code>NULL</code> and the empty string are said in words, and a long one is cut to the column. Nothing typed here is kept — a read is not a change, so the history does not record it.</p>"
+}
+
+/// One app's SQL store: its tables and their row counts, or — with `?q=` —
+/// what one statement answers.
+fn sqlPage(base: String, app: host.App, request: web.Request) -> String {
+  let at = appAt(base, app)
+  let head = "{crumb(base, app, "sql")}<h1>{h(app.name)} <span class=muted>sql</span></h1>"
+  if !app.granted.contains("sql") {
+    return layout(
+      base,
+      "apps",
+      "{app.name} sql",
+      "{head}<p class=lead><code>{h(app.name)}</code> is not granted <code>sql</code>: it has no relational store, and the host keeps no file for it.</p>",
+    )
+  }
+  let statement = request.query.get("q").unwrapOr("").trim()
+  let form = sqlForm(at, statement)
+  if statement == "" {
+    let tables = host.sqlTables(app.name)
+    return layout(
+      base,
+      "apps",
+      "{app.name} sql",
+      "{head}{sqlLead(app)}{form}<h2>Tables</h2>{sqlTablesTable(at, tables)}",
+    )
+  }
+  let answered = match host.sqlQuery(app.name, statement) {
+    Ok(answer) => "<h2>Answer</h2>{sqlAnswerTable(answer)}"
+    Err(error) => "<div class=problem><b>Not answered.</b> The host said:<pre>{h(error.message)}</pre></div>"
+  }
+  let back = "<p class=actions><a href=\"{h(at)}/sql\">← the tables</a></p>"
+  layout(base, "apps", "{app.name} sql", "{head}{sqlLead(app)}{form}{answered}{back}")
 }
 
 /// The last few lines of an app's log, on the app's own page, with the

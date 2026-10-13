@@ -372,6 +372,80 @@ A refused app was never compiled and so has no source map: what is
 deployed, for it, is its `app.toml` and whatever the host read of its
 assets. That is the file somebody looking at a refusal came for anyway.
 
+### Reading an app's SQL store
+
+The state of an app like `watch` or `aidaily` is in its `sql` store, and
+until now "why does the dashboard say that" meant ssh and `sqlite3`.
+`GET /apps/<app>/sql` is the answer from the browser: the store's tables
+with each one's row count, and `?q=` for one statement whose answer is shown
+as a table.
+
+**It reads, and it rests on a refusal that was already there.**
+`Store::query` refuses a statement that writes (`Statement::readonly()`,
+asked after the statement is prepared and before it is stepped). The window
+and the app's own `sql.query` are the same function, so what "reads" means
+is decided in one place and there is no check here to drift from it. An
+admin who has to repair data still does it over ssh, where it is deliberate.
+
+**The reader goes through the store the app has open**, and opens the file
+`SQLITE_OPEN_READ_ONLY` only where nothing has — the shape `kv::peek` has
+for the same job, which `sql` had no equivalent of: the only thing outside
+`sql.rs` that touched another app's store was `sql::usage`, which measures
+the file and does not read it. Two reasons. A second connection on a WAL
+database reads the snapshot its transaction started with, so a row the app
+wrote a moment ago would be missing from a window whose whole job is to show
+what is there; and two connections on one file take locks against each
+other, so a read would wait on a write or be refused as busy. The cost is the
+other way round — the app's next statement waits for the window's — which is
+why the window's deadline is short. A file that is not there is **no store**
+rather than an error: an app not granted `sql` has no file, and looking at
+it must not create one, as `Store::open` would. The app is resolved through
+the host's slots, as for the `kv` window, so no name is joined to a path.
+
+**The authorizer holds on both paths.** The authorizer that refuses
+`ATTACH`, `DETACH`, `PRAGMA`, transactions, savepoints and virtual tables
+belongs to a `Store`, and the connection the window opens itself is not
+one, so it is installed on that connection too. Without it that path would
+allow what the app's is refused — `ATTACH` naming any file the host can
+read, which a read-only connection may still do, `PRAGMA`, a transaction
+left open — none of which is a write that `readonly()` would catch. There is
+a test for exactly that.
+
+**The limits are the window's own, and they are said.** An app's `[sql]` is
+for the app — what one of its requests may cost — and reading the store from
+outside should not mean raising it. So: at most 200 rows, and more is an
+error naming the limit rather than the first 200 shown as though they were
+all of it; 256 KiB of values; one statement at a time, at most 4 KiB of
+text, stopped after 1000 ms where it is (SQLite's progress handler).
+1000 ms is fifty times an app's 20 ms default for the opposite reason: an
+app serves requests at a rate, this is one person asking one question. It
+stays small because the statement holds a worker, and the app's store lock
+with it. An error now says *whose* limit was reached, `this app's [sql]` or
+`the admin window's`, because a message that said `[sql]` for both would
+send somebody to edit the wrong number. A row count is a statement per table
+under that same deadline, so a table too large to count inside it is listed
+as "not counted" rather than left out or shown as 0.
+
+**A value is text**, as it is for an app. `NULL` is shown as the word `NULL`
+and the empty string as `empty`, so the two are never both an empty cell —
+the one thing a nullable column is about. A cell longer than the column is
+cut to 140 bytes, as the `kv` window cuts a value; `substr` in the statement
+is how to ask for the rest.
+
+**The form is a GET.** A read changes nothing, so the statement belongs in
+the URL — the page can be linked, reloaded and gone back to — and there is
+nothing here for a form on another site to make happen, which is what the
+origin check on the app's POSTs is for. The statement goes back into the
+form's `value=` inside quotes, and `escapeHtml` writes `"` and `'` as
+entities as well as the angle brackets, so it stays the attribute's value
+whatever it holds. **Nothing typed here is kept**: the change history
+records who changed what, and a read is not a change.
+
+The admin app reaches this through `host.sqlTables` and `host.sqlQuery`,
+declared in the `host` namespace and not reused from `sql.`, because the
+admin app is granted `admin` and not `sql`. It has no `fetch`, so the `host`
+module is the only way anything reaches it.
+
 ## Secrets set at run time
 
 An API key used to mean ssh, an edit of `~/cove-tools/env` and a restart.

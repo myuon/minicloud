@@ -653,7 +653,7 @@ path = "/cron/rollup"
 | `time` | `time` | `nowMillis()`, `nowMicros()` |
 | `random` | `random` | `hex(bytes)`: 1–64 bytes from the operating system |
 | `auth` | `auth` | `check(secret, authorization)` against a `[secrets]` entry the app never reads; `identity(headers)`, the Cloudflare Access user the host verified; `usesAccess()` |
-| `host` | `admin` | the admin app's view of the host and its changes, and what the version of an app it is running is made of ([`code.rs`](crates/minicloud/src/code.rs)); only the app named `admin` may be granted it |
+| `host` | `admin` | the admin app's view of the host and its changes, what the version of an app it is running is made of ([`code.rs`](crates/minicloud/src/code.rs)), and what an app's SQL store holds, for reading only ([`sql.rs`](crates/minicloud/src/sql.rs)); only the app named `admin` may be granted it |
 
 The exact signatures are the schemas in the source:
 [`hosts.rs`](crates/minicloud/src/hosts.rs) (`web`, `log`, `timer`),
@@ -918,8 +918,12 @@ write to another app's store. It also shows **what the version an app is
 running is** — its `app.toml`, its `.cove` files at any depth and its
 `assets/`, and one file's text — out of the host's own copies, so the code
 shown is the code that runs, with a note when the file of the same name in
-the app's directory is not the one that is running. It is reached only by its own
-hostnames (`[route] hosts`): on the server `https://covtools-admin.ramda.io`
+the app's directory is not the one that is running. And it shows **what an
+app's SQL store holds** — its tables and how many rows each has, and the
+answer to one statement that only reads. The refusal of a statement that
+writes is the host's own, the one the app's `sql.query` meets, so the window
+has no way to write and nothing typed there is kept. It is reached only by
+its own hostnames (`[route] hosts`): on the server `https://covtools-admin.ramda.io`
 behind Cloudflare Access, and locally `http://admin.localhost:8080/` with
 `ADMIN_UI_TOKEN` as the password:
 

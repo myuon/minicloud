@@ -16,6 +16,8 @@ use text
 /// - `GET /apps/<app>/code` is what the version it is running is made of —
 ///   its `app.toml`, its `.cove` files and its `assets/` — and `?file=` is
 ///   one file's text.
+/// - `GET /apps/<app>/sql` is the tables of its SQL store and their row
+///   counts, and `?q=` is one statement that only reads.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -86,6 +88,15 @@ export fn handle(request: web.Request) -> web.Response {
   // directory, the one part a load does not keep.
   if action == "code" && get {
     return htmlResponse(200, codePage(at, app, request))
+  }
+  // And what is in its relational store. `?q=` carries the statement in the
+  // URL, and the form that sends it is a GET: a read changes nothing, so
+  // there is nothing here for a form on another site to make happen — which
+  // is what `sameOrigin` above is for, and why it is only asked of a POST.
+  // The host runs the statement through the same `sql.query` the app's own
+  // calls go through, which refuses one that writes.
+  if action == "sql" && get {
+    return htmlResponse(200, sqlPage(at, app, request))
   }
   if get || parts.length() > 4 {
     return textResponse(404, "no such page\n")
