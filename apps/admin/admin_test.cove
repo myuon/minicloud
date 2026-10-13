@@ -88,6 +88,12 @@ test fn showsALogLineAsItCame() -> Result<Unit, Error> {
   assert(!said.contains("<img"))?
   // 2026-10-05T03:29:49.566Z, as the clock of the day.
   assert(said.contains("03:29:49.566"))?
+  // The level is a cell of its own and the text is the whole of the cell
+  // beside it: a narrow screen puts the level with the time and the text
+  // on a line under them, which it cannot do with the badge inside the
+  // text.
+  assert(said.contains("<td class=lv><span class=\"lvl lvl-warn\">warn</span></td>"))?
+  assert(said.contains("<td class=said>&lt;img src=x&gt; &amp; on</td>"))?
   // One app's page knows the app: no column saying the same word on every
   // row.
   assert(!said.contains("td class=app"))?

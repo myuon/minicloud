@@ -1023,6 +1023,14 @@ fn the_pages_read_an_apps_store_and_its_log() {
     assert_eq!(log.status, 200, "{}", log.body);
     assert!(log.body.contains("lvl-info"), "{}", log.body);
     assert!(log.body.contains("stored todo"), "{}", log.body);
+    // The level is a cell of its own, so that a narrow screen can keep it
+    // with the time and give what was said a line under them.
+    assert!(
+        log.body
+            .contains("<td class=lv><span class=\"lvl lvl-info\">info</span></td>"),
+        "{}",
+        log.body
+    );
     // An app with no store says so, and is given none by being looked at.
     let none = ui(&host, "GET", "/apps/hello/kv", &authed(), "");
     assert_eq!(none.status, 200, "{}", none.body);

@@ -57,8 +57,11 @@ td .state{margin-right:.3em}
 .lvl-host{color:var(--link);background:var(--soft)}
 table.log td{padding:.3em .8em;border-bottom:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 table.log td.at{white-space:nowrap;color:var(--muted)}
-table.log td.said{width:100%;white-space:pre-wrap;word-break:break-word}
-table.log td.said .lvl{margin-right:.6em}
+/* the level is a column of its own, as wide as the badge and no wider: the
+   badge is the same width on every row already, so the text still starts in
+   one place down the page */
+table.log td.lv{width:1%;padding-right:0;white-space:nowrap}
+table.log td.said{width:100%;padding-left:.6em;white-space:pre-wrap;word-break:break-word}
 table.log tr:nth-child(odd) td{background:var(--soft)}
 table.log tr:hover td{background:var(--line)}
 /* which app a line came from, on the page that has every app's: a column of
@@ -173,7 +176,10 @@ button.danger:hover{border-color:var(--bad);background:var(--bad-bg)}
 .actions{display:flex;flex-wrap:wrap;align-items:center;gap:.6em .9em;margin:.9em 0 0}
 .actions p,.actions .muted{margin:0;font-size:13px}
 .inline{display:flex;flex-wrap:wrap;align-items:center;gap:.4em}
-.inline input{width:18em}
+/* a box to type in, not a tick: a width here on a checkbox leaves the word
+   it is labelled with half a row away from it, and on a narrow screen the
+   card it sits in is pushed off the side */
+.inline input:not([type=checkbox]){width:18em}
 .inline input[type=password]{width:11em}
 /* the SQL window's statement: a statement is longer than a key's prefix,
    and it gives the page back rather than scrolling off it */
@@ -181,10 +187,14 @@ button.danger:hover{border-color:var(--bad);background:var(--bad-bg)}
 .inline label{display:flex;align-items:center;gap:.35em;font-size:13px}
 /* a page's explanation, folded: the summary is the one line worth reading; opening it gives the page's words, unchanged. The tools stay on the first screen. */
 details.about{max-width:62em;margin:.1em 0 1.3em;color:var(--muted)}
-details.about>summary{display:flex;align-items:baseline;gap:.5em;padding:.15em 0;list-style:none;cursor:pointer}
+/* the summary is a sentence of the page's own markup, so it is a block and
+   not a flex row: a flex row makes an item of every run of text and of
+   every `code` in it, and on a narrow screen those items fall into columns
+   rather than wrap as one sentence. The marker hangs beside the first line. */
+details.about>summary{position:relative;display:block;padding:.15em 0 .15em 1.05em;list-style:none;cursor:pointer}
 details.about>summary::-webkit-details-marker{display:none}
-details.about>summary::before{content:"\25B8";font-size:11px;line-height:1.6}
-details.about[open]>summary::before{content:"\25BE"}
+details.about>summary::before{position:absolute;top:.5em;left:0;content:"\25B8";font-size:11px;line-height:1}
+details.about[open]>summary::before{content:"\25BE";top:.55em}
 details.about>summary:hover{color:var(--text)}
 details.about p{margin:.7em 0 0}
 details.about p:last-child{margin-bottom:.2em}
@@ -245,7 +255,10 @@ li.app .count{font-size:13.5px;font-variant-numeric:tabular-nums}
 li.app .count .n{font-size:17px;font-weight:650}
 li.app .count .muted{font-size:12.5px}
 li.app .flags{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:.35em}
-a.flag{display:inline-flex;align-items:center;gap:.4em;padding:.25em .7em;border:1px solid var(--line);border-radius:999px;background:var(--soft);color:var(--text);font-size:13px;font-weight:600;text-decoration:none}
+/* a flag names what it is about — a queue, a store — and a name the app
+   chose can be longer than a phone is wide, so the chip wraps inside itself
+   rather than growing past the card it sits in */
+a.flag{display:inline-flex;flex-wrap:wrap;align-items:center;gap:.4em;max-width:100%;padding:.25em .7em;border:1px solid var(--line);border-radius:999px;background:var(--soft);color:var(--text);font-size:13px;font-weight:600;text-decoration:none;overflow-wrap:anywhere}
 a.flag.is-warn{border-color:var(--warn);background:var(--card);color:var(--warn)}
 a.flag.is-bad{border-color:var(--bad);background:var(--card);color:var(--bad)}
 a.flag:hover{border-color:var(--focus)}
@@ -259,7 +272,10 @@ h2 .ronly{vertical-align:.1em}
 main{padding:1.1rem .75rem 3rem}
 h1{font-size:1.4rem}
 .scroll.cardwrap{margin:.2em 0 1.2em;border:0;border-radius:0;background:transparent;overflow:visible}
-table.cards,table.cards tr,table.cards td{display:block;width:auto}
+/* the row group the parser puts in is a table box of its own, and a table
+   box is as wide as it needs to be: left as one it makes every card here as
+   wide as its longest cell rather than as wide as the page. */
+table.cards,table.cards tbody,table.cards tr,table.cards td{display:block;width:auto}
 table.cards tr.head{display:none}
 table.cards tr{margin:0 0 .7em;padding:.2em .9em .6em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
 table.cards tr:hover td{background:transparent}
@@ -271,15 +287,29 @@ table.cards td.title::before{content:none}
 table.cards td.block{text-align:left}
 table.cards td.block::before{float:none;display:block;max-width:none;margin:0 0 .3em}
 table.facts th{width:40%}
-table.log,table.log tr{display:block;width:auto}
-table.log tr{padding:.3em .1em}
-table.log td{display:inline;padding:0}
+/* a line of a log is a block here and not a row: what the line is — the
+   time, the app, the level — on a line of its own, and what was said under
+   it. Cells laid inline instead make one wrapping paragraph of the whole
+   row, and its second line starts under the time, where it reads as the
+   next line's first rather than as the rest of this one. The shading moves
+   to the row for the same reason: one line of a log is one block of colour,
+   whichever of its cells wrap. */
+table.log,table.log tbody,table.log tr,table.log td{display:block;width:auto}
+table.log tr{padding:.4em .6em}
+table.log tr:nth-child(odd){background:var(--soft)}
+table.log tr:hover{background:var(--line)}
+table.log tr:nth-child(odd) td,table.log tr:hover td{background:transparent}
+table.log td{padding:0}
+table.log td.at,table.log td.app,table.log td.lv{display:inline-block;width:auto;vertical-align:middle}
 table.log td.at{margin-right:.5em;font-size:11.5px}
-/* the app runs on with the time rather than keeping a column: the row is
-   one wrapping line here, and a chip as wide as the longest name would
-   leave a hole in every short one */
+/* the app runs on with the time rather than keeping a column: the line it
+   is on wraps, and a chip as wide as the longest name would leave a hole in
+   every short one */
 table.log td.app{margin-right:.5em}
 table.log td.app code{min-width:0}
+/* what was said, against its own left edge: a line that wraps wraps under
+   itself */
+table.log td.said{padding:.1em 0 0}
 ul.tree{padding-left:.8em}
 ul.tree ul{padding-left:.8em}
 ul.tree li::before{left:-.8em;width:.5em}
@@ -290,6 +320,11 @@ ul.tree .meta .disk:empty{display:none}
 td.value{max-width:none}
 .fields{grid-template-columns:1fr}
 .caps{grid-template-columns:repeat(auto-fill,minmax(10em,1fr))}
+/* two columns of a phone are not wide enough for a name and why it is
+   ticked side by side: the note takes the line under the name, where it
+   wraps on its own rather than squeezing the name to one word a line */
+label.cap{flex-wrap:wrap;row-gap:.1em}
+label.cap .note{flex:1 1 100%;margin-left:2em}
 .inline input[type=password]{width:100%}
 /* the band is tighter, the tabs are closer, and where a line was seen drops under it */
 .strip{grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr));gap:.5em}
@@ -311,7 +346,7 @@ nav.tabs a{margin-bottom:0;padding:.32em .8em;border:1px solid var(--line);borde
 nav.tabs a[aria-current]{border-color:var(--brand-2);background:var(--brand-2);color:#fff}
 }
 @media (max-width:420px){
-table.facts,table.facts tr,table.facts th,table.facts td{display:block;width:auto}
+table.facts,table.facts tbody,table.facts tr,table.facts th,table.facts td{display:block;width:auto}
 table.facts th{width:auto;padding-bottom:0;border-bottom:0;font-size:12px;text-transform:uppercase;letter-spacing:.04em;white-space:normal}
 table.facts td{padding-top:.2em}
 }

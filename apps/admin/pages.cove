@@ -1802,6 +1802,12 @@ fn queueMessagePage(base: String, app: host.App, id: Int) -> String {
 /// `withApp` puts the app each line came from beside the time, for the page
 /// that has every app's on it. One app's page knows the app already, and a
 /// column saying the same word on every row is a column that says nothing.
+///
+/// The level is a cell of its own and not the head of the text, so that a
+/// narrow screen can keep what a line *is* — the time, the app, the level —
+/// on one line and put what was said under it. A badge inside the text cell
+/// can only be the first word of a paragraph, and the second line of that
+/// paragraph starts under the time, where it reads as the next line's.
 fn logTable(lines: Array<host.LogLine>, withApp: Bool = false) -> String {
   if lines.length() == 0 {
     return "<p class=muted>No lines yet.</p>"
@@ -1810,7 +1816,7 @@ fn logTable(lines: Array<host.LogLine>, withApp: Bool = false) -> String {
   for line in lines {
     let who = if withApp { "<td class=app><code>{h(line.app)}</code></td>" } else { "" }
     rows.push(
-      "<tr><td class=at>{atTime(line.atMs)}</td>{who}<td class=said><span class=\"lvl {levelClass(line.level)}\">{h(line.level)}</span>{h(line.text)}</td></tr>",
+      "<tr><td class=at>{atTime(line.atMs)}</td>{who}<td class=lv><span class=\"lvl {levelClass(line.level)}\">{h(line.level)}</span></td><td class=said>{h(line.text)}</td></tr>",
     )
   }
   "<div class=scroll><table class=log>{"".join(rows.freeze())}</table></div>"
