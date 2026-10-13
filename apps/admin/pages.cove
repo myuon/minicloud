@@ -444,14 +444,6 @@ fn codePieceLimit() -> Int {
   20000
 }
 
-/// How deep a row the stylesheet has an indent for. A deploy nests a module
-/// directory and whatever tree `assets/` is, and six is more than either;
-/// deeper rows sit at six, because a rule a level cannot go on for a depth
-/// nothing bounds.
-fn codeMaxDepth() -> Int {
-  6
-}
-
 /// What `assets/` is called in a deploy's names, which is also what comes
 /// off one to leave the path the host answers that file on.
 fn assetsPrefix() -> String {
@@ -486,7 +478,8 @@ fn codeKind(file: host.CodeFile) -> String {
 fn onDisk(file: host.CodeFile) -> String {
   if file.kind == "dir" {
     // A directory is not a file, so there is no file of it on disk for the
-    // one that is running to differ from.
+    // one that is running to differ from. A row of the tree asks this of
+    // the files only; this is what a caller that does not is told.
     return "<span class=muted>–</span>"
   }
   if file.kind == "config" {
@@ -533,25 +526,75 @@ fn servedOn(app: host.App) -> String {
 }
 
 /// One row of the tree: a file, with the way to its text, or the directory
-/// that holds the rows under it.
+/// that holds the rows under it, as the item that opens it.
 ///
-/// The host decided the order and the depth, so this indents by what it is
-/// told and decides nothing. The indent is a class rather than a `style`
-/// attribute because the CSP (`pageHeaders`) allows no inline style — which
-/// is also why the depth is clamped: the stylesheet has a rule a level and
-/// cannot have one for a depth nothing bounds.
+/// It opens the item and leaves it open, because a directory's `</li>` comes
+/// after the list of what is under it and `codeTree`, which is watching the
+/// depths, is what knows where that is.
+///
+/// What the file is, what it comes to and how the directory's copy compares
+/// are beside the name rather than in columns of their own — the tree is the
+/// shape here, and a column is what cost it the nesting.
 ///
 /// The name shown is the last part of it, since the parts above are the rows
 /// above; the whole path is the link's `title`, where it is still readable
-/// and still escaped.
+/// and still escaped. A directory is not a link: the host has no text of one
+/// to answer, so there is nothing for it to point at.
 fn codeRow(at: String, file: host.CodeFile) -> String {
-  let depth = if file.depth > codeMaxDepth() { codeMaxDepth() } else { file.depth }
-  let rest = "<td data-label=what>{codeKind(file)}</td><td class=nums data-label=size>{text.bytes(file.bytes)}</td><td data-label=\"on disk\">{onDisk(file)}</td></tr>"
   if file.kind == "dir" {
-    return "<tr class=dir><td class=\"title dep{depth}\" data-label=file><code>{h(file.label)}/</code></td>{rest}"
+    return "<li class=dir><code>{h(file.label)}/</code> <span class=meta>{codeKind(file)} · {text.bytes(file.bytes)}</span>"
   }
   let link = "{at}/code?file={text.urlEncode(file.name)}"
-  "<tr><td class=\"title dep{depth}\" data-label=file><a href=\"{h(link)}\" title=\"{h(file.name)}\"><code>{h(file.label)}</code></a></td>{rest}"
+  "<li><a href=\"{h(link)}\" title=\"{h(file.name)}\"><code>{h(file.label)}</code></a> <span class=meta>{codeKind(file)} · {text.bytes(file.bytes)} · {onDisk(file)}</span>"
+}
+
+/// The rows as a tree: a list inside the item that holds it, which is what
+/// makes the nesting the markup and not a left padding. **A table could not
+/// do it**: an indented cell reads as a tree only on a wide screen, and on a
+/// narrow one `table.cards` turns every row into a card of its own and the
+/// nesting is gone altogether.
+///
+/// The host said how deep every row is, so this only opens and closes lists
+/// to match: a row deeper than the one above opens a list inside its item, a
+/// row shallower closes one list a level, and the end closes what is left.
+/// A depth that skips a level — which the host does not produce, since it
+/// opens a directory row for every part of a name — opens one list and no
+/// more, so no gap in the depths can leave a tag unclosed or close one that
+/// was never opened.
+fn codeTree(at: String, files: Array<host.CodeFile>) -> String {
+  var out = Vector.of()
+  // How many lists are open. The item opened last is in the innermost of
+  // them and is still waiting for its `</li>`.
+  var open = 0
+  for file in files {
+    // Which list this row belongs in, counting from one: its depth, but at
+    // most one deeper than what is open and never outside the outermost.
+    var want = file.depth + 1
+    if want > open + 1 {
+      want = open + 1
+    }
+    if want < 1 {
+      want = 1
+    }
+    while open > want {
+      out.push("</li></ul>")
+      open = open - 1
+    }
+    if open == want {
+      // A sibling of the row above: that row's item ends here.
+      out.push("</li>")
+    } else {
+      let list = if open == 0 { "<ul class=tree>" } else { "<ul>" }
+      out.push(list)
+      open = want
+    }
+    out.push(codeRow(at, file))
+  }
+  while open > 0 {
+    out.push("</li></ul>")
+    open = open - 1
+  }
+  "".join(out.freeze())
 }
 
 /// What the version the app is running is made of: its `app.toml`, its
@@ -572,7 +615,7 @@ fn codePage(base: String, app: host.App, request: web.Request) -> String {
   // One more than the page, to know whether there are more.
   let size = codePageSize()
   let found = host.code(app.name, size + 1)
-  var rows = Vector.of()
+  var shown = Vector.of()
   // The host's limit counts files, and so does this: a directory row is
   // there for the files under it and is not one of them.
   var files = 0
@@ -583,16 +626,16 @@ fn codePage(base: String, app: host.App, request: web.Request) -> String {
       files = files + 1
     }
     if files <= size {
-      rows.push(codeRow(at, entry))
+      shown.push(entry)
       if isFile && entry.kind != "config" && entry.onDisk != "same" {
         differing = differing + 1
       }
     }
   }
-  let table = if rows.length() == 0 {
+  let tree = if shown.length() == 0 {
     "<p class=muted>The host has no version of this app loaded, so there is nothing it is running.</p>"
   } else {
-    "<div class=\"scroll cardwrap\"><table class=\"cards tree\"><tr class=head><th>file</th><th>what</th><th>size</th><th>on disk</th></tr>{"".join(rows.freeze())}</table></div>"
+    "<div class=panel>{codeTree(at, shown.freeze())}</div>"
   }
   let differs = if differing == 0 {
     ""
@@ -613,7 +656,7 @@ fn codePage(base: String, app: host.App, request: web.Request) -> String {
     base,
     "apps",
     "{app.name} code",
-    "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>code</span></h1><p class=lead>What <code>{h(app.version)}</code> is made of: its <code>app.toml</code>, its <code>.cove</code> files and its <code>assets/</code>, which is the whole of what a deploy carries. The code and the assets are the ones the host is running, held since the app was loaded; <code>app.toml</code> is read from the app's directory, because the load keeps only the settings it parsed to — which is why the app's own page can show a grant or a limit this file does not. “on disk” is how the file of the same name in the directory compares. The directories are the app's own, nested as it has them. Reading only.</p>{differs}{table}{more}",
+    "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>code</span></h1><p class=lead>What <code>{h(app.version)}</code> is made of: its <code>app.toml</code>, its <code>.cove</code> files and its <code>assets/</code>, which is the whole of what a deploy carries. The code and the assets are the ones the host is running, held since the app was loaded; <code>app.toml</code> is read from the app's directory, because the load keeps only the settings it parsed to — which is why the app's own page can show a grant or a limit this file does not. Beside each name is what the file is, what it comes to, and how the file of the same name in the app's directory compares. The directories are the app's own, nested as it has them. Reading only.</p>{differs}{tree}{more}",
   )
 }
 

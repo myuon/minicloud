@@ -376,17 +376,29 @@ assets. That is the file somebody looking at a refusal came for anyway.
 names carry the structure already — `text/text.cove`, `assets/img/icon.svg`
 — and a flat list of paths makes the reader do the nesting in their head. So
 `code.rs` puts a row where a directory begins and says, for every row, how
-deep it is; the page indents by the depth it is told and decides nothing.
+deep it is; the page opens and closes lists to match and decides nothing.
 Grouping a flat list of paths is a sort and a walk, which Cove can do and
 awkwardly, and the host sorted them in the first place. One pass over the
 names is enough because the order they are already in puts every file of a
 directory next to the others in it, and that order is the one there is a
 reason to read in: `app.toml` first because it decides what the app may do,
-then the code, then the assets. There is **no collapsing**, because the CSP
-is `default-src 'none'` and that is not what to spend it on; a deploy is
-bounded and small, and all of it indented is the whole feature. A directory
-row says what the files under it come to, so "how large is `assets/`" needs
-no column added up.
+then the code, then the assets.
+
+**The tree is a list in a list, not a table.** It was a table first, with a
+left padding a level on the first cell, and that was wrong twice: on a wide
+screen a padded cell is a row that starts further right and not a branch of
+anything, and on a narrow one `table.cards` makes every row a card of its
+own, which left eleven cards in a pile and no nesting at all. Nesting a
+`<ul>` inside the `<li>` that holds it puts the shape in the markup, where
+no width can take it away, and `assets/style.css` draws the branches with a
+`border-left` on each list and a tick to each item on it — two rules, and no
+rule a level to run out of. What the columns said is beside each name
+instead: what the file is, what it comes to, and how the app's directory
+compares, the last of them the state badge where it is bad news. There is
+**no collapsing**, because the CSP is `default-src 'none'` and that is not
+what to spend it on; a deploy is bounded and small, and all of it is the
+whole feature. A directory row says what the files under it come to, so "how
+large is `assets/`" needs no column added up.
 
 **A file's text is coloured by the host, and `.cove` by the real lexer.**
 The same CSP means no highlighter runs in the browser, so the colouring is

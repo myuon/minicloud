@@ -699,15 +699,21 @@ fn the_page_shows_what_the_version_it_is_running_is_made_of() {
     );
 
     // The admin app's own code, at a depth: its own module as a directory,
-    // the file under it, and the whole path where the link points.
+    // the file under it, and the whole path where the link points. The
+    // depth is the markup — the module's files are a list inside the item
+    // that names the module — and not a padding on a cell of a table.
     let own = page(&host, "/apps/admin/code");
-    assert!(own.body.contains("<code>text/</code>"), "{}", own.body);
+    assert!(
+        own.body.contains("<li class=dir><code>text/</code>"),
+        "{}",
+        own.body
+    );
     assert!(
         own.body.contains("title=\"text/text.cove\""),
         "{}",
         own.body
     );
-    assert!(own.body.contains("class=\"title dep1\""), "{}", own.body);
+    assert!(!own.body.contains("<table"), "{}", own.body);
     let text = page(&host, "/apps/admin/code?file=text%2Ftext.cove");
     assert!(
         text.body.contains("<span class=k>export</span>"),
@@ -758,6 +764,76 @@ fn the_page_shows_what_the_version_it_is_running_is_made_of() {
         .as_bytes(),
     );
     assert_eq!(posted.status, 404, "{}", posted.body);
+}
+
+/// Every `<ul>`, `</ul>`, `<li>` and `</li>` of the page's tree, in the
+/// order they are written, from the list that opens it to the one that
+/// closes it. The tree is the only list on the page.
+fn tree_tags(body: &str) -> Vec<&str> {
+    let from = body.find("<ul class=tree>").expect("a tree on the page");
+    let mut tags = Vec::new();
+    let mut lists = 0;
+    for piece in body[from..].split('<').skip(1) {
+        let tag = piece.split(['>', ' ']).next().unwrap_or("");
+        match tag {
+            "ul" => lists += 1,
+            "/ul" => lists -= 1,
+            "li" | "/li" => {}
+            _ => continue,
+        }
+        tags.push(tag);
+        if lists == 0 {
+            break;
+        }
+    }
+    tags
+}
+
+/// **The tree closes every list it opens**, whatever the depths do. The
+/// nesting is the markup now rather than a padding a cell is given, so a
+/// list left open is a page that reads as the wrong shape from there on,
+/// and the depths the page walks are the host's and not its own.
+#[test]
+fn the_tree_closes_every_list_it_opens() {
+    let apps = ui_apps();
+    with_assets(&apps);
+    // An asset two directories down, so the row after the last of them is
+    // two levels shallower and two lists have to close at once.
+    let icons = apps
+        .root
+        .join("notes")
+        .join(minicloud::assets::DIR)
+        .join("img")
+        .join("icons");
+    std::fs::create_dir_all(&icons).unwrap();
+    std::fs::write(icons.join("deep.svg"), "<svg/>").unwrap();
+    let host = start(&apps, 2);
+
+    let listing = page(&host, "/apps/notes/code");
+    assert_eq!(listing.status, 200, "{}", listing.body);
+    // A list closes inside the item that opened it, an item closes inside
+    // the list that holds it, and nothing is left open at the end.
+    let tags = tree_tags(&listing.body);
+    let mut open: Vec<&str> = Vec::new();
+    for tag in &tags {
+        match *tag {
+            "ul" | "li" => open.push(tag),
+            "/ul" => assert_eq!(open.pop(), Some("ul"), "{tags:?}"),
+            "/li" => assert_eq!(open.pop(), Some("li"), "{tags:?}"),
+            _ => unreachable!("{tag}"),
+        }
+    }
+    assert!(open.is_empty(), "{tags:?}");
+    // `assets/img/icons/deep.svg` to `assets/logo.png` is two levels: the
+    // file's item, then `icons/` and `img/`, each with the item that named
+    // it, and the next file is an item of the list that is left.
+    assert!(
+        listing.body.contains(
+            "</li></ul></li></ul></li><li><a href=\"/apps/notes/code?file=assets%2Flogo.png\""
+        ),
+        "{}",
+        listing.body
+    );
 }
 
 /// The page shows code, which is markup more often than not: every value

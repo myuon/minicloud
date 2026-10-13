@@ -83,16 +83,21 @@ pre.code .n{color:var(--warn)}
 pre.code .c{color:var(--muted)}
 pre.code .d{color:var(--muted);font-style:italic}
 pre.code .p{color:var(--muted)}
-/* a deploy as a tree: the host says how deep a row is and the page names
-   the class, because the CSP allows no inline style. A rule a level, so the
-   page clamps the depth it asks for (`codeMaxDepth`). */
-table.tree tr.dir td.title code{font-weight:650}
-table.tree td.title.dep1{padding-left:2.2em}
-table.tree td.title.dep2{padding-left:3.6em}
-table.tree td.title.dep3{padding-left:5em}
-table.tree td.title.dep4{padding-left:6.4em}
-table.tree td.title.dep5{padding-left:7.8em}
-table.tree td.title.dep6{padding-left:9.2em}
+/* a deploy as a tree: a list inside the item that holds it, a line down the
+   left of every list and a tick from it to each item on that line. The
+   nesting is the markup, so it survives any width — which is why this is
+   not a table: an indented cell reads as a tree only on a wide screen, and
+   on a narrow one `table.cards` makes every row a card and the nesting is
+   gone. A rule a level is gone with it; the lines nest because the lists
+   do. On a narrow screen the facts beside a name take a line of their own,
+   so a long name cannot push them off the side. */
+ul.tree{margin:0;padding:0;list-style:none;font-size:14px}
+ul.tree ul{margin:0;padding-left:1.2em;list-style:none;border-left:1px solid var(--line)}
+ul.tree li{position:relative;padding:.22em 0}
+ul.tree ul>li::before{content:"";position:absolute;top:1.05em;left:-1.2em;width:.85em;border-top:1px solid var(--line)}
+ul.tree li.dir>code{font-weight:650}
+ul.tree .meta{color:var(--muted);font-size:13px}
+ul.tree .meta .state{margin:0 .1em}
 td.value{max-width:52em}
 td.value code{display:inline-block;max-width:100%;white-space:pre-wrap;word-break:break-all}
 @media (min-width:761px){td.nowrap{white-space:nowrap}}
@@ -149,6 +154,7 @@ table.log,table.log tr{display:block;width:auto}
 table.log tr{padding:.3em .1em}
 table.log td{display:inline;padding:0}
 table.log td.at{margin-right:.5em;font-size:11.5px}
+ul.tree .meta{display:block;margin-top:.1em}
 td.value{max-width:none}
 .fields{grid-template-columns:1fr}
 .caps{grid-template-columns:repeat(auto-fill,minmax(10em,1fr))}
