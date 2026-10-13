@@ -634,8 +634,14 @@ impl Engine {
         (0..self.running.len())
             .map(|worker| {
                 let engine = Arc::clone(self);
+                // A worker invokes and resumes Cove on its own stack, and a
+                // call chain crossing between the native tier and the VM
+                // spends Rust stack per crossing, so the thread keeps
+                // cove-runtime's stack promise (myuon/cove#625): a stack of
+                // `STACK_SIZE`, not the 2 MiB default.
                 std::thread::Builder::new()
                     .name(format!("cove-worker-{worker}"))
+                    .stack_size(cove_runtime::STACK_SIZE)
                     .spawn(move || engine.run_worker(worker))
                     .map_err(|e| e.to_string())
             })
