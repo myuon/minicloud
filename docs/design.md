@@ -226,6 +226,7 @@ refuses a package module that shadows a host module):
 | --- | --- |
 | `host.apps()` | `Array<host.App>`: every app — `state` (`serving`, `disabled`, `refused`, `removed`) and `reason`, `version`, `tier`, `entry`, `hosts`, `required` and `granted` (and `grantAdded`/`grantRemoved`, what the admin changed), `fetchAllow`, `limits` (`host.Limits`: `maxHostCalls`, `deadlineMs`, `maxHeapWords`, `maxInFlight`, `maxQueued`, `maxRequestBytes`, `maxResponseBytes`) and `limitsChanged`, `isAdmin`, its counters (`served`, `ok`, `errors`, `rejected`, `inFlight`, `queued`, `kvKeys`, `kvBytes`) and its ten newest `recentErrors` |
 | `host.capabilities()` | `Array<String>`: what a grant may name |
+| `host.selfVersion()` | `String`: the version of the admin app itself, the string its own answers carry as `x-cove-app-version`; `""` when the host cannot say. No app name: only `admin` is granted `admin`. It is a slot lookup and a `String` clone, which is what lets every page ask — `host.apps()` answers the same question only by reading every app's counters and sizing its store |
 | `host.history(limit)` | `Array<host.Change>`: `atMs`, `who`, `app`, `action`, `detail`, `outcome`, newest first |
 | `host.setEnabled(app, enabled, who)` | `Result<String, Error>` |
 | `host.configure(app, settings, who)` | `Result<String, Error>`: `settings` is `host.Settings { grant, fetchAllow, limits }`, the whole of what they are to be |
@@ -1134,6 +1135,22 @@ default: the files change with a deploy, and a stale stylesheet is worse
 than a conditional request that an `etag` makes cheap. An app whose file
 names carry a hash of their contents sets `[assets] cache_control` to
 something long instead.
+
+**A version in the URL is the app's job, not the host's.** The path of a
+file does not change between deploys, so a browser or a proxy that holds one
+holds it against the new pages too — and `no-cache` is a request to
+revalidate, not a guarantee that something in the middle will. The admin app
+therefore links its own files by version, `/style.css?v=<the version
+serving>`, from `host.selfVersion`: the new pages ask for a URL no old cache
+has, so there is nothing of an old deploy left to be served. The host reads
+no query — the path names the file, and `/style.css?v=anything` is the same
+file — because the query is there to change the URL and not to be checked.
+Which also means `[assets] cache_control` stays `no-cache` on the admin app:
+one header covers every file of an app, and the paths a browser chooses for
+itself (`/favicon.ico`) carry no version, so a long `max-age` there would be
+the staleness this is about with no way left to clear it. Saying it properly
+— long where the `?v=` names the version serving, `no-cache` where it does
+not — is a rule per request and so the host's to grow, not an app setting.
 
 **They are public.** The answer happens before the app runs, so an app's
 own `auth.check` or `auth.identity` is not in front of its files. That is

@@ -412,6 +412,27 @@ impl Front {
             .collect()
     }
 
+    /// The version of the admin app itself — the string every answer of
+    /// its carries as `x-cove-app-version` ([`crate::sched::VERSION_HEADER`])
+    /// — or "" when the host cannot say which that is.
+    ///
+    /// It takes no app name because only the app named `admin` is ever
+    /// granted `admin` ([`ADMIN_APP`]), so "the app asking" is that slot and
+    /// nothing else. It is a slot lookup and one `String` clone, which is
+    /// what lets every page ask: [`Front::app_infos`] answers the same
+    /// question only by reading every app's counters, quotas and store size.
+    ///
+    /// "" rather than an error for an admin app with no version loaded: the
+    /// caller stamps a URL with this or leaves it alone, and a page that
+    /// could not be told the version is not a page that should fail.
+    pub(crate) fn self_version(&self) -> String {
+        self.engine
+            .slot_named(ADMIN_APP)
+            .and_then(|slot| slot.current())
+            .map(|app| app.version.clone())
+            .unwrap_or_default()
+    }
+
     /// Every capability the host's modules declare: what a grant may name.
     pub(crate) fn capabilities(&self) -> Vec<String> {
         let mut capabilities: Vec<String> = self

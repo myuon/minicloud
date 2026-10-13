@@ -44,3 +44,18 @@ admin = { env = "ADMIN_UI_TOKEN" }
 # GET or HEAD for `/style.css` is `assets/style.css`. The host's defaults
 # for it (8 MiB in all, `cache-control: no-cache`) are right for a few small
 # files, so there is no `[assets]` section here.
+#
+# The pages ask for these files as `/style.css?v=<version>`, so a deploy
+# changes the URL and nothing of an old one can be held against new HTML.
+# A URL that carries its version would ordinarily be answered `max-age` of a
+# year and `immutable` — no revalidation at all — and `[assets]
+# cache_control` is how an app says so. It is not set here, on purpose:
+# **the header is one header for every file of the app, and not every
+# request carries the version.** A browser asks for `/favicon.ico` itself,
+# and anyone may open `/style.css`; a year of `immutable` on those paths is
+# the same staleness this change is about, only with no way left to clear
+# it. Saying it properly — long where the `?v=` names the version serving,
+# `no-cache` where it does not — is the host's to decide per request, not
+# this file's. Until then `no-cache` costs one conditional request that the
+# `etag` answers `304` from memory, and the versioned URL has already taken
+# away the failure it was guarding against.

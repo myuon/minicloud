@@ -105,6 +105,21 @@ fn the_list_shows_every_app_its_state_and_its_capabilities() {
     // And the grant shows where every listing shows grants.
     assert_eq!(app_stats(&host, "admin")["granted"], "admin");
     assert!(host.banner().contains("granted [admin]"));
+
+    // The one thing the app can ask about itself, and no app name to ask it
+    // with: the version it is running, the same string its answers carry as
+    // `x-cove-app-version`. The admin app stamps the URLs of its own files
+    // with it, so a deploy is a URL nothing has cached.
+    let version = op(&host, "/selfVersion").body.trim().to_string();
+    assert!(version.starts_with("v1-"), "{version}");
+    assert_eq!(
+        app_stats(&host, "admin")["version"].as_str(),
+        Some(version.as_str())
+    );
+    assert_eq!(
+        get_at(host.addr, ADMIN_HOST, "/capabilities").header("x-cove-app-version"),
+        Some(version.as_str())
+    );
 }
 
 #[test]

@@ -11,6 +11,7 @@
 //! | --- | --- |
 //! | `host.apps()` | `Array<host.App>`: every app the host has, in load order — its state (`serving`, `disabled`, `refused`, `removed`) and why, version, tier, hostnames, what its entry requires and what it is granted (and which of those grants the admin changed), its fetch allowlist, its limits, its counters and its recent errors |
 //! | `host.capabilities()` | `Array<String>`: every capability the host's modules declare, the ones a grant may name |
+//! | `host.selfVersion()` | `String`: the version of the admin app itself, the same string its answers carry as `x-cove-app-version`; `""` when the host cannot say |
 //! | `host.code(app, limit)` | `Array<host.CodeFile>`: the files of the version the app is running ([`crate::code`]) — `app.toml`, then its `.cove` files, then its `assets/` — at most `limit` files (0–[`crate::code::CODE_FILES`]) as a tree, each row saying its depth, its size and how the one on disk compares, and no text |
 //! | `host.codeFile(app, file)` | `Result<host.CodeFile, Error>`: one of those files with its text, cut past [`crate::code::READ_TEXT_BYTES`], and the pieces its text is coloured by ([`crate::highlight`]); an `Err` for a name the deploy has no file under |
 //! | `host.history(limit)` | `Array<host.Change>`: the newest `limit` changes, newest first |
@@ -111,6 +112,13 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             Effect::Read,
         ),
         op("capabilities", &[], STRINGS, Effect::Read),
+        // The app's own version, so a page can put it in the URL of a file
+        // the host serves (`assets/`) and a deploy change the URL. It takes
+        // no app name because only `admin` is granted `admin`, and it is a
+        // `String` and not a `host.App` because the whole of one costs every
+        // app's counters and a `stat` of its store — too much for a call
+        // every page makes.
+        op("selfVersion", &[], STR, Effect::Read),
         op(
             "code",
             &[STR, INT],
@@ -1042,6 +1050,20 @@ impl HostApi for AdminHost {
     /// The reads, at once; a change where the run cannot park, waited for
     /// on the worker.
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        // Answered before the host is asked for, and "" where there is none
+        // — an app that is not the admin app, or `minicloud test`. Every
+        // other operation is about a running host and is an error without
+        // one; this one is what a page stamps a URL with or does without, so
+        // the absence is an answer and not a failure.
+        if op == "selfVersion" {
+            return Ok(Value::string(
+                self.control
+                    .as_ref()
+                    .and_then(|control| control.front())
+                    .map(|front| front.self_version())
+                    .unwrap_or_default(),
+            ));
+        }
         let control = self.control()?;
         match op {
             "apps" => {
