@@ -61,6 +61,20 @@ table.log td.said{width:100%;white-space:pre-wrap;word-break:break-word}
 table.log td.said .lvl{margin-right:.6em}
 table.log tr:nth-child(odd) td{background:var(--soft)}
 table.log tr:hover td{background:var(--line)}
+/* which app a line came from, on the page that has every app's: a column of
+   its own, held to a width so the names line up and the text starts in one
+   place down the page */
+table.log td.app{width:6.5em;padding-right:0;white-space:nowrap;font-size:12px}
+table.log td.app code{display:inline-block;min-width:4.6em;padding:.02em .45em;border:1px solid var(--line);background:var(--card);text-align:center}
+/* the tool first, the app chosen on the page: a row of chips, the one the
+   page is filled. An app's chip is the way to that app's own window, so the
+   row is navigation and not a filter. */
+nav.pick{display:flex;flex-wrap:wrap;align-items:center;gap:.35em;margin:.2em 0 1.2em}
+nav.pick .lbl{margin-right:.25em;color:var(--muted);font-size:11.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+nav.pick a{display:inline-flex;align-items:center;gap:.45em;padding:.3em .8em;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--text);font-size:13.5px;text-decoration:none}
+nav.pick a:hover{border-color:var(--focus)}
+nav.pick a[aria-current]{border-color:var(--brand-2);background:var(--brand-2);color:#fff;font-weight:650}
+nav.pick .sep{width:1px;height:1.4em;margin:0 .35em;background:var(--line)}
 /* a file of a deploy, whole: no box to scroll inside, and the lines wrap
    rather than scroll sideways, as every other table here does */
 pre.code{max-height:none;tab-size:2}
@@ -261,6 +275,11 @@ table.log,table.log tr{display:block;width:auto}
 table.log tr{padding:.3em .1em}
 table.log td{display:inline;padding:0}
 table.log td.at{margin-right:.5em;font-size:11.5px}
+/* the app runs on with the time rather than keeping a column: the row is
+   one wrapping line here, and a chip as wide as the longest name would
+   leave a hole in every short one */
+table.log td.app{margin-right:.5em}
+table.log td.app code{min-width:0}
 ul.tree{padding-left:.8em}
 ul.tree ul{padding-left:.8em}
 ul.tree li::before{left:-.8em;width:.5em}

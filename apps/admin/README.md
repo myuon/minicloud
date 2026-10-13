@@ -4,7 +4,8 @@ What the host runs, and the forms that change it (issue #17): enable or
 disable an app, change its grant, its fetch allowlist and its limits, reset
 it to its `app.toml`, and read the change history. What each app holds and
 what it said are there to read as well — a page of its `kv` store and the
-last lines of its log — and what the version it is running *is*: its
+last lines of its log, and every app's lines in one order (issue #108) — and
+what the version it is running *is*: its
 `app.toml`, its `.cove` files and its `assets/` (issue #89) — and the tables
 of its `sql` store, with one statement that reads them (issue #88), and what
 is on its queues (issue #90). All of that is only to read. Pages, form reading, validation and rendering are
@@ -33,6 +34,7 @@ in [docs/design.md, Administering apps at run time](../../docs/design.md#adminis
 | `GET /apps/<app>/sql` | the app's SQL store: its tables and how many rows each has (`not counted` where counting ran out of the time); `?q=<statement>` runs that one statement and shows the answer as a table. At most 200 rows — more is an error naming the limit, not the first 200 shown as the whole — and 1000 ms. `NULL` and the empty string are written apart. **Reading only** — a statement that writes is refused, and nothing typed here is kept in the history |
 | `GET /apps/<app>/queues` | the app's queues: each one its `[[queues]]` declares, with what is **due** (the next delivery tick may take it), what is **held** (its due time is ahead — a delivery's lease, or a failed delivery waiting for its retry; the store keeps one due time for both) and how many dead letters it has, beside the settings the host delivers it by; then the messages waiting, what is due first, with their tries and when each is next due; then the dead letters, newest first, with why each was buried. `?message=<id>` is one message, its body whole (cut past 64 KiB, which the page says) — a listing cuts a body to the column, and a queue's body is a payload. At most 200 of each are listed and the counts above them are whole, so a page that is showing the first 200 says so. **Reading only** — the window leases nothing and counts no attempt, so a queue somebody looks at is delivered exactly as it would have been, and putting a dead letter back is `minicloud queues <app> --revive <id>` on the machine |
 | `GET /apps/<app>/logs` | the last lines the app logged and the host said of it, oldest first, with their level; `?n=` how many (1–1000, 200 by default). The ring is in memory, so a restart empties it |
+| `GET /logs` | **every app's log in one order** (issue #108), oldest first, each line saying which app wrote it; `?n=` how many, as above. Above it, a chip for every app the host has a line of, which is the way to that app's own `Logs` |
 | `GET /history` | every change, made here or by `minicloud` on the machine, refused ones included |
 | `GET /secrets` | the host's secret store: each secret stored or used by an app — set or unset, when it was set, which apps use it — **never a value** |
 | `POST /secrets/set` | `name` and `value` (a password field, never filled back in): stores it and reloads the apps that use it; the page says what each reload came to |
@@ -96,6 +98,31 @@ would miss the hand edit that keeps the length, which is the case the
 comparison is for, so the page says "I did not look" rather than guessing.
 The list of apps does not compare at all, and says nothing about the files:
 it has every app on it.
+
+## Logs across every app
+
+`Logs` is in the top navigation beside `Apps`, and the page there is every
+app's lines in one order (issue #108). A queue delivery failing in one app
+and the request that caused it in another are one sequence; on two pages
+they are two pages and a clock.
+
+**The host does the mixing** (`host.allLogs`): it holds every app's ring,
+and merging sorted arrays is not something to write in a page. It takes the
+asked-for number of lines from each ring, merges them by time and cuts the
+merge back — which is exactly the last *n* lines of the host's whole log,
+because every line of it is a line of some app's.
+
+**So one app with a lot to say fills the page**, and the quiet ones fall off
+the end. That is what "the last *n* lines" is, and it is why the number of
+lines (50 / 200 / 1000) is offered above the table and below it. The chips
+above it are the other way out: one per app the host has a line of, and each
+goes to **that app's own `Logs`**, which is the same window with the app
+chosen. They are every app with a log and not the apps on the page — a way
+in that comes and goes with `?n=` is not a way in — and `all apps` is the
+one marked, because that is where the reader is. They carry no dot of
+health: that is what the list of apps works out, from an app's counters and
+a read of its queues, and a second rule for the same word is a second
+answer.
 
 ## On a screen of any width
 

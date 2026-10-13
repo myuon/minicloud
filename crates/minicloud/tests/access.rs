@@ -304,6 +304,11 @@ fn a_valid_token_gets_in_and_the_history_records_its_email() {
     let page = ui(&host, "GET", "/", &[assertion(&good)]);
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(page.body.contains(">hello</a>"), "{}", page.body);
+    // Every app's log is behind the same identity as the rest (issue #108):
+    // it is every app's lines, so it is the page that is worth the most to
+    // somebody who did not get in.
+    assert_eq!(ui(&host, "GET", "/logs", &[assertion(&good)]).status, 200);
+    assert_refused(&ui(&host, "GET", "/logs", &[]), "no token");
     // The browser's cookie does as well as the header.
     let cookie = format!("Cookie: theme=dark; CF_Authorization={good}");
     assert_eq!(ui(&host, "GET", "/history", &[cookie]).status, 200);

@@ -1,0 +1,26 @@
+use web
+use log
+
+/// Logs what it is told to, as many times as it is told to.
+///
+/// `GET /say?text=&n=` writes `text` at `info`, `n` times (once by
+/// default). It is how the log tests make a line of their own choosing —
+/// one with markup in it, or sixty of them from one app while another is
+/// quiet.
+export fn handle(request: web.Request) -> web.Response {
+  if request.path == "/say" {
+    let said = request.query.get("text").unwrapOr("")
+    let times = Int.parse(request.query.get("n").unwrapOr("1")).unwrapOr(1)
+    var left = times
+    while left > 0 {
+      log.info(said)
+      left = left - 1
+    }
+    return answer(200, "{times}")
+  }
+  answer(404, "no such path")
+}
+
+fn answer(status: Int, body: String) -> web.Response {
+  web.Response(status: status, headers: Map.of(), body: "{body}\n")
+}

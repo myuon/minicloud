@@ -235,7 +235,8 @@ refuses a package module that shadows a host module):
 | `host.deleteSecret(name, force, who)` | `Result<String, Error>`: refused while an app uses it unless `force` |
 | `host.kv(app, prefix, after, limit)` | `Array<host.KvEntry>`: a page of another app's store — `key`, `value` cut to 512 characters, `bytes` (the whole value's), `cut` — ascending, at most 500 |
 | `host.kvValue(app, key)` | `Result<host.KvEntry, Error>`: one key, its value whole up to 64 KiB; `Err` when the store has no such key |
-| `host.logs(app, limit)` | `Array<host.LogLine>`: the last `limit` lines of the app's ring — `atMs`, `level`, `text` — oldest first |
+| `host.logs(app, limit)` | `Array<host.LogLine>`: the last `limit` lines of the app's ring — `app`, `atMs`, `level`, `text` — oldest first |
+| `host.allLogs(limit)` | `host.AllLogs { apps, lines }`: every app's ring as one sequence — the last `limit` lines of it, oldest first — and `apps`, every app whose ring holds a line |
 
 The five that change something park the run while the host works (an app
 is reloaded on a blocking thread, as an update is), so they hold no worker.
@@ -249,7 +250,7 @@ version they were admitted to.
 
 ### Reading another app's store and log
 
-The three reads above are how the admin app shows what an app holds and
+The four reads above are how the admin app shows what an app holds and
 what it said, and they are **reads only**: there is no operation that
 writes to another app's store, so the one app granted `admin` cannot change
 another app's data, only its configuration.
@@ -268,6 +269,27 @@ another app's data, only its configuration.
   module that writes it. The file beside it (`<data>/<app>/log.txt`) is not
   read: a page that tails a rotating file is a different thing, and the ring
   is what a browser wants.
+- **Every app's log is one sequence** (`host.allLogs`, issue #108). The host
+  mixes them, not the app: it holds every slot, and merging sorted arrays in
+  Cove is a loop nobody should write twice. It takes `limit` lines from each
+  ring, merges them by time and cuts the merge back to `limit` — which is
+  **exactly the last `limit` lines of the host's whole log**, because every
+  line of it is a line of some app's and so the newest `limit` across the
+  host are among the newest `limit` of the apps they came from.
+
+  Which means one app that is talking fills the answer and the quiet ones
+  fall off the end. That is what "the last `limit` lines" is; the page's
+  `?n=` is how to see past it, and an app's own log is how to read it alone.
+  So `apps` is answered beside the lines and is **every app whose ring holds
+  a line**, not the apps in the window: the way to a quiet app's log must
+  not come and go with `?n=`.
+
+  A line the log module could not read has no time of its own (`atMs` 0). It
+  is never dropped — a log that loses lines is the worst this could do — and
+  it is not sorted to the epoch either, which would bury it under everything
+  and cut it first: it is ordered by the line before it in its own ring,
+  which is where the ring put it, and it still says 0, because that is all
+  that is known about it.
 - **The app is named, not the path.** Both take an app's name and resolve it
   through the host's slots; a name the host does not serve answers empty
   rather than reaching into the data directory, so `..` in a name reads

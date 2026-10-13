@@ -915,7 +915,9 @@ enable and disable; change an app's grant, fetch allowlist and limits; the
 change history; and the secret store. It also reads what an app holds and
 what it said — a page of its `kv` store, one key at a time, and the last
 lines of its log — which it can only read: the host gives it no way to
-write to another app's store. It also shows **what the version an app is
+write to another app's store. `/logs` is **every app's log in one order**,
+each line saying which app wrote it, so a failure in one app and the request
+that caused it in another are read as the one sequence they are. It also shows **what the version an app is
 running is** — its `app.toml`, its `.cove` files at any depth and its
 `assets/` as a tree, and one file's text, syntax-coloured — out of the
 host's own copies, so the code shown is the code that runs, with a note when
@@ -1125,7 +1127,11 @@ connection, and says so if a reader falls more than 1,000 lines behind
 rather than leaving a hole. Without `--quiet`, `log` lines also go to stdout; the
 host's own messages go to stderr — on the server, `journalctl -u cove-tools`.
 The admin app shows the same ring, a line at a time with its level
-(`/apps/<app>/logs`), so the lines are there in a browser as well.
+(`/apps/<app>/logs`), so the lines are there in a browser as well — and
+**`/logs` is every app's at once**, in one order, each line saying which app
+wrote it: a queue delivery failing in one app and the request that caused it
+in another are one sequence, and on two pages they are two pages and a
+clock.
 
 ## The front door
 

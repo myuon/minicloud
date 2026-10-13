@@ -29,6 +29,9 @@ use text
 /// - `GET /apps/<app>/queues` is each queue it declares with what is due,
 ///   held and dead, the messages waiting and the dead letters with why;
 ///   `?message=` is one message, its body whole.
+/// - `GET /logs` is **every app's log in one order**, oldest first, each
+///   line saying which app it came from, with the way to each app's own
+///   Logs beside it. `?n=` is how many lines, as it is on an app's.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -61,6 +64,9 @@ export fn handle(request: web.Request) -> web.Response {
   let action = parts.get(3).unwrapOr("")
   if request.path == "/" && get {
     return htmlResponse(200, appsPage(at, host.apps()))
+  }
+  if section == "logs" && name == "" && get {
+    return htmlResponse(200, allLogsPage(at, request))
   }
   if section == "history" && name == "" && get {
     return htmlResponse(200, historyPage(at, host.history(200)))

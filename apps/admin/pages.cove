@@ -57,6 +57,7 @@ fn nav(base: String, here: String) -> String {
   var out = Vector.of()
   for item in Vector.of(
     MapEntry(key: "apps", value: "/"),
+    MapEntry(key: "logs", value: "/logs"),
     MapEntry(key: "secrets", value: "/secrets"),
     MapEntry(key: "history", value: "/history"),
   )
@@ -1768,14 +1769,19 @@ fn queueMessagePage(base: String, app: host.App, id: Int) -> String {
 
 /// The lines of a log, oldest first, as a table of the time and what was
 /// said. `lines` is what the host gave: it is never markup.
-fn logTable(lines: Array<host.LogLine>) -> String {
+///
+/// `withApp` puts the app each line came from beside the time, for the page
+/// that has every app's on it. One app's page knows the app already, and a
+/// column saying the same word on every row is a column that says nothing.
+fn logTable(lines: Array<host.LogLine>, withApp: Bool = false) -> String {
   if lines.length() == 0 {
     return "<p class=muted>No lines yet.</p>"
   }
   var rows = Vector.of()
   for line in lines {
+    let who = if withApp { "<td class=app><code>{h(line.app)}</code></td>" } else { "" }
     rows.push(
-      "<tr><td class=at>{atTime(line.atMs)}</td><td class=said><span class=\"lvl {levelClass(line.level)}\">{h(line.level)}</span>{h(line.text)}</td></tr>",
+      "<tr><td class=at>{atTime(line.atMs)}</td>{who}<td class=said><span class=\"lvl {levelClass(line.level)}\">{h(line.level)}</span>{h(line.text)}</td></tr>",
     )
   }
   "<div class=scroll><table class=log>{"".join(rows.freeze())}</table></div>"
@@ -1806,25 +1812,78 @@ fn logLines(request: web.Request) -> Int {
   }
 }
 
-/// One app's log: the host's ring of its last lines, oldest first.
-fn logPage(base: String, app: host.App, request: web.Request) -> String {
-  let at = appAt(base, app)
-  let n = logLines(request)
-  let lines = host.logs(app.name, n)
+/// How many lines a log page shows, as the same page with `?n=`. `at` is
+/// the page's own path, so the choice is the one thing the link changes.
+fn logSteps(at: String, n: Int) -> String {
   var steps = Vector.of()
   for size in Vector.of(50, 200, 1000).freeze() {
     if size == n {
       steps.push("<b>{size}</b>")
     } else {
-      steps.push("<a href=\"{h("{at}/logs?n={size}")}\">{size}</a>")
+      steps.push("<a href=\"{h("{at}?n={size}")}\">{size}</a>")
     }
   }
-  let how = "<p class=actions><span class=muted>lines:</span> {" ".join(steps.freeze())}</p>"
+  "<p class=actions><span class=muted>lines:</span> {" ".join(steps.freeze())}</p>"
+}
+
+/// One app's log: the host's ring of its last lines, oldest first.
+fn logPage(base: String, app: host.App, request: web.Request) -> String {
+  let at = appAt(base, app)
+  let n = logLines(request)
+  let lines = host.logs(app.name, n)
+  let how = logSteps("{at}/logs", n)
   layout(
     base,
     "apps",
     "{app.name} log",
     "{appHead(base, app, "Logs")}{about("What the app logged and what the host said of it, oldest first.", "{lines.length()} lines, of the last {logKept()} the host keeps in memory, which a restart empties. Every line is also appended to <code>&lt;data&gt;/{h(app.name)}/log.txt</code>, which this page does not read.")}{how}{logTable(lines)}{how}",
+  )
+}
+
+/// Which app's log is being read: `all apps`, then every app the host has a
+/// line of.
+///
+/// **An app's chip goes to that app's own Logs**, which is a page that
+/// already exists: there is one log window, and this is the way to it. So
+/// the row is not a filter that this page applies — the only thing it
+/// chooses here is `all apps`, which is where it is.
+///
+/// There is no dot of health on a chip as the list of apps has: health is
+/// what `worthALook` works out, from an app's counters and a read of its
+/// queues, and a second rule for the same word — on a page about logs — is
+/// two answers to one question.
+fn logChips(base: String, apps: Array<String>) -> String {
+  var out = Vector.of()
+  out.push("<a href=\"{h(base)}/logs\" aria-current=page>all apps</a>")
+  if apps.length() > 0 {
+    out.push("<span class=sep></span>")
+  }
+  for app in apps {
+    out.push("<a href=\"{h(base)}/apps/{h(app)}/logs\">{h(app)}</a>")
+  }
+  "<nav class=pick><span class=lbl>app</span>{"".join(out.freeze())}</nav>"
+}
+
+/// Every app's log, in one order (issue #108): a queue delivery that failed
+/// in one app and the request that caused it in another are one sequence,
+/// and on two pages they are two pages and a clock.
+///
+/// The host does the mixing (`host.allLogs`): it holds every app's ring, and
+/// the last `n` lines of the host's whole log are the last `n` of the merge.
+/// Which means an app that is talking fills the page and the quiet ones fall
+/// off the end — that is what "the last `n` lines" is — so the lines to show
+/// is the choice this page offers twice, and an app's own log is one chip
+/// away.
+fn allLogsPage(base: String, request: web.Request) -> String {
+  let n = logLines(request)
+  let all = host.allLogs(n)
+  let how = logSteps("{base}/logs", n)
+  let said = "{all.lines.length()} lines: the newest the host has, of the last {logKept()} it keeps in memory for each app, which a restart empties. One app with a lot to say fills the page — ask for more lines, or read an app alone from its chip above. Every line is also appended to <code>&lt;data&gt;/&lt;app&gt;/log.txt</code>, which this page does not read."
+  layout(
+    base,
+    "logs",
+    "logs",
+    "<h1>Logs</h1>{logChips(base, all.apps)}{about("Every app that logs, in one order, oldest first.", said)}{how}{logTable(all.lines, true)}{how}",
   )
 }
 

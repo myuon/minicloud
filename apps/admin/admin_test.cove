@@ -53,21 +53,71 @@ test fn escapesWhatItShows() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// A line of a log, as the host gives one.
+fn aLine(app: String, atMs: Int, level: String, text: String) -> host.LogLine {
+  host.LogLine(app: app, atMs: atMs, level: level, text: text)
+}
+
 test fn showsALogLineAsItCame() -> Result<Unit, Error> {
-  let said = logTable(
-    Vector.of(
-      host.LogLine(atMs: 1791170989566, level: "warn", text: "<img src=x> & on"),
-    )
-      .freeze(),
-  )
+  let said = logTable(Vector.of(aLine("notes", 1791170989566, "warn", "<img src=x> & on")).freeze())
   assert(said.contains("lvl-warn"))?
   assert(said.contains("&lt;img src=x&gt; &amp; on"))?
   assert(!said.contains("<img"))?
   // 2026-10-05T03:29:49.566Z, as the clock of the day.
   assert(said.contains("03:29:49.566"))?
+  // One app's page knows the app: no column saying the same word on every
+  // row.
+  assert(!said.contains("td class=app"))?
   // A level the host grows later still reads, without a colour of its own.
   assertEqual(levelClass("fatal"), "lvl-info")?
   assertEqual(levelClass("error"), "lvl-error")?
+  Ok(())
+}
+
+test fn saysWhichAppEveryLineCameFrom() -> Result<Unit, Error> {
+  let said = logTable(
+    Vector.of(
+      aLine("jobs", 1791170989000, "host", "work: delivering 1 to /do"),
+      aLine("<img src=y>&\"'", 1791170989566, "info", "GET /ledger/ 200"),
+    )
+      .freeze(),
+    true,
+  )
+  assert(said.contains("<td class=app><code>jobs</code></td>"))?
+  // The name is the host's and goes through `h` like anything else: an app
+  // cannot be named this, and the page does not rely on that.
+  assert(said.contains("&lt;img src=y&gt;&amp;&quot;&#39;"))?
+  assert(!said.contains("<img"))?
+  // Oldest first, as the host gave them.
+  assert(said.indexOf("delivering 1").unwrapOr(0) < said.indexOf("GET /ledger/").unwrapOr(0))?
+  Ok(())
+}
+
+test fn offersEveryAppThatHasALog() -> Result<Unit, Error> {
+  let said = logChips("/admin", Vector.of("jobs", "ledger").freeze())
+  // Where the page is, said so.
+  assert(said.contains("<a href=\"/admin/logs\" aria-current=page>all apps</a>"))?
+  // An app's chip is the way to that app's own window, not a filter here.
+  assert(said.contains("<a href=\"/admin/apps/jobs/logs\">jobs</a>"))?
+  assert(said.contains("<a href=\"/admin/apps/ledger/logs\">ledger</a>"))?
+  // An app the host has no line of is not offered: the chip would lead to
+  // an empty page.
+  assert(!said.contains("watch"))?
+  // Nothing logged at all is `all apps` alone, with no rule beside it.
+  let alone = logChips("", Vector.of().freeze())
+  assert(alone.contains("aria-current=page>all apps</a>"))?
+  assert(!alone.contains("class=sep"))?
+  Ok(())
+}
+
+test fn asksForTheSameLinesOnEveryLogPage() -> Result<Unit, Error> {
+  // The choice is the one thing the link changes, so the path it is on is
+  // the page's own: an app's, or every app's.
+  let one = logSteps("/apps/jobs/logs", 200)
+  assert(one.contains("<a href=\"/apps/jobs/logs?n=50\">50</a>"))?
+  assert(one.contains("<b>200</b>"))?
+  assert(!one.contains("?n=200"))?
+  assert(logSteps("/logs", 50).contains("<a href=\"/logs?n=1000\">1000</a>"))?
   Ok(())
 }
 

@@ -561,12 +561,14 @@ fn the_admin_app_needs_its_secret() {
         "Authorization: Bearer wrong\r\n".to_string(),
         "Authorization: Basic b3duZXI6d3Jvbmc=\r\n".to_string(),
     ] {
-        let answer = ui(&host, "GET", "/", &extra, "");
-        assert_eq!(answer.status, 401, "{extra}");
-        assert!(answer
-            .header("www-authenticate")
-            .unwrap()
-            .starts_with("Basic"));
+        for page in ["/", "/logs"] {
+            let answer = ui(&host, "GET", page, &extra, "");
+            assert_eq!(answer.status, 401, "{page}: {extra}");
+            assert!(answer
+                .header("www-authenticate")
+                .unwrap()
+                .starts_with("Basic"));
+        }
         let change = ui(&host, "POST", "/apps/hello/disable", &extra, "");
         assert_eq!(change.status, 401, "{extra}");
     }
@@ -1016,4 +1018,112 @@ fn the_pages_read_an_apps_store_and_its_log() {
         let posted = ui(&host, "POST", path, &same_site(), "");
         assert_eq!(posted.status, 404, "{path}: {}", posted.body);
     }
+}
+
+/// Logs across every app (issue #108): the host mixes every app's ring into
+/// one sequence, and each line says which app it came from.
+#[test]
+fn every_apps_lines_are_one_order() {
+    let config = admin_app_toml();
+    // Leaked: the spec borrows it for the test's length.
+    let config: &'static str = Box::leak(config.into_boxed_str());
+    let apps = apps(&[
+        sample_with("admin", config),
+        fixture("noisy"),
+        sample("hello"),
+    ]);
+    let host = deployed(&apps);
+    // Only the admin app has said anything yet — its `[access]` names a team
+    // the environment does not set here — so it is the only chip: an app the
+    // host has no line of is not offered, because the page a chip leads to
+    // would be empty.
+    let quiet = ui(&host, "GET", "/logs", &authed(), "");
+    assert_eq!(quiet.status, 200, "{}", quiet.body);
+    let quiet = quiet.body;
+    assert!(
+        quiet.contains("<a href=\"/apps/admin/logs\">admin</a>"),
+        "{quiet}"
+    );
+    for silent in ["/apps/noisy/logs", "/apps/hello/logs"] {
+        assert!(!quiet.contains(silent), "{silent}:\n{quiet}");
+    }
+    // Where the page is, in the navigation and in the row of apps.
+    assert!(
+        quiet.contains("<a href=\"/logs\" aria-current=page>logs</a>"),
+        "{quiet}"
+    );
+    assert!(
+        quiet.contains("<a href=\"/logs\" aria-current=page>all apps</a>"),
+        "{quiet}"
+    );
+
+    // Two apps talking, and the host itself: one sequence, oldest first,
+    // every line saying whose it is.
+    assert_eq!(get(host.addr, "/noisy/say?text=before").status, 200);
+    assert_eq!(get(host.addr, "/hello/spin").status, 504);
+    assert_eq!(get(host.addr, "/noisy/say?text=after").status, 200);
+    let page = ui(&host, "GET", "/logs", &authed(), "").body;
+    assert!(
+        page.contains("<td class=app><code>noisy</code></td>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("<td class=app><code>hello</code></td>"),
+        "{page}"
+    );
+    let before = page.find("before").unwrap();
+    let failed = page.find("504 deadline").unwrap();
+    let after = page.find("after").unwrap();
+    assert!(
+        before < failed && failed < after,
+        "the apps are one sequence, oldest first:\n{page}"
+    );
+    // And every app with a log is a way to read it alone.
+    for app in ["admin", "noisy", "hello"] {
+        assert!(
+            page.contains(&format!("<a href=\"/apps/{app}/logs\">{app}</a>")),
+            "{page}"
+        );
+    }
+
+    // A line is whatever the app wrote: an app that logs markup makes a line
+    // of text here, never a tag.
+    assert_eq!(
+        get(host.addr, "/noisy/say?text=%3Cimg%20src=y%3E%26%22%27").status,
+        200
+    );
+    let escaped = ui(&host, "GET", "/logs", &authed(), "").body;
+    assert!(
+        escaped.contains("&lt;img src=y&gt;&amp;&quot;&#39;"),
+        "{escaped}"
+    );
+    assert!(!escaped.contains("<img"), "{escaped}");
+
+    // `?n=` is how many lines, as it is on an app's own log.
+    let one = ui(&host, "GET", "/logs?n=1", &authed(), "").body;
+    assert_eq!(one.matches("<td class=app>").count(), 1, "{one}");
+    assert!(!one.contains("504 deadline"), "{one}");
+
+    // One app with a lot to say fills the page, and the quiet ones fall off
+    // the end: that is what "the last n lines" is. `?n=` is how to see past
+    // it...
+    assert_eq!(get(host.addr, "/noisy/say?text=chatter&n=60").status, 200);
+    let fifty = ui(&host, "GET", "/logs?n=50", &authed(), "").body;
+    assert_eq!(fifty.matches("<td class=app>").count(), 50, "{fifty}");
+    assert!(!fifty.contains("<code>hello</code>"), "{fifty}");
+    let more = ui(&host, "GET", "/logs?n=200", &authed(), "").body;
+    assert!(more.contains("<code>hello</code>"), "{more}");
+    // ...and an app's own Logs is how to read it alone, however loud its
+    // neighbour is. The chip is still offered, too.
+    assert!(
+        fifty.contains("<a href=\"/apps/hello/logs\">hello</a>"),
+        "the way to a quiet app's log does not come and go with `?n=`:\n{fifty}"
+    );
+    let alone = ui(&host, "GET", "/apps/hello/logs?n=50", &authed(), "").body;
+    assert!(alone.contains("504 deadline"), "{alone}");
+    // One app's page knows the app, so it draws no column of it.
+    assert!(!alone.contains("<td class=app>"), "{alone}");
+
+    // The page only reads, whatever is posted to it.
+    assert_eq!(ui(&host, "POST", "/logs", &same_site(), "").status, 404);
 }

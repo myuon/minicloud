@@ -23,6 +23,7 @@
 //! | `host.queueDead(app, limit)` | `Array<host.QueueMessage>`: the dead letters, newest buried first, each with `why`; at most `limit` as above |
 //! | `host.queueMessage(app, id)` | `Result<host.QueueMessage, Error>`: one of them whole, its body cut past [`crate::queue::READ_BODY_CHARS`]; an `Err` for an id no queue of the app holds |
 //! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
+//! | `host.allLogs(limit)` | `host.AllLogs`: every app's log as one sequence — the last `limit` lines of it, oldest first, each saying which app it came from — and `apps`, every app whose ring holds a line. The host merges the rings, and "the last `limit`" is the last `limit` of its whole log, so one app that is talking fills it ([`crate::manage`]) |
 //! | `host.setEnabled(app, enabled, who)` | `Result<String, Error>`: routes to the app again, or stops; nothing is reloaded |
 //! | `host.configure(app, settings, who)` | `Result<String, Error>`: the app's grant, allowlist and limits become `settings`, if the app loads with them |
 //! | `host.reset(app, who)` | `Result<String, Error>`: drops the admin's changes, back to `app.toml` |
@@ -55,7 +56,7 @@ use crate::config::{LimitsFile, ADMIN_CAPABILITY};
 use crate::highlight::Piece;
 use crate::hosts::{AppContext, HostModule, PendingWork};
 use crate::logs::Line;
-use crate::manage::{AppInfo, KvRow, QueueInfo, SecretInfo, Settings, Via};
+use crate::manage::{AllLogs, AppInfo, AppLine, KvRow, QueueInfo, SecretInfo, Settings, Via};
 use crate::overrides::{Change, Control};
 use crate::queue::Peeked;
 use crate::sql::{Answer as SqlAnswer, Table as SqlTable};
@@ -150,6 +151,12 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             "logs",
             &[STR, INT],
             HostType::Array(&HostType::Named("host.LogLine")),
+            Effect::Read,
+        ),
+        op(
+            "allLogs",
+            &[INT],
+            HostType::Named("host.AllLogs"),
             Effect::Read,
         ),
         op(
@@ -525,10 +532,32 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("buriedMs", INT),
             ],
         },
+        // A line of a log, and the app that wrote it. The app is on the line
+        // rather than only on the call that asked for it, because a line of
+        // the host's whole log has to say where it came from and a line of
+        // one app's already knows; one type is one `logTable` in the admin
+        // app, with the column drawn or not.
         TypeSchema {
             name: "LogLine",
             cases: &[],
-            fields: &[field("atMs", INT), field("level", STR), field("text", STR)],
+            fields: &[
+                field("app", STR),
+                field("atMs", INT),
+                field("level", STR),
+                field("text", STR),
+            ],
+        },
+        // The answer to `allLogs`: who has a log, and the lines. `apps` is
+        // not read off `lines` — an app whose last line is older than the
+        // window still has a log to offer — and the two come from one call
+        // so that they are of the same instant.
+        TypeSchema {
+            name: "AllLogs",
+            cases: &[],
+            fields: &[
+                field("apps", STRINGS),
+                field("lines", HostType::Array(&HostType::Named("host.LogLine"))),
+            ],
         },
         TypeSchema {
             name: "Change",
@@ -800,13 +829,42 @@ fn queue_message_value(message: Peeked) -> Value {
     )
 }
 
-fn log_line_value(line: Line) -> Value {
+fn log_line_value(app: &str, line: Line) -> Value {
     Value::structure(
         "host.LogLine",
         vec![
+            ("app", Value::string(app.to_string())),
             ("atMs", int(line.at_ms)),
             ("level", Value::string(line.level)),
             ("text", Value::string(line.text)),
+        ],
+    )
+}
+
+fn app_line_value(line: AppLine) -> Value {
+    Value::structure(
+        "host.LogLine",
+        vec![
+            ("app", Value::string(line.app)),
+            ("atMs", int(line.at_ms)),
+            ("level", Value::string(line.level)),
+            ("text", Value::string(line.text)),
+        ],
+    )
+}
+
+fn all_logs_value(all: AllLogs) -> Value {
+    Value::structure(
+        "host.AllLogs",
+        vec![
+            (
+                "apps",
+                Value::array(all.apps.into_iter().map(Value::string)),
+            ),
+            (
+                "lines",
+                Value::array(all.lines.into_iter().map(app_line_value)),
+            ),
         ],
     )
 }
@@ -1149,8 +1207,19 @@ impl HostApi for AdminHost {
                 let limit = limit.clamp(0, crate::logs::LOG_LINES as i64) as usize;
                 let app = args.first().and_then(Value::as_str).unwrap_or_default();
                 Ok(Value::array(
-                    front.app_logs(app, limit).into_iter().map(log_line_value),
+                    front
+                        .app_logs(app, limit)
+                        .into_iter()
+                        .map(|line| log_line_value(app, line)),
                 ))
+            }
+            "allLogs" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let limit = args.first().and_then(Value::as_int).unwrap_or(0);
+                let limit = limit.clamp(0, crate::logs::LOG_LINES as i64) as usize;
+                Ok(all_logs_value(front.all_logs(limit)))
             }
             "history" => {
                 let limit = args.first().and_then(Value::as_int).unwrap_or(50);
