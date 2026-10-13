@@ -654,7 +654,7 @@ path = "/cron/rollup"
 | `time` | `time` | `nowMillis()`, `nowMicros()` |
 | `random` | `random` | `hex(bytes)`: 1–64 bytes from the operating system |
 | `auth` | `auth` | `check(secret, authorization)` against a `[secrets]` entry the app never reads; `identity(headers)`, the Cloudflare Access user the host verified; `usesAccess()` |
-| `host` | `admin` | the admin app's view of the host and its changes, what the version of an app it is running is made of ([`code.rs`](crates/minicloud/src/code.rs)), what an app's SQL store holds and what is on its queues, for reading only ([`sql.rs`](crates/minicloud/src/sql.rs), [`queue.rs`](crates/minicloud/src/queue.rs)); only the app named `admin` may be granted it |
+| `host` | `admin` | the admin app's view of the host and its changes, what the version of an app it is running is made of and how its text is coloured ([`code.rs`](crates/minicloud/src/code.rs), [`highlight.rs`](crates/minicloud/src/highlight.rs)), what an app's SQL store holds and what is on its queues, for reading only ([`sql.rs`](crates/minicloud/src/sql.rs), [`queue.rs`](crates/minicloud/src/queue.rs)); only the app named `admin` may be granted it |
 
 The exact signatures are the schemas in the source:
 [`hosts.rs`](crates/minicloud/src/hosts.rs) (`web`, `log`, `timer`),
@@ -917,9 +917,14 @@ what it said — a page of its `kv` store, one key at a time, and the last
 lines of its log — which it can only read: the host gives it no way to
 write to another app's store. It also shows **what the version an app is
 running is** — its `app.toml`, its `.cove` files at any depth and its
-`assets/`, and one file's text — out of the host's own copies, so the code
-shown is the code that runs, with a note when the file of the same name in
-the app's directory is not the one that is running. And it shows **what an
+`assets/` as a tree, and one file's text, syntax-coloured — out of the
+host's own copies, so the code shown is the code that runs, with a note when
+the file of the same name in the app's directory is not the one that is
+running. `.cove` is coloured by the lexer the host compiled it with, so a
+colour cannot disagree with what runs; `app.toml`, CSS and XML have scanners
+of their own, and a file with no reader is shown plain rather than shown
+wrongly. The colouring is the host's because the pages run no script at all.
+And it shows **what an
 app's SQL store holds** — its tables and how many rows each has, and the
 answer to one statement that only reads. The refusal of a statement that
 writes is the host's own, the one the app's `sql.query` meets, so the window

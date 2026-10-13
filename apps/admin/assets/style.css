@@ -1,6 +1,6 @@
 /* tokens: the colours, the type and the spacing */
-:root{color-scheme:light dark;--bg:#f4f6f8;--card:#fff;--line:#e1e5ea;--soft:#eef1f4;--text:#191c21;--muted:#67707c;--brand:#342a4d;--brand-2:#4b3d6e;--link:#3a4bb0;--ok:#0f7a38;--ok-bg:#e7f6ec;--bad:#b32318;--bad-bg:#fdeceb;--warn:#8a5a00;--warn-bg:#fbf1de;--off:#58606c;--off-bg:#eaedf1;--focus:#7c6bc4}
-@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#191d23;--line:#2b313a;--soft:#222730;--text:#e7e9ec;--muted:#98a1ad;--brand:#1e1a2c;--brand-2:#473a68;--link:#a3b2ff;--ok:#52cc84;--ok-bg:#13301f;--bad:#ff8f82;--bad-bg:#3a1c19;--warn:#eec272;--warn-bg:#352a12;--off:#aab3bf;--off-bg:#262b33;--focus:#9d8cf0}}
+:root{color-scheme:light dark;--bg:#f4f6f8;--card:#fff;--line:#e1e5ea;--soft:#eef1f4;--text:#191c21;--muted:#67707c;--brand:#342a4d;--brand-2:#4b3d6e;--link:#3a4bb0;--ok:#0f7a38;--ok-bg:#e7f6ec;--bad:#b32318;--bad-bg:#fdeceb;--warn:#8a5a00;--warn-bg:#fbf1de;--off:#58606c;--off-bg:#eaedf1;--focus:#7c6bc4;--code-word:#6b2fa0;--code-key:#0b6b73}
+@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#191d23;--line:#2b313a;--soft:#222730;--text:#e7e9ec;--muted:#98a1ad;--brand:#1e1a2c;--brand-2:#473a68;--link:#a3b2ff;--ok:#52cc84;--ok-bg:#13301f;--bad:#ff8f82;--bad-bg:#3a1c19;--warn:#eec272;--warn-bg:#352a12;--off:#aab3bf;--off-bg:#262b33;--focus:#9d8cf0;--code-word:#c9a6ff;--code-key:#67cfd8}}
 /* page: the type, the header and its navigation, the headings */
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -64,6 +64,35 @@ table.log tr:hover td{background:var(--line)}
 /* a file of a deploy, whole: no box to scroll inside, and the lines wrap
    rather than scroll sideways, as every other table here does */
 pre.code{max-height:none;tab-size:2}
+/* the colours of a file's text, which the host cut into pieces and the page
+   wrapped in these: `k` a word of the language, `t` a name it gives meaning
+   to (a type, a selector, a tag), `i` a name being given a value (a key, a
+   property, an attribute), `s` a string, `n` a number, `c` a comment, `d` a
+   doc comment, `p` punctuation. One letter each because a file comes to
+   thousands of spans and the class is in every one of them.
+
+   Only two of them are a colour of their own; the rest borrow the page's,
+   so there is one palette here and not two, and both forms of it are
+   below. A comment and a doc comment are the same grey, the second
+   italic — prose among code, and no third grey to tell from the first. */
+pre.code .k{color:var(--code-word)}
+pre.code .t{color:var(--link)}
+pre.code .i{color:var(--code-key)}
+pre.code .s{color:var(--ok)}
+pre.code .n{color:var(--warn)}
+pre.code .c{color:var(--muted)}
+pre.code .d{color:var(--muted);font-style:italic}
+pre.code .p{color:var(--muted)}
+/* a deploy as a tree: the host says how deep a row is and the page names
+   the class, because the CSP allows no inline style. A rule a level, so the
+   page clamps the depth it asks for (`codeMaxDepth`). */
+table.tree tr.dir td.title code{font-weight:650}
+table.tree td.title.dep1{padding-left:2.2em}
+table.tree td.title.dep2{padding-left:3.6em}
+table.tree td.title.dep3{padding-left:5em}
+table.tree td.title.dep4{padding-left:6.4em}
+table.tree td.title.dep5{padding-left:7.8em}
+table.tree td.title.dep6{padding-left:9.2em}
 td.value{max-width:52em}
 td.value code{display:inline-block;max-width:100%;white-space:pre-wrap;word-break:break-all}
 @media (min-width:761px){td.nowrap{white-space:nowrap}}

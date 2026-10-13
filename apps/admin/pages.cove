@@ -437,6 +437,21 @@ fn codeTextBytes() -> Int {
   131072
 }
 
+/// The most pieces one file's colouring carries
+/// (`crate::code::HIGHLIGHT_PIECES`), so that a file shown plain for being
+/// past it can say what it was past.
+fn codePieceLimit() -> Int {
+  20000
+}
+
+/// How deep a row the stylesheet has an indent for. A deploy nests a module
+/// directory and whatever tree `assets/` is, and six is more than either;
+/// deeper rows sit at six, because a rule a level cannot go on for a depth
+/// nothing bounds.
+fn codeMaxDepth() -> Int {
+  6
+}
+
 /// What `assets/` is called in a deploy's names, which is also what comes
 /// off one to leave the path the host answers that file on.
 fn assetsPrefix() -> String {
@@ -447,6 +462,9 @@ fn assetsPrefix() -> String {
 /// it is the thing that decides what the app may do and the usual reason to
 /// look.
 fn codeKind(file: host.CodeFile) -> String {
+  if file.kind == "dir" {
+    return "<span class=muted>directory</span>"
+  }
   if file.kind == "config" {
     return "<span class=muted>configuration</span>"
   }
@@ -466,6 +484,11 @@ fn codeKind(file: host.CodeFile) -> String {
 /// own: a difference is the bad news and a file that is not there to
 /// compare is the odd news.
 fn onDisk(file: host.CodeFile) -> String {
+  if file.kind == "dir" {
+    // A directory is not a file, so there is no file of it on disk for the
+    // one that is running to differ from.
+    return "<span class=muted>–</span>"
+  }
   if file.kind == "config" {
     // There is nothing for it to disagree with: the load keeps only what
     // it parsed to, so this file is the directory's.
@@ -509,9 +532,31 @@ fn servedOn(app: host.App) -> String {
   }
 }
 
+/// One row of the tree: a file, with the way to its text, or the directory
+/// that holds the rows under it.
+///
+/// The host decided the order and the depth, so this indents by what it is
+/// told and decides nothing. The indent is a class rather than a `style`
+/// attribute because the CSP (`pageHeaders`) allows no inline style — which
+/// is also why the depth is clamped: the stylesheet has a rule a level and
+/// cannot have one for a depth nothing bounds.
+///
+/// The name shown is the last part of it, since the parts above are the rows
+/// above; the whole path is the link's `title`, where it is still readable
+/// and still escaped.
+fn codeRow(at: String, file: host.CodeFile) -> String {
+  let depth = if file.depth > codeMaxDepth() { codeMaxDepth() } else { file.depth }
+  let rest = "<td data-label=what>{codeKind(file)}</td><td class=nums data-label=size>{text.bytes(file.bytes)}</td><td data-label=\"on disk\">{onDisk(file)}</td></tr>"
+  if file.kind == "dir" {
+    return "<tr class=dir><td class=\"title dep{depth}\" data-label=file><code>{h(file.label)}/</code></td>{rest}"
+  }
+  let link = "{at}/code?file={text.urlEncode(file.name)}"
+  "<tr><td class=\"title dep{depth}\" data-label=file><a href=\"{h(link)}\" title=\"{h(file.name)}\"><code>{h(file.label)}</code></a></td>{rest}"
+}
+
 /// What the version the app is running is made of: its `app.toml`, its
 /// `.cove` files at any depth and its `assets/` — the whole of what a deploy
-/// carries — or, with `?file=`, one file's text.
+/// carries, as a tree — or, with `?file=`, one file's text.
 ///
 /// What is shown is what is **running**: the code is the source map the app
 /// was compiled with and the assets are the bytes the host serves, both held
@@ -528,24 +573,26 @@ fn codePage(base: String, app: host.App, request: web.Request) -> String {
   let size = codePageSize()
   let found = host.code(app.name, size + 1)
   var rows = Vector.of()
-  var at_ = 0
+  // The host's limit counts files, and so does this: a directory row is
+  // there for the files under it and is not one of them.
+  var files = 0
   var differing = 0
   for entry in found {
-    if at_ < size {
-      let link = "{at}/code?file={text.urlEncode(entry.name)}"
-      rows.push(
-        "<tr><td class=title data-label=file><a href=\"{h(link)}\"><code>{h(entry.name)}</code></a></td><td data-label=what>{codeKind(entry)}</td><td class=nums data-label=size>{text.bytes(entry.bytes)}</td><td data-label=\"on disk\">{onDisk(entry)}</td></tr>",
-      )
-      if entry.kind != "config" && entry.onDisk != "same" {
+    let isFile = entry.kind != "dir"
+    if isFile {
+      files = files + 1
+    }
+    if files <= size {
+      rows.push(codeRow(at, entry))
+      if isFile && entry.kind != "config" && entry.onDisk != "same" {
         differing = differing + 1
       }
     }
-    at_ = at_ + 1
   }
   let table = if rows.length() == 0 {
     "<p class=muted>The host has no version of this app loaded, so there is nothing it is running.</p>"
   } else {
-    "<div class=\"scroll cardwrap\"><table class=cards><tr class=head><th>file</th><th>what</th><th>size</th><th>on disk</th></tr>{"".join(rows.freeze())}</table></div>"
+    "<div class=\"scroll cardwrap\"><table class=\"cards tree\"><tr class=head><th>file</th><th>what</th><th>size</th><th>on disk</th></tr>{"".join(rows.freeze())}</table></div>"
   }
   let differs = if differing == 0 {
     ""
@@ -557,7 +604,7 @@ fn codePage(base: String, app: host.App, request: web.Request) -> String {
     }
     "<div class=problem><b>{h(count)}</b> A deploy that was staged and not switched to, or an edit made on the machine: either way, what is below is what the host is running, and the directory holds something else.</div>"
   }
-  let more = if at_ > size {
+  let more = if files > size {
     "<p class=muted>The first {size} files; this deploy has more, which this page does not show.</p>"
   } else {
     ""
@@ -566,14 +613,82 @@ fn codePage(base: String, app: host.App, request: web.Request) -> String {
     base,
     "apps",
     "{app.name} code",
-    "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>code</span></h1><p class=lead>What <code>{h(app.version)}</code> is made of: its <code>app.toml</code>, its <code>.cove</code> files and its <code>assets/</code>, which is the whole of what a deploy carries. The code and the assets are the ones the host is running, held since the app was loaded; <code>app.toml</code> is read from the app's directory, because the load keeps only the settings it parsed to — which is why the app's own page can show a grant or a limit this file does not. “on disk” is how the file of the same name in the directory compares. Reading only.</p>{differs}{table}{more}",
+    "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>code</span></h1><p class=lead>What <code>{h(app.version)}</code> is made of: its <code>app.toml</code>, its <code>.cove</code> files and its <code>assets/</code>, which is the whole of what a deploy carries. The code and the assets are the ones the host is running, held since the app was loaded; <code>app.toml</code> is read from the app's directory, because the load keeps only the settings it parsed to — which is why the app's own page can show a grant or a limit this file does not. “on disk” is how the file of the same name in the directory compares. The directories are the app's own, nested as it has them. Reading only.</p>{differs}{table}{more}",
   )
 }
 
-/// One file of a deploy: its text, cut at what the host carries, which the
-/// page says. A file that is not UTF-8 has no text to show — a page that
-/// pretended to render a PNG would say less than this does — so where the
-/// host answers it is said instead.
+/// One piece of a coloured file: its text, escaped, inside the `<span>` the
+/// stylesheet colours.
+///
+/// **The text is the file's own bytes and `h` is what makes it text.** The
+/// host answers a kind and a run of text and never markup, so every value
+/// these pages show is escaped in one place — and a file's text is the value
+/// likeliest to be markup itself.
+///
+/// The class is one letter because a file comes to thousands of these and
+/// the class is in every one of them. A kind with no span of its own —
+/// `plain`, and any kind the host grows later — is its text and no element,
+/// which is how an unknown kind reads as code rather than as nothing.
+fn codePiece(piece: host.CodePiece) -> String {
+  let body = h(piece.text)
+  if piece.kind == "keyword" {
+    return "<span class=k>{body}</span>"
+  }
+  if piece.kind == "type" {
+    return "<span class=t>{body}</span>"
+  }
+  if piece.kind == "ident" {
+    return "<span class=i>{body}</span>"
+  }
+  if piece.kind == "string" {
+    return "<span class=s>{body}</span>"
+  }
+  if piece.kind == "number" {
+    return "<span class=n>{body}</span>"
+  }
+  if piece.kind == "comment" {
+    return "<span class=c>{body}</span>"
+  }
+  if piece.kind == "doc" {
+    return "<span class=d>{body}</span>"
+  }
+  if piece.kind == "punct" {
+    return "<span class=p>{body}</span>"
+  }
+  body
+}
+
+/// Why a file is shown with no colour, said rather than left to look like a
+/// file with nothing in it worth colouring.
+fn codePlainWhy(file: host.CodeFile) -> String {
+  if file.plain == "cut" {
+    return "<p class=muted>Shown with no colouring: the text below stops at what the host carries, and colouring part of a file would say that the rest of it is whatever the cut fell inside.</p>"
+  }
+  if file.plain == "dense" {
+    return "<p class=muted>Shown with no colouring: this file comes to more pieces than one page carries ({codePieceLimit()}), and a page that was slow to arrive would be worse than a page with no colour on it.</p>"
+  }
+  "<p class=muted>Shown with no colouring: the host reads <code>.cove</code>, <code>.toml</code>, <code>.css</code> and XML, and has no reader for this kind of file. A colouring guessed from a name would be a claim about the file; none is no claim.</p>"
+}
+
+/// A file's text in a `<pre>`, coloured where the host coloured it.
+///
+/// The pieces concatenated are the text, so this shows the file either way;
+/// what the host decides is whether the `<span>`s are there.
+fn codeBody(file: host.CodeFile) -> String {
+  if file.plain != "" {
+    return "{codePlainWhy(file)}<pre class=code>{h(file.text)}</pre>"
+  }
+  var parts = Vector.of()
+  for piece in file.pieces {
+    parts.push(codePiece(piece))
+  }
+  "<pre class=code>{"".join(parts.freeze())}</pre>"
+}
+
+/// One file of a deploy: its text, coloured, and cut at what the host
+/// carries, which the page says. A file that is not UTF-8 has no text to
+/// show — a page that pretended to render a PNG would say less than this
+/// does — so where the host answers it is said instead.
 fn codeFilePage(base: String, app: host.App, name: String) -> String {
   let at = appAt(base, app)
   let back = "<p class=actions><a href=\"{h(at)}/code\">← every file</a></p>"
@@ -582,7 +697,7 @@ fn codeFilePage(base: String, app: host.App, name: String) -> String {
       let cut = if file.cut { " <span class=muted>(cut at {text.bytes(codeTextBytes())}: the whole file is {text.bytes(file.bytes)})</span>" } else { "" }
       let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>file</th><td><code>{h(file.name)}</code></td></tr><tr><th>what</th><td>{codeKind(file)}</td></tr><tr><th>size</th><td>{text.bytes(file.bytes)}{cut}</td></tr><tr><th>on disk</th><td>{onDisk(file)}</td></tr></table></div>"
       let body = if file.isText {
-        "<h2>{if file.cut { "The first {text.bytes(codeTextBytes())}" } else { "The file" }}</h2><pre class=code>{h(file.text)}</pre>"
+        "<h2>{if file.cut { "The first {text.bytes(codeTextBytes())}" } else { "The file" }}</h2>{codeBody(file)}"
       } else if file.kind == "asset" {
         "<h2>Not text</h2><p class=muted>Not UTF-8, so there is no text of it to show. The host answers this file itself, at <code>{h(servedAt(app, file))}</code> on {servedOn(app)}, where a browser shows it as it is.</p>"
       } else {

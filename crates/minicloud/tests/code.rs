@@ -1,6 +1,7 @@
 //! What an app's deploy carries, read back (issue 89): the `host` module's
 //! `code` and `codeFile` ([`minicloud::code`]), and the admin app's page
-//! over them.
+//! over them — as a tree, and coloured ([`minicloud::highlight`], issue
+//! 100).
 //!
 //! The module's own window is the `control` fixture as the app `admin`, as
 //! in tests/admin.rs: one path an operation, the answer as text. The pages
@@ -39,8 +40,8 @@ fn op(host: &Host, path: &str) -> Answer {
     )
 }
 
-/// `host.code(app, 100)` as the fixture prints it: one line a file,
-/// `name | kind | bytes | isText | onDisk`.
+/// `host.code(app, 100)` as the fixture prints it: one line a row,
+/// `name | kind | bytes | isText | onDisk | depth | label`.
 fn code(host: &Host, app: &str) -> Vec<String> {
     let answer = op(host, &format!("/code?app={app}"));
     assert_eq!(answer.status, 200, "{}", answer.body);
@@ -52,15 +53,31 @@ fn code(host: &Host, app: &str) -> Vec<String> {
         .collect()
 }
 
-/// Each line with its size left out, which is the part an edit to a shipped
-/// file would change: `name | kind | isText | onDisk`.
+/// Each file with its size left out, which is the part an edit to a shipped
+/// file would change: `name | kind | isText | onDisk`. The directory rows
+/// are left out too; [`tree`] is what reads those.
 fn shape(lines: &[String]) -> Vec<String> {
     lines
         .iter()
         .map(|line| {
             let parts: Vec<&str> = line.split(" | ").collect();
-            assert_eq!(parts.len(), 5, "{line}");
+            assert_eq!(parts.len(), 7, "{line}");
             format!("{} | {} | {} | {}", parts[0], parts[1], parts[3], parts[4])
+        })
+        .filter(|line| !line.contains(" | dir | "))
+        .collect()
+}
+
+/// Each row as the page is given it: `depth label`, a directory's label
+/// with a `/` after it, which is the tree as a reader sees it.
+fn tree(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            let parts: Vec<&str> = line.split(" | ").collect();
+            assert_eq!(parts.len(), 7, "{line}");
+            let slash = if parts[1] == "dir" { "/" } else { "" };
+            format!("{} {}{slash}", parts[5], parts[6])
         })
         .collect()
 }
@@ -88,6 +105,31 @@ fn code_file(host: &Host, app: &str, file: &str) -> Result<(String, String), Str
     // The fixture's `answer` adds a newline of its own.
     let text = text.strip_suffix('\n').unwrap_or(text);
     Ok((head.to_string(), text.to_string()))
+}
+
+/// `host.codeFile(app, file)`'s colouring as the fixture prints it: why it
+/// is shown plain — `""` where it is not — and the pieces, each a kind and
+/// a run of the file's own text.
+fn code_pieces(host: &Host, app: &str, file: &str) -> (String, Vec<(String, String)>) {
+    let answer = op(
+        host,
+        &format!("/codePieces?app={app}&file={}", urlencode(file)),
+    );
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let (head, rest) = answer
+        .body
+        .split_once('\n')
+        .expect("a header and the pieces");
+    let plain = head.split(" | ").next().unwrap_or_default().to_string();
+    // The fixture's `answer` adds a newline of its own; every piece before
+    // it ends with the NUL the fixture wrote.
+    let rest = rest.strip_suffix('\n').unwrap_or(rest);
+    let mut parts = rest.split('\0');
+    let mut pieces = Vec::new();
+    while let (Some(kind), Some(text)) = (parts.next(), parts.next()) {
+        pieces.push((kind.to_string(), text.to_string()));
+    }
+    (plain, pieces)
 }
 
 /// A query value, percent-encoded: the names here hold `/`, `..` and worse.
@@ -344,8 +386,20 @@ fn the_listing_carries_at_most_what_was_asked_for() {
     with_assets(&apps);
     let host = start(&apps, 2);
     let whole = code(&host, "notes");
-    assert_eq!(whole.len(), 5);
-    for (asked, want) in [("0", 0), ("1", 1), ("3", 3), ("500", 5), ("9999", 5)] {
+    // Five files and the `assets` directory they are under one of.
+    assert_eq!(whole.len(), 6);
+    assert_eq!(shape(&whole).len(), 5);
+    // `limit` counts files, so the ceiling means what it did before there
+    // were directory rows; the directory comes with the first file under
+    // it.
+    for (asked, want) in [
+        ("0", 0),
+        ("1", 1),
+        ("3", 3),
+        ("4", 5),
+        ("500", 6),
+        ("9999", 6),
+    ] {
         let answer = op(&host, &format!("/code?app=notes&n={asked}"));
         let got: Vec<&str> = answer.body.lines().filter(|l| !l.is_empty()).collect();
         assert_eq!(got.len(), want, "n={asked}: {}", answer.body);
@@ -353,6 +407,188 @@ fn the_listing_carries_at_most_what_was_asked_for() {
     // A negative limit is none, not every file.
     let answer = op(&host, "/code?app=notes&n=-1");
     assert_eq!(answer.body.trim(), "");
+}
+
+/// The names carry the nesting and the host does it: a row says how deep it
+/// is, and a directory is a row of its own where one begins.
+///
+/// The order the listing had survives it — `app.toml` first because it
+/// decides what the app may do, then the code, then the assets — which is
+/// why one pass over the names is enough to group them.
+#[test]
+fn the_listing_is_a_tree_the_host_computed_the_depth_of() {
+    let apps = apps(&[control(), sample("notes"), sample("algo")]);
+    with_assets(&apps);
+    let deeper = apps
+        .root
+        .join("notes")
+        .join(minicloud::assets::DIR)
+        .join("img");
+    std::fs::create_dir_all(&deeper).unwrap();
+    std::fs::write(deeper.join("icon.svg"), "<svg/>").unwrap();
+    let host = start(&apps, 2);
+
+    assert_eq!(
+        tree(&code(&host, "notes")),
+        [
+            "0 app.toml",
+            "0 notes.cove",
+            "0 notes_test.cove",
+            "0 assets/",
+            "1 img/",
+            "2 icon.svg",
+            "1 logo.png",
+            "1 style.css",
+        ]
+    );
+    // A module of the app's own is a directory under the code, with the
+    // app's own files before all of them: the order is the source map's,
+    // which is the order the app was loaded in.
+    let algo = tree(&code(&host, "algo"));
+    assert_eq!(&algo[..2], ["0 app.toml", "0 algo.cove"]);
+    for row in [
+        "0 sat/",
+        "1 sat.cove",
+        "1 sat_test.cove",
+        "0 text/",
+        "1 text.cove",
+    ] {
+        assert!(algo.contains(&row.to_string()), "{row} in {algo:?}");
+    }
+    // No row is deeper than the directory that holds it.
+    assert!(
+        algo.iter()
+            .all(|row| row.starts_with("0 ") || row.starts_with("1 ")),
+        "{algo:?}"
+    );
+    // A directory says what the files under it come to, however deep they
+    // are: the question is "how large is `assets/`".
+    let listed = code(&host, "notes");
+    let under: u64 = ["assets/img/icon.svg", "assets/logo.png", "assets/style.css"]
+        .iter()
+        .map(|name| bytes_of(&listed, name))
+        .sum();
+    assert_eq!(bytes_of(&listed, "assets"), under);
+    assert_eq!(bytes_of(&listed, "assets/img"), 6);
+    // A directory is a row and not a file: it has no text, and the name of
+    // one is not a name the deploy has a file under.
+    assert!(code_file(&host, "notes", "assets").is_err());
+    assert!(code_file(&host, "notes", "assets/img").is_err());
+}
+
+/// The point of the colouring, and the one thing it must not get wrong:
+/// **the pieces concatenated are the file**, so showing them shows the file.
+///
+/// Every language a deploy carries is here, because each has a reader of its
+/// own: `.cove` the lexer the host compiled it with, and `app.toml`, CSS and
+/// XML a scanner each.
+#[test]
+fn the_pieces_of_a_file_are_the_file_byte_for_byte() {
+    let apps = apps(&[control(), sample("notes")]);
+    with_assets(&apps);
+    let assets = apps.root.join("notes").join(minicloud::assets::DIR);
+    std::fs::write(
+        assets.join("icon.svg"),
+        "<!-- an icon -->\n<svg viewBox=\"0 0 8 8\"><circle r=\"4\"/></svg>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        assets.join("style.css"),
+        "/* a */\n:root{--bg:#fff}\na:hover{color:var(--bg)}\n",
+    )
+    .unwrap();
+    // `notes.cove` ships `///` comments and no `//` ones; both have to come
+    // out as comments, and the ordinary one is the whole reason the gaps
+    // between the spans are walked.
+    let source = apps.root.join("notes/notes.cove");
+    let text = std::fs::read_to_string(&source).unwrap();
+    std::fs::write(&source, format!("// why it is here\n{text}")).unwrap();
+    let host = start(&apps, 2);
+
+    for name in [
+        "app.toml",
+        "notes.cove",
+        "notes_test.cove",
+        "assets/style.css",
+        "assets/icon.svg",
+    ] {
+        let (_, text) = code_file(&host, "notes", name).unwrap();
+        let (plain, pieces) = code_pieces(&host, "notes", name);
+        assert_eq!(plain, "", "{name} was not coloured");
+        let whole: String = pieces.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(whole, text, "{name}");
+        // And something in it is coloured, rather than one plain run.
+        assert!(
+            pieces.iter().any(|(kind, _)| kind != "plain"),
+            "{name} came out with no colour at all"
+        );
+    }
+
+    // An ordinary `//` is not a token to the lexer at all — it keeps the
+    // `///` and drops the rest — so it is the gaps between the spans that
+    // are walked to find one. Both come out as comments.
+    let (_, pieces) = code_pieces(&host, "notes", "notes.cove");
+    assert!(
+        pieces.contains(&("comment".to_string(), "// why it is here".to_string())),
+        "no ordinary comment in {pieces:?}"
+    );
+    assert!(
+        pieces
+            .iter()
+            .any(|(kind, text)| kind == "doc" && text.starts_with("/// A note per path")),
+        "no doc comment in {pieces:?}"
+    );
+    assert!(
+        pieces
+            .iter()
+            .any(|(kind, text)| kind == "keyword" && text == "export"),
+        "no keyword in {pieces:?}"
+    );
+
+    // A file that is not UTF-8 has no text, so there is nothing of it to
+    // colour and nothing to say about colouring it: the page says it is not
+    // text at all, which is more than a word about its colours would.
+    let (plain, pieces) = code_pieces(&host, "notes", "assets/logo.png");
+    assert!(pieces.is_empty(), "{pieces:?}");
+    assert_eq!(plain, "");
+}
+
+/// Both limits are said rather than quietly applied, and a file the host
+/// has no reader for is shown plain rather than shown wrongly.
+#[test]
+fn a_file_the_host_will_not_colour_says_why() {
+    let apps = apps(&[control(), sample("notes")]);
+    let assets = apps.root.join("notes").join(minicloud::assets::DIR);
+    std::fs::create_dir_all(&assets).unwrap();
+    // No reader for it: a `.txt` is text and nothing else is known of it.
+    std::fs::write(assets.join("notes.txt"), "a = 1\n").unwrap();
+    // Longer than the window carries, so the text stops short of the file.
+    std::fs::write(
+        assets.join("long.css"),
+        format!("a{{b:c}}{}", "x".repeat(minicloud::code::READ_TEXT_BYTES)),
+    )
+    .unwrap();
+    // Shorter than that and still more pieces than one page carries.
+    let dense = "a{b:c}".repeat(minicloud::code::HIGHLIGHT_PIECES / 6 + 10);
+    std::fs::write(assets.join("dense.css"), &dense).unwrap();
+    let host = start(&apps, 2);
+
+    for (name, why) in [
+        ("assets/notes.txt", "unknown"),
+        ("assets/long.css", "cut"),
+        ("assets/dense.css", "dense"),
+    ] {
+        let (plain, pieces) = code_pieces(&host, "notes", name);
+        assert_eq!(plain, why, "{name}");
+        assert!(pieces.is_empty(), "{name}: {pieces:?}");
+        // The text is still the file's, cut or not: only the colour is gone.
+        assert!(code_file(&host, "notes", name).is_ok(), "{name}");
+    }
+    // The same file under the limit is coloured, so the limit is what is
+    // being tested and not the scanner.
+    std::fs::write(assets.join("dense.css"), &dense[..60]).unwrap();
+    let host = start(&apps, 2);
+    assert_eq!(code_pieces(&host, "notes", "assets/dense.css").0, "");
 }
 
 /// Only the app named `admin` may hold the capability these reads are on,
@@ -453,13 +689,32 @@ fn the_page_shows_what_the_version_it_is_running_is_made_of() {
     let one = page(&host, "/apps/notes/code?file=notes.cove");
     assert_eq!(one.status, 200, "{}", one.body);
     assert!(one.body.contains("<pre class=code>"), "{}", one.body);
-    assert!(one.body.contains("export fn handle"), "{}", one.body);
+    // The text is coloured, which is what every word of it being in a span
+    // of its own looks like.
+    assert!(
+        one.body
+            .contains("<span class=k>export</span> <span class=k>fn</span> handle"),
+        "{}",
+        one.body
+    );
 
-    // The admin app's own code, at a depth: its own module beside it.
+    // The admin app's own code, at a depth: its own module as a directory,
+    // the file under it, and the whole path where the link points.
     let own = page(&host, "/apps/admin/code");
-    assert!(own.body.contains("text/text.cove"), "{}", own.body);
+    assert!(own.body.contains("<code>text/</code>"), "{}", own.body);
+    assert!(
+        own.body.contains("title=\"text/text.cove\""),
+        "{}",
+        own.body
+    );
+    assert!(own.body.contains("class=\"title dep1\""), "{}", own.body);
     let text = page(&host, "/apps/admin/code?file=text%2Ftext.cove");
-    assert!(text.body.contains("export fn escapeHtml"), "{}", text.body);
+    assert!(
+        text.body.contains("<span class=k>export</span>"),
+        "{}",
+        text.body
+    );
+    assert!(text.body.contains("escapeHtml"), "{}", text.body);
 
     // An asset that is not text: where the host answers it, not a page
     // pretending to render it. `notes` is reached by path, so the path
@@ -522,7 +777,12 @@ fn the_page_escapes_the_code_and_the_names_it_shows() {
     let text = std::fs::read_to_string(&source).unwrap();
     std::fs::write(
         &source,
-        format!("// <script>alert('x')</script> & \"quoted\"\n{text}"),
+        format!(
+            "// <script>alert('x')</script> & \"quoted\"\n\
+             /// <img src=y> in a doc comment\n\
+             fn markup() -> String {{ \"<img src=y onerror=alert(1)>\" }}\n\
+             {text}"
+        ),
     )
     .unwrap();
     let host = start(&apps, 2);
@@ -539,12 +799,17 @@ fn the_page_escapes_the_code_and_the_names_it_shows() {
     let one = page(&host, "/apps/notes/code?file=notes.cove");
     assert_eq!(one.status, 200, "{}", one.body);
     assert!(!one.body.contains("<script>"), "{}", one.body);
-    assert!(
-        one.body
-            .contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; &quot;quoted&quot;"),
-        "{}",
-        one.body
-    );
+    assert!(!one.body.contains("<img src=y"), "{}", one.body);
+    // Every kind of piece is escaped, because the escaping is one call in
+    // one place and not a property of the kind: a comment, a doc comment
+    // and a string literal are each the file's own bytes.
+    for coloured in [
+        "<span class=c>// &lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; &quot;quoted&quot;</span>",
+        "<span class=d>/// &lt;img src=y&gt; in a doc comment</span>",
+        "<span class=s>&quot;&lt;img src=y onerror=alert(1)&gt;&quot;</span>",
+    ] {
+        assert!(one.body.contains(coloured), "{coloured}\nin\n{}", one.body);
+    }
     // The name a request made up is escaped too, where the page says it.
     let sneaky = page(&host, "/apps/notes/code?file=%3Cimg%20src%3Dx%3E");
     assert_eq!(sneaky.status, 200, "{}", sneaky.body);
@@ -579,6 +844,11 @@ fn the_page_says_when_the_directory_is_not_what_is_running() {
     assert!(after.body.contains(">differs<"), "{}", after.body);
     // And the file answered is still the one that is running.
     let one = page(&host, "/apps/notes/code?file=notes.cove");
-    assert!(one.body.contains("export fn handle"), "{}", one.body);
+    assert!(
+        one.body
+            .contains("<span class=k>export</span> <span class=k>fn</span> handle"),
+        "{}",
+        one.body
+    );
     assert!(!one.body.contains("not what is running"), "{}", one.body);
 }

@@ -14,8 +14,9 @@ use text
 ///   whole; `GET /apps/<app>/logs` is the last lines it logged. Both read:
 ///   nothing here writes to another app's store.
 /// - `GET /apps/<app>/code` is what the version it is running is made of —
-///   its `app.toml`, its `.cove` files and its `assets/` — and `?file=` is
-///   one file's text.
+///   its `app.toml`, its `.cove` files and its `assets/`, as a tree — and
+///   `?file=` is one file's text, coloured by the host, since these pages
+///   run no script at all.
 /// - `GET /apps/<app>/sql` is the tables of its SQL store and their row
 ///   counts, and `?q=` is one statement that only reads.
 /// - `GET /apps/<app>/queues` is each queue it declares with what is due,

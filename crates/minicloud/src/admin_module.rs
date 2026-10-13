@@ -11,8 +11,8 @@
 //! | --- | --- |
 //! | `host.apps()` | `Array<host.App>`: every app the host has, in load order — its state (`serving`, `disabled`, `refused`, `removed`) and why, version, tier, hostnames, what its entry requires and what it is granted (and which of those grants the admin changed), its fetch allowlist, its limits, its counters and its recent errors |
 //! | `host.capabilities()` | `Array<String>`: every capability the host's modules declare, the ones a grant may name |
-//! | `host.code(app, limit)` | `Array<host.CodeFile>`: the files of the version the app is running ([`crate::code`]) — `app.toml`, then its `.cove` files, then its `assets/` — at most `limit` (0–[`crate::code::CODE_FILES`]), with each file's size and how the one on disk compares, and no text |
-//! | `host.codeFile(app, file)` | `Result<host.CodeFile, Error>`: one of those files with its text, cut past [`crate::code::READ_TEXT_BYTES`]; an `Err` for a name the deploy has no file under |
+//! | `host.code(app, limit)` | `Array<host.CodeFile>`: the files of the version the app is running ([`crate::code`]) — `app.toml`, then its `.cove` files, then its `assets/` — at most `limit` files (0–[`crate::code::CODE_FILES`]) as a tree, each row saying its depth, its size and how the one on disk compares, and no text |
+//! | `host.codeFile(app, file)` | `Result<host.CodeFile, Error>`: one of those files with its text, cut past [`crate::code::READ_TEXT_BYTES`], and the pieces its text is coloured by ([`crate::highlight`]); an `Err` for a name the deploy has no file under |
 //! | `host.history(limit)` | `Array<host.Change>`: the newest `limit` changes, newest first |
 //! | `host.kv(app, prefix, after, limit)` | `Array<host.KvEntry>`: keys of the app's store starting with `prefix` and greater than `after` (`""` for the first page), ascending, at most `limit` (0–500); each value cut to [`crate::kv::PEEK_VALUE_CHARS`] — read only, and empty for an app with no store |
 //! | `host.kvValue(app, key)` | `Result<host.KvEntry, Error>`: one key, its value cut past [`crate::kv::READ_VALUE_CHARS`]; an `Err` when the app has no such key |
@@ -52,6 +52,7 @@ use cove_runtime::{
 
 use crate::code::CodeFile;
 use crate::config::{LimitsFile, ADMIN_CAPABILITY};
+use crate::highlight::Piece;
 use crate::hosts::{AppContext, HostModule, PendingWork};
 use crate::logs::Line;
 use crate::manage::{AppInfo, KvRow, QueueInfo, SecretInfo, Settings, Via};
@@ -308,7 +309,29 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("cut", HostType::Bool),
             ],
         },
-        // One file of what an app's deploy carries ([`crate::code`]).
+        // One run of a file's text and what it is ([`crate::highlight`]).
+        // The kind is a `String` because a `TypeSchema`'s `cases` carry no
+        // payload — the same reason `CodeFile.kind` is one — and because a
+        // page that meets a kind it has no colour for shows the text, which
+        // is what lets the host grow one.
+        //
+        // These are pieces and not markup on purpose. The admin app puts
+        // every value it shows through `escapeHtml`, and a file's own text
+        // is the value most likely to hold `<img src=y>`; a host that
+        // returned `<span>`s would split the escaping between the two
+        // sides of the boundary and leave the page unable to check it.
+        TypeSchema {
+            name: "CodePiece",
+            cases: &[],
+            fields: &[
+                // `plain`, `keyword`, `type`, `ident`, `string`, `number`,
+                // `comment`, `doc` or `punct`.
+                field("kind", STR),
+                // The file's own bytes, escaped by nothing.
+                field("text", STR),
+            ],
+        },
+        // One row of what an app's deploy carries ([`crate::code`]).
         // Whether the file is text is `isText` beside `text` rather than
         // two cases of one type: a `TypeSchema`'s `cases` are names and
         // carry no payload, so a schema cannot say "text, or these bytes"
@@ -320,13 +343,32 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 // Within the app: `app.toml`, `admin.cove`,
                 // `text/text.cove`, `assets/style.css`.
                 field("name", STR),
-                // `config` for `app.toml`, `cove` or `asset`.
+                // The last part of the name, which is what a row at its
+                // depth shows.
+                field("label", STR),
+                // How many directories deep the name is. The host decided
+                // the order and the nesting, so the page indents by this
+                // and decides nothing.
+                field("depth", INT),
+                // `config` for `app.toml`, `cove`, `asset`, or `dir` for a
+                // directory row.
                 field("kind", STR),
-                // The whole file's length in bytes.
+                // The whole file's length in bytes; for a directory, what
+                // the files under it come to.
                 field("bytes", INT),
                 // The text; "" in a listing, which carries none, and ""
                 // for a file that is not UTF-8.
                 field("text", STR),
+                // What the text is coloured by, which concatenated is the
+                // text itself. Empty in a listing, and empty wherever
+                // `plain` says why there are none.
+                field(
+                    "pieces",
+                    HostType::Array(&HostType::Named("host.CodePiece")),
+                ),
+                // Why the text is shown plain — `cut`, `dense` or
+                // `unknown` — and "" where the pieces are the text.
+                field("plain", STR),
                 // Whether the file is UTF-8, so `text` is the file. A PNG
                 // or a font in `assets/` is not, and is to be looked at
                 // where the host serves it.
@@ -334,7 +376,8 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 // Whether `text` is shorter than the whole.
                 field("cut", HostType::Bool),
                 // How the file of the same name in the app's directory
-                // compares: `same`, `differs`, `missing` or `unread`.
+                // compares: `same`, `differs`, `missing` or `unread`; ""
+                // for a directory.
                 field("onDisk", STR),
             ],
         },
@@ -601,14 +644,31 @@ fn kv_value(row: KvRow) -> Value {
     )
 }
 
+fn code_piece_value(piece: Piece) -> Value {
+    Value::structure(
+        "host.CodePiece",
+        vec![
+            ("kind", Value::string(piece.kind)),
+            ("text", Value::string(piece.text)),
+        ],
+    )
+}
+
 fn code_file_value(file: CodeFile) -> Value {
     Value::structure(
         "host.CodeFile",
         vec![
             ("name", Value::string(file.name)),
+            ("label", Value::string(file.label)),
+            ("depth", int(file.depth)),
             ("kind", Value::string(file.kind)),
             ("bytes", int(file.bytes)),
             ("text", Value::string(file.text)),
+            (
+                "pieces",
+                Value::array(file.pieces.into_iter().map(code_piece_value)),
+            ),
+            ("plain", Value::string(file.plain)),
             ("isText", Value::bool(file.is_text)),
             ("cut", Value::bool(file.cut)),
             ("onDisk", Value::string(file.on_disk)),

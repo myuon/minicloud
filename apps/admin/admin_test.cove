@@ -82,7 +82,54 @@ test fn asksForTheLinesItIsAskedFor() -> Result<Unit, Error> {
 
 /// One file of a deploy, as `host.code` gives one.
 fn aFile(name: String, kind: String, isText: Bool, onDisk: String) -> host.CodeFile {
-  host.CodeFile(name: name, kind: kind, bytes: 0, text: "", isText: isText, cut: false, onDisk: onDisk)
+  host.CodeFile(
+    name: name,
+    label: name,
+    depth: 0,
+    kind: kind,
+    bytes: 0,
+    text: "",
+    pieces: Vector.of().freeze(),
+    plain: "",
+    isText: isText,
+    cut: false,
+    onDisk: onDisk,
+  )
+}
+
+/// One file of a deploy with its text and the pieces it is coloured by.
+fn aColouredFile(name: String, text: String, pieces: Array<host.CodePiece>, plain: String) -> host.CodeFile {
+  host.CodeFile(
+    name: name,
+    label: name,
+    depth: 0,
+    kind: "cove",
+    bytes: text.byteLength(),
+    text: text,
+    pieces: pieces,
+    plain: plain,
+    isText: true,
+    cut: plain == "cut",
+    onDisk: "same",
+  )
+}
+
+/// One row of the tree, as `host.code` gives a directory or a file at a
+/// depth.
+fn aRow(name: String, label: String, depth: Int, kind: String) -> host.CodeFile {
+  host.CodeFile(
+    name: name,
+    label: label,
+    depth: depth,
+    kind: kind,
+    bytes: 1024,
+    text: "",
+    pieces: Vector.of().freeze(),
+    plain: "",
+    isText: kind != "dir",
+    cut: false,
+    onDisk: if kind == "dir" { "" } else { "same" },
+  )
 }
 
 /// An app as the host lists one: enough of it for the pages that only ask
@@ -145,6 +192,75 @@ test fn saysWhenTheFileOnDiskIsNotTheOneRunning() -> Result<Unit, Error> {
   assert(onDisk(aFile("a.cove", "cove", true, "unread")).contains(">unread<"))?
   // A word the host grows later still reads, as a log level does.
   assert(onDisk(aFile("a.cove", "cove", true, "elsewhere")).contains(">unread<"))?
+  // A directory has no file of it on disk to differ from.
+  assert(onDisk(aRow("assets", "assets", 0, "dir")).contains("–"))?
+  Ok(())
+}
+
+/// The host says the order and the depth and the page indents by it: a row
+/// shows its last part, and the whole path is where the link points and
+/// what it is titled.
+test fn indentsARowByTheDepthTheHostGaveIt() -> Result<Unit, Error> {
+  let top = codeRow("/apps/notes", aRow("app.toml", "app.toml", 0, "config"))
+  assert(top.contains("class=\"title dep0\""))?
+  assert(top.contains("code?file=app.toml"))?
+  let under = codeRow("/apps/notes", aRow("text/text.cove", "text.cove", 1, "cove"))
+  assert(under.contains("class=\"title dep1\""))?
+  assert(under.contains("title=\"text/text.cove\""))?
+  assert(under.contains("code?file=text%2Ftext.cove"))?
+  // The row says the last part; the parts above it are the rows above it.
+  assert(under.contains("<code>text.cove</code>"))?
+  assert(!under.contains("<code>text/text.cove</code>"))?
+  // A directory is not a link — there is no file of it to show — and it
+  // says so where a file says what it is.
+  let dir = codeRow("/apps/notes", aRow("assets", "assets", 0, "dir"))
+  assert(dir.contains("<code>assets/</code>"))?
+  assert(!dir.contains("href"))?
+  assert(dir.contains("directory"))?
+  // Deeper than the stylesheet has a rule for, the rows stop moving.
+  let deep = codeRow("/apps/notes", aRow("a/b/c/d/e/f/g/h.cove", "h.cove", 7, "cove"))
+  assert(deep.contains("class=\"title dep6\""))?
+  Ok(())
+}
+
+/// A piece's text is the file's own bytes, so `h` is the whole of what
+/// keeps a file holding `<img src=y>` a file.
+test fn escapesEveryPieceOfAColouredFile() -> Result<Unit, Error> {
+  let pieces = Vector.of(
+    host.CodePiece(kind: "comment", text: "// <img src=y> & \"it's\""),
+    host.CodePiece(kind: "plain", text: "\nlet a = "),
+    host.CodePiece(kind: "string", text: "\"<script>alert(1)</script>\""),
+    // A kind the page has no colour for is its text and no element, which
+    // is how a kind the host grows later still reads.
+    host.CodePiece(kind: "whatever", text: "\n<b>"),
+  ).freeze()
+  let body = codeBody(aColouredFile("a.cove", "", pieces, ""))
+  assert(!body.contains("<img"))?
+  assert(!body.contains("<script>"))?
+  assert(!body.contains("<b>"))?
+  assert(body.contains("<span class=c>// &lt;img src=y&gt; &amp; &quot;it&#39;s&quot;</span>"))?
+  assert(body.contains("<span class=s>&quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;</span>"))?
+  assert(body.contains("&lt;b&gt;"))?
+  Ok(())
+}
+
+/// A file shown with no colour says why rather than looking like a file
+/// with nothing in it worth colouring.
+test fn saysWhyAFileIsShownWithNoColour() -> Result<Unit, Error> {
+  let none = Vector.of().freeze()
+  let cut = codeBody(aColouredFile("big.cove", "x", none, "cut"))
+  assert(cut.contains("stops at what the host carries"))?
+  assert(cut.contains("<pre class=code>x</pre>"))?
+  let dense = codeBody(aColouredFile("dense.cove", "x", none, "dense"))
+  assert(dense.contains("more pieces than one page carries (20000)"))?
+  let unknown = codeBody(aColouredFile("notes.txt", "x", none, "unknown"))
+  assert(unknown.contains("no reader for this kind of file"))?
+  // And a word the host grows later still says something.
+  let later = codeBody(aColouredFile("a.rs", "x", none, "elsewhere"))
+  assert(later.contains("no reader for this kind of file"))?
+  // Coloured, there is nothing to explain.
+  let shown = codeBody(aColouredFile("a.cove", "x", Vector.of(host.CodePiece(kind: "plain", text: "x")).freeze(), ""))
+  assertEqual(shown, "<pre class=code>x</pre>")?
   Ok(())
 }
 
