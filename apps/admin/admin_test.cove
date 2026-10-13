@@ -53,6 +53,29 @@ test fn escapesWhatItShows() -> Result<Unit, Error> {
   Ok(())
 }
 
+test fn stampsAnAssetUrlWithTheVersionItWasBuiltFrom() -> Result<Unit, Error> {
+  assertEqual(assetQuery("v1-3def5fe8"), "?v=v1-3def5fe8")?
+  // Another deploy, another URL: that is the whole of it. A browser or a
+  // cache holding the old `style.css` has nothing the new pages ask for.
+  assert(assetQuery("v1-3def5fe8") != assetQuery("v2-9ab0c1d2"))?
+  // The version is the host's word and goes through the same two escapes as
+  // every other: once for the query, once for the attribute.
+  assertEqual(assetQuery("a b&\"x\""), "?v=a%20b%26%22x%22")?
+  Ok(())
+}
+
+test fn leavesTheAssetUrlsAloneWhenTheVersionIsNotKnown() -> Result<Unit, Error> {
+  assertEqual(assetQuery(""), "")?
+  // `minicloud test` runs the app with no host behind it, so
+  // `host.selfVersion` says "" here: the page is the page it always was.
+  let page = layout("", "apps", "apps", "<h1>Apps</h1>")
+  assert(page.contains("<link rel=stylesheet href=\"/style.css\">"))?
+  assert(page.contains("href=\"/favicon.svg\""))?
+  assert(page.contains("href=\"/favicon.ico\""))?
+  assert(!page.contains("?v="))?
+  Ok(())
+}
+
 /// A line of a log, as the host gives one.
 fn aLine(app: String, atMs: Int, level: String, text: String) -> host.LogLine {
   host.LogLine(app: app, atMs: atMs, level: level, text: text)

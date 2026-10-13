@@ -207,20 +207,34 @@ fn the_files_in_an_apps_assets_directory_are_what_it_has_in_its_stats() {
     assert!(app_stats(&host, "crunch")["assets"].is_null());
 }
 
+/// `apps/admin` under a config of the test's own: its hostname here, and
+/// its secret a literal.
+const ADMIN_TOML: &str = "grant = [\"admin\", \"auth\"]\n\
+     [limits]\ndeadline = \"60s\"\n\
+     [route]\nhosts = [\"admin.localhost\"]\n\
+     [access]\ntoken = \"admin\"\n\
+     [secrets]\nadmin = { value = \"ui-secret\" }\n";
+
+/// `GET path` on the admin app's hostname, logged in: `Basic
+/// owner:ui-secret`.
+fn admin_page(addr: SocketAddr, path: &str) -> Answer {
+    send_raw(
+        addr,
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: admin.localhost\r\nConnection: close\r\n\
+             Authorization: Basic b3duZXI6dWktc2VjcmV0\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+}
+
 /// The admin app's own icon and stylesheet, as they ship: the reason the
 /// feature exists (#57). The app is reached by its hostname, so the files
 /// are at the hostname's root — which is also where a browser asks for
 /// `/favicon.ico` by itself.
 #[test]
 fn the_admin_app_answers_the_icon_and_the_sheet_it_ships() {
-    let apps = apps(&[sample_with(
-        "admin",
-        "grant = [\"admin\", \"auth\"]\n\
-         [limits]\ndeadline = \"60s\"\n\
-         [route]\nhosts = [\"admin.localhost\"]\n\
-         [access]\ntoken = \"admin\"\n\
-         [secrets]\nadmin = { value = \"ui-secret\" }\n",
-    )]);
+    let apps = apps(&[sample_with("admin", ADMIN_TOML)]);
     let host = Host::start(options(&apps, 2)).expect("the host starts");
     let shipped = |name: &str| {
         std::fs::read(bundled().join("admin").join("assets").join(name)).expect("the file ships")
@@ -258,19 +272,14 @@ fn the_admin_app_answers_the_icon_and_the_sheet_it_ships() {
         "the sheet is CSS, with its braces unescaped"
     );
 
-    // The pages link them, and no longer carry the sheet or allow an inline
-    // one. `Basic owner:ui-secret`.
-    let page = send_raw(
-        host.addr,
-        b"GET / HTTP/1.1\r\nHost: admin.localhost\r\nConnection: close\r\n\
-          Authorization: Basic b3duZXI6dWktc2VjcmV0\r\n\r\n"
-            .as_slice(),
-    );
+    // The pages link them — by version, which the test below is about — and
+    // no longer carry the sheet or allow an inline one.
+    let page = admin_page(host.addr, "/");
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(page
         .body
-        .contains("<link rel=stylesheet href=\"/style.css\">"));
-    assert!(page.body.contains("href=\"/favicon.svg\""));
+        .contains("<link rel=stylesheet href=\"/style.css?v="));
+    assert!(page.body.contains("href=\"/favicon.svg?v="));
     assert!(!page.body.contains("<style>"), "the sheet is a file now");
     let csp = page.header("content-security-policy").expect("a policy");
     assert!(csp.contains("style-src 'self'"), "{csp}");
@@ -280,4 +289,88 @@ fn the_admin_app_answers_the_icon_and_the_sheet_it_ships() {
     // its login: on the server, Cloudflare Access in front of the hostname
     // is what covers them (docs/design.md).
     assert_eq!(ask("/style.css").status, 200);
+}
+
+/// The admin pages ask for their own files by version — `/style.css?v=<the
+/// version serving>` — so that a deploy is a URL nothing has cached.
+///
+/// The URL alone is the fix: a browser or a proxy holding the old
+/// `style.css` has nothing the new HTML asks for, where before the two
+/// shared one URL and a phone drew the new pages with the old sheet.
+#[test]
+fn the_admin_pages_ask_for_their_assets_by_version_and_a_deploy_changes_the_url() {
+    let apps = apps(&[sample_with("admin", ADMIN_TOML)]);
+    let host = Host::start(options(&apps, 2)).expect("the host starts");
+    let version = |host: &Host| {
+        app_stats(host, "admin")["version"]
+            .as_str()
+            .expect("a version")
+            .to_string()
+    };
+    let asset = |path: &str| {
+        send_raw(
+            host.addr,
+            format!("GET {path} HTTP/1.1\r\nHost: admin.localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+    };
+
+    let first = version(&host);
+    assert!(first.starts_with("v1-"), "{first}");
+    let page = admin_page(host.addr, "/");
+    assert_eq!(page.status, 200, "{}", page.body);
+    // The one the page links, and the two icons beside it: the same string
+    // the answers carry as `x-cove-app-version`.
+    for link in [
+        format!("<link rel=stylesheet href=\"/style.css?v={first}\">"),
+        format!("href=\"/favicon.svg?v={first}\""),
+        format!("href=\"/favicon.ico?v={first}\""),
+    ] {
+        assert!(page.body.contains(&link), "{link} is not in\n{}", page.body);
+    }
+
+    // And that URL answers the file: the query names the version, the path
+    // names the file, and the host answers by the path.
+    let sheet = asset(&format!("/style.css?v={first}"));
+    assert_eq!(sheet.status, 200, "{}", sheet.body);
+    assert_eq!(
+        sheet.header("content-type"),
+        Some("text/css; charset=utf-8")
+    );
+    assert_eq!(sheet.header("x-cove-app-version"), Some(first.as_str()));
+    assert_eq!(
+        sheet.bytes,
+        std::fs::read(apps.root.join("admin/assets/style.css")).unwrap()
+    );
+    assert_eq!(asset(&format!("/favicon.ico?v={first}")).status, 200);
+    // A query that is nobody's version is the same file: the version is
+    // there to change the URL, not to be checked.
+    assert_eq!(asset("/style.css?v=v9-nothing").status, 200);
+
+    // A deploy of the stylesheet alone: a new version, so a new URL, and the
+    // old one is nowhere on the page.
+    let sheet_file = apps.root.join("admin/assets/style.css");
+    let changed = format!(
+        "{}\nul.apps{{display:block}}\n",
+        std::fs::read_to_string(&sheet_file).unwrap()
+    );
+    std::fs::write(&sheet_file, &changed).unwrap();
+    host.update("admin").expect("the admin app updates");
+
+    let second = version(&host);
+    assert_ne!(first, second, "a stylesheet is part of the version");
+    let after = admin_page(host.addr, "/");
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert!(
+        after.body.contains(&format!("/style.css?v={second}")),
+        "{}",
+        after.body
+    );
+    assert!(
+        !after.body.contains(&format!("?v={first}")),
+        "nothing of the old deploy is left to ask for"
+    );
+    let fresh = asset(&format!("/style.css?v={second}"));
+    assert_eq!(fresh.body, changed);
+    assert_eq!(fresh.header("x-cove-app-version"), Some(second.as_str()));
 }

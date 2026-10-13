@@ -303,6 +303,14 @@ an **`assets/` directory** beside its code, and the host answers it itself:
   nosniff`, the `cache-control` `[assets]` asks for, and
   `x-cove-app-version`. Nothing ran, so there are no `x-cove-run-*` headers
   and the app's `served` does not count it — `assets_served` does.
+- **The URL is the app's to version.** `cache_control` is one header for
+  every file of the app and the host reads no query, so what makes a deploy
+  reach a browser holding the old file is the page asking for a URL the old
+  deploy had not: the admin app links `/style.css?v=<the version serving>`
+  (`host.selfVersion`). An app whose URLs all carry one can set
+  `cache_control` to a long `max-age` — bearing in mind that a path a
+  browser chooses for itself, `/favicon.ico`, carries no version and is
+  answered with the same header.
 - The files are read once, at load, and **belong to that version**: they are
   in the version's hash, a deploy or an update switches them with the code,
   and a request in flight keeps the ones it started on. Nothing is read from

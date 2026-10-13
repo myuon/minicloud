@@ -3,7 +3,7 @@ use host
 
 /// Each path is one operation of the `host` module (capability `admin`),
 /// its arguments in the query, its answer as text: `/apps`,
-/// `/capabilities`, `/history?n=`, `/kv?app=&prefix=&after=&n=`,
+/// `/capabilities`, `/selfVersion`, `/history?n=`, `/kv?app=&prefix=&after=&n=`,
 /// `/kvValue?app=&key=`, `/logs?app=&n=`, `/code?app=&n=`,
 /// `/codeFile?app=&file=`, `/codePieces?app=&file=`,
 /// `/sqlTables?app=`, `/sqlQuery?app=&q=`,
@@ -30,6 +30,9 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if request.path == "/capabilities" {
     return answer(200, ",".join(host.capabilities()))
+  }
+  if request.path == "/selfVersion" {
+    return answer(200, host.selfVersion())
   }
   if request.path == "/history" {
     var lines = Vector.of()

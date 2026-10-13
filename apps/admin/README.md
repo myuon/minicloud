@@ -155,6 +155,19 @@ answered from the files; a path with no file goes to the app's `handle`, as
 before. The host adds `content-type` (from the extension), `etag` and
 `cache-control: no-cache`.
 
+**The pages link them by version**: `/style.css?v=<the version serving>`,
+from `host.selfVersion` — the same string every answer carries as
+`x-cove-app-version`. Without it the URL is the same URL after every deploy,
+and a browser or a proxy holding the old `style.css` draws the new HTML with
+it; that happened on a phone, where the rules 0.24.0 added were the only
+ones missing. With it the new pages ask for a URL nothing has. The host
+reads no query, so the file answered is the one the path names; the version
+is there to change the URL. A host that cannot say the version gets the
+plain URL back — a page without its stylesheet is worse than one a browser
+revalidates. `[assets] cache_control` is left at `no-cache` all the same,
+and `app.toml` says why: one header covers every file, and `/favicon.ico` is
+a path browsers ask for without a version.
+
 To draw the icon again, run `python3 apps/admin/favicon.py` from the
 repository root (standard library only). It writes both icon files.
 

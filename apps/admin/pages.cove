@@ -68,9 +68,38 @@ fn nav(base: String, here: String) -> String {
   "<nav>{"".join(out.freeze())}</nav>"
 }
 
+/// The query that pins the files in `assets/` to `version`: `?v=<version>`,
+/// and "" for a version the host could not say.
+///
+/// The URL of a file the host serves is otherwise the same URL for every
+/// deploy, so a browser or a cache that holds one holds it against the new
+/// pages as well — a phone that had the old `style.css` drew the new HTML
+/// with it, and only the rules the release added went missing. A version in
+/// the URL means there is nothing of an old deploy left to hold: the new
+/// pages ask for a URL nothing has.
+///
+/// An empty `version` leaves the URL as it was. A page whose stylesheet
+/// cannot be read is the worst thing this could do, so a host that will not
+/// say the version gets the plain URL back and a browser revalidates as
+/// before (`cache-control: no-cache`).
+fn assetQuery(version: String) -> String {
+  if version == "" {
+    return ""
+  }
+  "?v={h(text.urlEncode(version))}"
+}
+
 /// The page around `content`. `here` is the navigation entry it belongs to.
+///
+/// The version is asked for here and not passed in: every page in this
+/// module calls `layout`, and a parameter for it would be a score of call
+/// sites that each have to remember, with a page that forgot drawn exactly
+/// like one that could not be told. The cost is one host call per page — a
+/// slot lookup and a `String` clone (`host.selfVersion`), beside the
+/// `host.apps` and `host.logs` a page already makes.
 fn layout(base: String, here: String, title: String, content: String) -> String {
-  "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{h(title)} · minicloud admin</title><link rel=stylesheet href=\"{h(base)}/style.css\"><link rel=icon href=\"{h(base)}/favicon.svg\" type=\"image/svg+xml\"><link rel=icon href=\"{h(base)}/favicon.ico\" sizes=\"16x16 32x32\"></head><body><header><a class=brand href=\"{h(base)}/\">minicloud admin</a>{nav(base, here)}</header><main>{content}</main></body></html>"
+  let v = assetQuery(host.selfVersion())
+  "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{h(title)} · minicloud admin</title><link rel=stylesheet href=\"{h(base)}/style.css{v}\"><link rel=icon href=\"{h(base)}/favicon.svg{v}\" type=\"image/svg+xml\"><link rel=icon href=\"{h(base)}/favicon.ico{v}\" sizes=\"16x16 32x32\"></head><body><header><a class=brand href=\"{h(base)}/\">minicloud admin</a>{nav(base, here)}</header><main>{content}</main></body></html>"
 }
 
 fn badge(state: String) -> String {
