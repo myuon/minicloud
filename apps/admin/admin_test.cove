@@ -134,18 +134,39 @@ fn aRow(name: String, label: String, depth: Int, kind: String) -> host.CodeFile 
 
 /// An app as the host lists one: enough of it for the pages that only ask
 /// its name and how it is reached.
-fn anApp(name: String, hosts: Array<String>) -> host.App {
+/// An app as the pages see one. Everything but the name has a default, so a
+/// test names the one or two things it is about and nothing else.
+fn anApp(
+  name: String,
+  hosts: Array<String> = Vector.of().freeze(),
+  granted: Array<String> = Vector.of().freeze(),
+  required: Array<String> = Vector.of().freeze(),
+  state: String = "serving",
+  reason: String = "",
+  served: Int = 0,
+  errors: Int = 0,
+  rejected: Int = 0,
+  recentErrors: Array<host.Failure> = Vector.of().freeze(),
+  kvKeys: Int = -1,
+  kvBytes: Int = -1,
+  kvMaxKeys: Int = 0,
+  kvMaxBytes: Int = 0,
+  sqlBytes: Int = -1,
+  sqlMaxBytes: Int = 0,
+  accessOff: String = "",
+  isAdmin: Bool = false,
+) -> host.App {
   host.App(
     name: name,
-    state: "serving",
-    reason: "",
+    state: state,
+    reason: reason,
     version: "v1-abcdef01",
     tier: "vm",
     entry: "{name}.handle",
     hosts: hosts,
-    required: Vector.of().freeze(),
+    required: required,
     requiredOpen: false,
-    granted: Vector.of().freeze(),
+    granted: granted,
     grantAdded: Vector.of().freeze(),
     grantRemoved: Vector.of().freeze(),
     fetchAllow: Vector.of().freeze(),
@@ -159,17 +180,202 @@ fn anApp(name: String, hosts: Array<String>) -> host.App {
       maxResponseBytes: 0,
     ),
     limitsChanged: Vector.of().freeze(),
-    isAdmin: false,
-    served: 0,
-    ok: 0,
-    errors: 0,
-    rejected: 0,
+    isAdmin: isAdmin,
+    served: served,
+    ok: served - errors,
+    errors: errors,
+    rejected: rejected,
     inFlight: 0,
     queued: 0,
-    kvKeys: -1,
-    kvBytes: -1,
-    recentErrors: Vector.of().freeze(),
+    kvKeys: kvKeys,
+    kvBytes: kvBytes,
+    kvMaxKeys: kvMaxKeys,
+    kvMaxBytes: kvMaxBytes,
+    sqlBytes: sqlBytes,
+    sqlMaxBytes: sqlMaxBytes,
+    accessOff: accessOff,
+    recentErrors: recentErrors,
   )
+}
+
+/// A queue for the tests: declared, with what it holds.
+fn aQueue(name: String, due: Int = 0, held: Int = 0, dead: Int = 0, declared: Bool = true) -> host.Queue {
+  host.Queue(
+    name: name,
+    path: "/queue/{name}",
+    due: due,
+    held: held,
+    dead: dead,
+    declared: declared,
+    maxDepth: 1000,
+    maxAttempts: 5,
+    retryMs: 30000,
+    leaseMs: 30000,
+    batch: 1,
+    maxBodyBytes: 65536,
+  )
+}
+
+/// A deploy the host compared, or did not.
+fn aDisk(looked: Bool = true, differing: Int = 0) -> host.CodeDisk {
+  host.CodeDisk(looked: looked, differing: differing, bytes: 4096, budget: 1048576)
+}
+
+fn aFailure(kind: String, status: Int, message: String) -> host.Failure {
+  host.Failure(atMs: 1760351890157, kind: kind, status: status, version: "v1-abcdef01", message: message)
+}
+
+fn noQueues() -> Array<host.Queue> {
+  Vector.of().freeze()
+}
+
+/// A tab is there when the app has the thing: the grant is the shape of the
+/// app's pages, which is what the capability model already says.
+test fn drawsATabForEachThingTheAppHas() -> Result<Unit, Error> {
+  let bare = appTabs("", anApp("hello"), "Overview")
+  assert(bare.contains(">Overview</a>"))?
+  assert(bare.contains(">Code</a>"))?
+  assert(bare.contains(">Settings</a>"))?
+  // The log ring is the host's, not the app's: it holds the host's own
+  // lines about an app granted nothing at all.
+  assert(bare.contains(">Logs</a>"))?
+  assertEqual(bare.contains(">Data</a>"), false)?
+  assertEqual(bare.contains(">SQL</a>"), false)?
+  assertEqual(bare.contains(">Queues</a>"), false)?
+  let full = appTabs("", anApp("watch", granted: Vector.of("kv", "queue", "sql").freeze()), "SQL")
+  assert(full.contains(">Data</a>"))?
+  assert(full.contains(">SQL</a>"))?
+  assert(full.contains(">Queues</a>"))?
+  // And the page one is on is the one marked.
+  assert(full.contains("<a href=\"/apps/watch/sql\" aria-current=page>SQL</a>"))?
+  assertEqual(full.contains("<a href=\"/apps/watch\" aria-current=page>"), false)?
+  Ok(())
+}
+
+/// The order is the one every page of the app has: Overview, Logs, the
+/// stores, Code, Settings.
+test fn keepsTheTabsInOneOrder() -> Result<Unit, Error> {
+  let tabs = appTabs("", anApp("watch", granted: Vector.of("kv", "queue", "sql").freeze()), "Overview")
+  var order = Vector.of()
+  for part in tabs.split("</a>") {
+    for name in Vector.of("Overview", "Logs", "Data", "SQL", "Queues", "Code", "Settings").freeze() {
+      if part.endsWith(">{name}") {
+        order.push(name)
+      }
+    }
+  }
+  assertEqual(",".join(order.freeze()), "Overview,Logs,Data,SQL,Queues,Code,Settings")?
+  Ok(())
+}
+
+/// Nothing wrong is a line saying so, and it names what was looked at: "is
+/// anything wrong" is the question somebody opened the page to answer, and
+/// a page that answers it by being empty has not answered it.
+test fn saysSoWhenNothingIsWorthALook() -> Result<Unit, Error> {
+  let said = worthALook("", anApp("hello"), noQueues(), aDisk())
+  assert(said.contains("class=\"is-ok\""))?
+  assert(said.contains("Nothing: no request failed"))?
+  assert(said.contains("every file of the deploy is the same as the one in the app's directory"))?
+  assertEqual(said.contains("is-bad"), false)?
+  assertEqual(said.contains("is-warn"), false)?
+  Ok(())
+}
+
+/// A dead letter is the news the queues page exists for, and it is said
+/// here before anybody goes to that page.
+test fn saysWhatIsOnTheQueuesWorstFirst() -> Result<Unit, Error> {
+  let queues = Vector.of(aQueue("work", held: 3, dead: 2)).freeze()
+  let said = worthALook("", anApp("jobs", granted: Vector.of("queue").freeze()), queues, aDisk())
+  assert(said.contains("2 dead letters wait on <code>work</code>"))?
+  assert(said.contains("3 held on <code>work</code>"))?
+  assert(said.contains("/apps/jobs/queues"))?
+  // The dead letters are above what is held, and both above the green line.
+  assert(said.indexOf("dead letters wait").unwrapOr(0) < said.indexOf("3 held").unwrapOr(0))?
+  assert(said.indexOf("3 held").unwrapOr(0) < said.indexOf("Nothing else").unwrapOr(0))?
+  // And the green line no longer claims the queues are clear.
+  assertEqual(said.contains("no dead letter waits"), false)?
+  Ok(())
+}
+
+/// A store near what it may hold, before the write that is refused.
+test fn saysWhenAStoreIsNearItsLimit() -> Result<Unit, Error> {
+  let full = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 900, kvMaxKeys: 1000, kvMaxBytes: 1000)
+  assert(worthALook("", full, noQueues(), aDisk()).contains("holds 900 B of the 1000 B it may"))?
+  // Eighty hundredths is where it starts, so 799 of 1000 is not it.
+  let room = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 799, kvMaxKeys: 1000, kvMaxBytes: 1000)
+  assert(worthALook("", room, noQueues(), aDisk()).contains("no store is near its limit"))?
+  // A store the host has not opened, and a limit of 0, are not "near".
+  assertEqual(nearLimit(-1, 100), false)?
+  assertEqual(nearLimit(100, 0), false)?
+  assertEqual(nearLimit(80, 100), true)?
+  assertEqual(nearLimit(79, 100), false)?
+  Ok(())
+}
+
+/// The deploy against the app's directory: the page says it did not look
+/// rather than saying they are the same, because a dashboard cannot read
+/// every file of every deploy and a wrong "the same" is the one answer
+/// that would matter.
+test fn saysWhenItDidNotCompareTheDeployWithTheDirectory() -> Result<Unit, Error> {
+  let said = worthALook("", anApp("big"), noQueues(), aDisk(looked: false))
+  assert(said.contains("The deploy was not compared with the app's directory here"))?
+  assert(said.contains("The Code tab reads every file of it."))?
+  assertEqual(said.contains("every file of the deploy is the same"), false)?
+  let differs = worthALook("", anApp("big"), noQueues(), aDisk(differing: 2))
+  assert(differs.contains("2 files in the app's directory are not the ones that are running"))?
+  Ok(())
+}
+
+/// A refusal and a failure are the host's words, and the host's words are
+/// an app's: every one of them goes through `h` before it is in a page.
+test fn escapesWhatTheHostSaidAboutAnApp() -> Result<Unit, Error> {
+  let app = anApp(
+    "notes",
+    state: "refused",
+    reason: "requires `<img src=x>`",
+    served: 1,
+    errors: 1,
+    recentErrors: Vector.of(aFailure("runtime", 500, "<script>alert(1)</script>")).freeze(),
+  )
+  let said = worthALook("", app, noQueues(), aDisk())
+  assertEqual(said.contains("<img src=x>"), false)?
+  assertEqual(said.contains("<script>"), false)?
+  assert(said.contains("&lt;img src=x&gt;"))?
+  assert(said.contains("&lt;script&gt;alert(1)&lt;/script&gt;"))?
+  // A queue's name is the app's too.
+  let queues = Vector.of(aQueue("<b>q</b>", dead: 1)).freeze()
+  let onQueues = worthALook("", anApp("jobs", granted: Vector.of("queue").freeze()), queues, aDisk())
+  assertEqual(onQueues.contains("<b>q</b>"), false)?
+  assert(onQueues.contains("&lt;b&gt;q&lt;/b&gt;"))?
+  Ok(())
+}
+
+/// A card's pill is the way to the page that shows what it says, and an app
+/// with nothing to say says `quiet` and no more.
+test fn putsWhatAnAppHasToSayAtTheEndOfItsCard() -> Result<Unit, Error> {
+  let quiet = appFlags("", anApp("ledger"), noQueues())
+  assertEqual(quiet.length(), 0)?
+  assert(appCard("", anApp("ledger"), quiet).contains("<span class=quiet>quiet</span>"))?
+  let loud = anApp("notes", state: "refused", reason: "requires `kv`", served: 4, errors: 2, accessOff: "no team")
+  let flags = appFlags("", loud, noQueues())
+  let card = appCard("", loud, flags)
+  assert(card.contains("<li class=\"app is-bad\">"))?
+  assert(card.contains("href=\"/apps/notes/settings\">refused →</a>"))?
+  assert(card.contains("href=\"/apps/notes\">2 failed →</a>"))?
+  assert(card.contains("Access off →"))?
+  // The refusal's reason is the one thing a list cannot send somebody away
+  // to read, so the card holds it — escaped, like everything else.
+  assert(card.contains("requires `kv`"))?
+  Ok(())
+}
+
+/// The sentence the green line is made of.
+test fn writesAListAsASentence() -> Result<Unit, Error> {
+  assertEqual(sentence(Vector.of().freeze()), "")?
+  assertEqual(sentence(Vector.of("a").freeze()), "a")?
+  assertEqual(sentence(Vector.of("a", "b").freeze()), "a and b")?
+  assertEqual(sentence(Vector.of("a", "b", "c").freeze()), "a, b and c")?
+  Ok(())
 }
 
 test fn saysWhichPartOfADeployAFileIs() -> Result<Unit, Error> {
@@ -582,5 +788,19 @@ test fn sameOriginFallsBackToOrigin() -> Result<Unit, Error> {
   assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "http://app.example")])), true)?
   assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "http://evil.example")])), false)?
   assertEqual(sameOrigin(withHost([])), true)?
+  Ok(())
+}
+
+test fn theWorstCardsComeFirst() -> Result<Unit, Error> {
+  // What puts a card above another: an app with a dead letter is above one
+  // whose only news is that it is near a limit, as the list within an app
+  // puts them.
+  let bad = Flag(level: "is-bad", text: "2 dead on <code>work</code>", path: "/apps/jobs/queues")
+  let warn = Flag(level: "is-warn", text: "Access off", path: "/apps/jobs")
+  assertEqual(anyBad([bad]), true)?
+  assertEqual(anyBad([warn, bad]), true)?
+  assertEqual(anyBad([warn]), false)?
+  // Nothing to say is neither, and such a card is last of all.
+  assertEqual(anyBad([]), false)?
   Ok(())
 }

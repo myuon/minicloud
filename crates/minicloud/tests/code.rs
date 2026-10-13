@@ -677,10 +677,10 @@ fn the_page_shows_what_the_version_it_is_running_is_made_of() {
     // Nothing differs, so nothing is said of a difference.
     assert!(!listing.body.contains("class=problem"), "{}", listing.body);
 
-    // The app's own page is the way here, beside the version it is about.
+    // The app's tabs are the way here, and Code is on every app.
     let app = page(&host, "/apps/notes");
     assert!(
-        app.body.contains("/apps/notes/code\">what it is"),
+        app.body.contains("<a href=\"/apps/notes/code\">Code</a>"),
         "{}",
         app.body
     );
@@ -914,6 +914,12 @@ fn the_page_says_when_the_directory_is_not_what_is_running() {
     let host = start(&apps, 2);
     let before = page(&host, "/apps/notes/code");
     assert!(!before.body.contains("class=problem"), "{}", before.body);
+    // And the Overview says they agree, which is the thing it was asked.
+    let quiet = page(&host, "/apps/notes").body;
+    assert!(
+        quiet.contains("every file of the deploy is the same as the one in the app's directory"),
+        "{quiet}"
+    );
 
     std::fs::write(
         apps.root.join("notes/notes.cove"),
@@ -930,6 +936,15 @@ fn the_page_says_when_the_directory_is_not_what_is_running() {
         after.body
     );
     assert!(after.body.contains(">differs<"), "{}", after.body);
+    // The Overview says it too, before anybody opens the Code tab — the one
+    // read on that page that is not free, and the host did it because this
+    // deploy is under its budget.
+    let loud = page(&host, "/apps/notes").body;
+    assert!(
+        loud.contains("One file in the app's directory is not the one that is running:"),
+        "{loud}"
+    );
+    assert!(loud.contains("/apps/notes/code\">code</a>"), "{loud}");
     // And the file answered is still the one that is running.
     let one = page(&host, "/apps/notes/code?file=notes.cove");
     assert!(

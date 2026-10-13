@@ -165,6 +165,81 @@ button.danger:hover{border-color:var(--bad);background:var(--bad-bg)}
    and it gives the page back rather than scrolling off it */
 .inline input.sql{width:44em;max-width:100%}
 .inline label{display:flex;align-items:center;gap:.35em;font-size:13px}
+/* a page's explanation, folded: the summary is the one line worth reading; opening it gives the page's words, unchanged. The tools stay on the first screen. */
+details.about{max-width:62em;margin:.1em 0 1.3em;color:var(--muted)}
+details.about>summary{display:flex;align-items:baseline;gap:.5em;padding:.15em 0;list-style:none;cursor:pointer}
+details.about>summary::-webkit-details-marker{display:none}
+details.about>summary::before{content:"\25B8";font-size:11px;line-height:1.6}
+details.about[open]>summary::before{content:"\25BE"}
+details.about>summary:hover{color:var(--text)}
+details.about p{margin:.7em 0 0}
+details.about p:last-child{margin-bottom:.2em}
+/* the line under a title: version, where it is reached */
+.sub{margin:.1em 0 .2em;color:var(--muted);font-size:13px}
+.sub code{font-size:12.5px}
+/* the app's own tabs: one row, the same place on every page of the app. A tab for a capability the app does not have is not drawn. */
+nav.tabs{display:flex;flex-wrap:wrap;gap:.2em;margin:.9em 0 1.4em;border-bottom:1px solid var(--line)}
+nav.tabs a{margin-bottom:-1px;padding:.5em .9em;border:1px solid transparent;border-bottom:0;border-radius:10px 10px 0 0;color:var(--muted);font-size:14px;font-weight:600;text-decoration:none}
+nav.tabs a:hover{background:var(--soft);color:var(--text)}
+nav.tabs a[aria-current]{border-color:var(--line);background:var(--card);color:var(--text)}
+/* the numbers, as a band */
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr));gap:.7em;margin:.2em 0 1.5em}
+.fig{padding:.65em .9em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.fig .lbl{display:block;color:var(--muted);font-size:11.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+.fig .big{display:block;margin-top:.1em;font-size:1.6rem;line-height:1.15;font-variant-numeric:tabular-nums}
+.fig .note{display:block;color:var(--muted);font-size:12.5px}
+.fig.is-bad .big{color:var(--bad)}
+.fig.is-warn .big{color:var(--warn)}
+.fig.is-ok .big{color:var(--ok)}
+/* what is worth a look: one line each, the worst first; where it was seen on the right */
+ul.look{display:grid;gap:.5em;margin:.2em 0 1.5em;padding:0;list-style:none}
+ul.look li{display:flex;flex-wrap:wrap;align-items:baseline;gap:.35em .8em;padding:.6em .85em;border:1px solid var(--line);border-left:4px solid var(--line);border-radius:10px;background:var(--card);font-size:14px}
+ul.look li.is-bad{border-left-color:var(--bad);background:var(--bad-bg)}
+ul.look li.is-warn{border-left-color:var(--warn);background:var(--warn-bg)}
+ul.look li.is-ok{border-left-color:var(--ok);background:var(--ok-bg)}
+ul.look .what{flex:1 1 20em;min-width:0}
+ul.look .where{flex:0 0 auto;margin-left:auto;color:var(--muted);font-size:12.5px}
+ul.look .where a{color:var(--muted)}
+p.allwell{display:flex;align-items:center;gap:.5em;margin:.2em 0 1.5em;padding:.6em .85em;border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:10px;background:var(--ok-bg);font-size:14px}
+/* a store, as a card that is the way in */
+.stores{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.7em;margin:.2em 0 1.5em}
+a.store{display:block;padding:.8em .95em;border:1px solid var(--line);border-radius:12px;background:var(--card);color:inherit;text-decoration:none}
+a.store:hover{border-color:var(--focus)}
+a.store .top{display:flex;align-items:baseline;justify-content:space-between;gap:.6em}
+a.store .name{font-size:15px;font-weight:650}
+a.store .go{color:var(--link);font-size:13px;font-weight:600}
+a.store .pairs{display:flex;flex-wrap:wrap;gap:.3em 1.4em;margin-top:.55em}
+a.store .pair{display:flex;flex-direction:column}
+a.store .pair .lbl{color:var(--muted);font-size:11.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+a.store .pair .v{font-size:15px;font-variant-numeric:tabular-nums}
+a.store .pair .v.is-warn{color:var(--warn);font-weight:650}
+a.store .pair .v.is-bad{color:var(--bad);font-weight:650}
+a.store .foot{margin-top:.55em;color:var(--muted);font-size:12.5px}
+/* a plain row of links under a heading */
+p.more{margin:.2em 0 1.5em;font-size:13.5px}
+/* the list of apps, one row an app: a name, what it is serving, how much it served, and, last and hardest to miss, what is worth a look. The two capability lists are not here; they are what Settings is for. */
+ul.apps{display:grid;gap:.5em;margin:.2em 0 1.3em;padding:0;list-style:none}
+li.app{display:grid;grid-template-columns:minmax(9rem,.8fr) minmax(12rem,1.5fr) minmax(8rem,.7fr) minmax(9rem,.9fr);gap:.3em 1.2em;align-items:center;padding:.7em .95em;border:1px solid var(--line);border-left:4px solid var(--line);border-radius:12px;background:var(--card)}
+li.app.is-warn{border-left-color:var(--warn);background:var(--warn-bg)}
+li.app.is-bad{border-left-color:var(--bad);background:var(--bad-bg)}
+li.app .who{display:flex;flex-wrap:wrap;align-items:center;gap:.45em;min-width:0}
+li.app .nm{font-size:16px;font-weight:650;color:var(--text);text-decoration:none}
+li.app .nm:hover{text-decoration:underline}
+li.app .who .muted{font-size:12.5px}
+li.app .what{min-width:0;color:var(--muted);font-size:13px}
+li.app .count{font-size:13.5px;font-variant-numeric:tabular-nums}
+li.app .count .n{font-size:17px;font-weight:650}
+li.app .count .muted{font-size:12.5px}
+li.app .flags{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:.35em}
+a.flag{display:inline-flex;align-items:center;gap:.4em;padding:.25em .7em;border:1px solid var(--line);border-radius:999px;background:var(--soft);color:var(--text);font-size:13px;font-weight:600;text-decoration:none}
+a.flag.is-warn{border-color:var(--warn);background:var(--card);color:var(--warn)}
+a.flag.is-bad{border-color:var(--bad);background:var(--card);color:var(--bad)}
+a.flag:hover{border-color:var(--focus)}
+a.flag code{background:transparent;padding:0;font-size:.95em}
+.quiet{color:var(--muted);font-size:12.5px}
+/* Settings: what only reads, before what changes */
+.ronly{margin-left:.5em;padding:.1em .5em;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--muted);font-size:10.5px;font-weight:700;letter-spacing:.06em}
+h2 .ronly{vertical-align:.1em}
 /* narrow: a narrow screen, where nothing scrolls sideways */
 @media (max-width:760px){
 main{padding:1.1rem .75rem 3rem}
@@ -197,6 +272,24 @@ td.value{max-width:none}
 .fields{grid-template-columns:1fr}
 .caps{grid-template-columns:repeat(auto-fill,minmax(10em,1fr))}
 .inline input[type=password]{width:100%}
+/* the band is tighter, the tabs are closer, and where a line was seen drops under it */
+.strip{grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr));gap:.5em}
+.fig .big{font-size:1.35rem}
+ul.look .where{flex:1 1 100%;margin-left:0}
+nav.tabs{gap:.15em}
+nav.tabs a{padding:.45em .7em;font-size:13.5px}
+/* an app is a card: the name, then its facts under it, the flag last and on a line of its own so a long one cannot squeeze the rest */
+li.app{grid-template-columns:1fr;gap:.25em;padding:.65em .8em}
+li.app .flags{justify-content:flex-start;margin-top:.15em}
+li.app .count{font-size:13px}
+}
+/* the app's tabs on a narrow screen: six tabs do not fit a phone in one row, and a row that scrolls sideways hides the ones that matter behind a gesture. A folder tab cannot wrap, because the line it sits on is at the bottom of the row and the tabs above it would hang in the air. So they are pills: the same words, the same order, the chosen one filled. */
+@media (max-width:560px){
+/* four figures are two rows of two, not three and an orphan */
+.strip{grid-template-columns:1fr 1fr}
+nav.tabs{gap:.3em;margin:.8em 0 1.2em;border-bottom:0}
+nav.tabs a{margin-bottom:0;padding:.32em .8em;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--text);font-size:13.5px}
+nav.tabs a[aria-current]{border-color:var(--brand-2);background:var(--brand-2);color:#fff}
 }
 @media (max-width:420px){
 table.facts,table.facts tr,table.facts th,table.facts td{display:block;width:auto}

@@ -180,6 +180,19 @@ pub struct AppInfo {
     pub queued: u64,
     /// `(keys, bytes)` in its store, when one is open.
     pub kv: Option<(u64, u64)>,
+    /// `[kv] max_keys` and `[kv] max_bytes`: what that store may hold, so a
+    /// page can say when it is near them rather than only how large it is.
+    pub kv_max_keys: u64,
+    pub kv_max_bytes: u64,
+    /// The app's SQL store on disk, in bytes, when it has one.
+    pub sql_bytes: Option<u64>,
+    /// `[sql] max_bytes`.
+    pub sql_max_bytes: u64,
+    /// Why `[access]` is written and off ([`crate::access::Access::off`]);
+    /// "" where Access is on, and "" where the app asks for none. An app
+    /// that asked for Access and did not get it is serving to anybody who
+    /// reaches it, which is worth saying on its page.
+    pub access_off: String,
     pub recent_errors: Vec<Failure>,
 }
 
@@ -313,6 +326,11 @@ impl Front {
                     kv: json["kv"]["keys"]
                         .as_u64()
                         .zip(json["kv"]["bytes"].as_u64()),
+                    kv_max_keys: 0,
+                    kv_max_bytes: 0,
+                    sql_bytes: None,
+                    sql_max_bytes: 0,
+                    access_off: String::new(),
                     recent_errors: slot
                         .counters
                         .recent_errors()
@@ -348,6 +366,18 @@ impl Front {
                     info.granted = app.granted.iter().cloned().collect();
                     info.fetch_allow = app.fetch_allow.clone();
                     info.limits = app.limits.as_file();
+                    info.kv_max_keys = app.kv.max_keys;
+                    info.kv_max_bytes = app.kv.max_bytes;
+                    info.sql_max_bytes = app.sql.max_bytes;
+                    info.access_off = app.access.off.clone().unwrap_or_default();
+                    // Two `stat`s, and only for an app that has a store:
+                    // the host keeps no file for one that is not granted
+                    // `sql`, so there would be nothing to size.
+                    if app.granted.contains("sql") {
+                        info.sql_bytes = self
+                            .sql_path(&slot.name)
+                            .and_then(|path| crate::sql::usage(&path));
+                    }
                 }
                 info
             })
@@ -462,6 +492,20 @@ impl Front {
         match self.deployed(app) {
             Some(found) => crate::code::listing(&found, limit),
             None => Vec::new(),
+        }
+    }
+
+    /// How many files of `app`'s deploy the app's directory holds
+    /// differently ([`crate::code::disk_check`]), for the Overview, which
+    /// wants the number and not the list.
+    pub(crate) fn app_code_disk(&self, app: &str) -> crate::code::DiskCheck {
+        match self.deployed(app) {
+            Some(found) => crate::code::disk_check(&found, crate::code::DISK_CHECK_BYTES),
+            None => crate::code::DiskCheck {
+                looked: true,
+                differing: 0,
+                bytes: 0,
+            },
         }
     }
 

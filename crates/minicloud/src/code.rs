@@ -70,6 +70,71 @@ pub const CODE_FILES: i64 = 500;
 /// `<pre>`.
 pub const READ_TEXT_BYTES: usize = 128 * 1024;
 
+/// How much of a deploy the Overview compares with the app's directory
+/// ([`disk_check`]).
+///
+/// The comparison reads every file, and the Overview is the page opened
+/// most: a deploy is bounded by `[assets] max_bytes`, which is 8 MiB by
+/// default and may be 16, and reading that on every load of a dashboard is
+/// not what a dashboard costs. A megabyte is a few milliseconds and covers
+/// every app this host has; past it the Overview says it did not look and
+/// sends the reader to the Code tab, which reads them all because somebody
+/// asked for exactly that. **A page that cannot afford the answer says so
+/// rather than guessing**: a size-and-time comparison would miss the hand
+/// edit that keeps the length, which is the case the comparison is for.
+pub const DISK_CHECK_BYTES: u64 = 1 << 20;
+
+/// What the app's directory holds, against the version that is running.
+pub struct DiskCheck {
+    /// Whether every file was compared. False where the deploy is past
+    /// [`DISK_CHECK_BYTES`]: nothing was read, and `differing` is 0 because
+    /// nothing was looked at — not because nothing differs.
+    pub looked: bool,
+    /// Files whose copy in the app's directory is not the one running:
+    /// `differs`, `missing` or `unread` ([`CodeFile::on_disk`]).
+    pub differing: u64,
+    /// What the deploy comes to, in bytes.
+    pub bytes: u64,
+}
+
+/// How many files of `app`'s deploy the app's directory holds differently,
+/// for a page that wants the number and not the list.
+///
+/// Nothing is read at all for a deploy past `budget`
+/// ([`DISK_CHECK_BYTES`]); `DiskCheck::looked` is how the caller knows the
+/// difference between "none differ" and "none were compared".
+pub fn disk_check(app: &App, budget: u64) -> DiskCheck {
+    let files = deploy(app);
+    let mut bytes = 0;
+    for (_, at) in &files {
+        bytes += content(app, at).map_or(0, |body| body.len() as u64);
+    }
+    if bytes > budget {
+        return DiskCheck {
+            looked: false,
+            differing: 0,
+            bytes,
+        };
+    }
+    let mut differing = 0;
+    for (name, at) in &files {
+        // `app.toml` is read from the directory, so there is nothing for it
+        // to disagree with — the same answer `on_disk` gives it.
+        if matches!(at, Where::Config) {
+            continue;
+        }
+        match content(app, at) {
+            Ok(body) if on_disk(app, name, at, &body) == "same" => {}
+            _ => differing += 1,
+        }
+    }
+    DiskCheck {
+        looked: true,
+        differing,
+        bytes,
+    }
+}
+
 /// The most pieces one file's colouring carries; past it the file is shown
 /// plain and [`CodeFile::plain`] says so.
 ///

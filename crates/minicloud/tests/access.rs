@@ -303,7 +303,7 @@ fn a_valid_token_gets_in_and_the_history_records_its_email() {
     let good = admin_token(&jwks);
     let page = ui(&host, "GET", "/", &[assertion(&good)]);
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("<b>hello</b>"), "{}", page.body);
+    assert!(page.body.contains(">hello</a>"), "{}", page.body);
     // The browser's cookie does as well as the header.
     let cookie = format!("Cookie: theme=dark; CF_Authorization={good}");
     assert_eq!(ui(&host, "GET", "/history", &[cookie]).status, 200);
