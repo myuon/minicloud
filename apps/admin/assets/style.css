@@ -1,6 +1,6 @@
 /* tokens: the colours, the type and the spacing */
-:root{color-scheme:light dark;--bg:#f4f6f8;--card:#fff;--line:#e1e5ea;--soft:#eef1f4;--text:#191c21;--muted:#67707c;--brand:#342a4d;--brand-2:#4b3d6e;--link:#3a4bb0;--ok:#0f7a38;--ok-bg:#e7f6ec;--bad:#b32318;--bad-bg:#fdeceb;--warn:#8a5a00;--warn-bg:#fbf1de;--off:#58606c;--off-bg:#eaedf1;--focus:#7c6bc4;--code-word:#6b2fa0;--code-key:#0b6b73}
-@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#191d23;--line:#2b313a;--soft:#222730;--text:#e7e9ec;--muted:#98a1ad;--brand:#1e1a2c;--brand-2:#473a68;--link:#a3b2ff;--ok:#52cc84;--ok-bg:#13301f;--bad:#ff8f82;--bad-bg:#3a1c19;--warn:#eec272;--warn-bg:#352a12;--off:#aab3bf;--off-bg:#262b33;--focus:#9d8cf0;--code-word:#c9a6ff;--code-key:#67cfd8}}
+:root{color-scheme:light dark;--bg:#f4f6f8;--card:#fff;--line:#e1e5ea;--soft:#eef1f4;--text:#191c21;--muted:#67707c;--brand:#342a4d;--brand-2:#4b3d6e;--link:#3a4bb0;--ok:#0f7a38;--ok-bg:#e7f6ec;--bad:#b32318;--bad-bg:#fdeceb;--warn:#8a5a00;--warn-bg:#fbf1de;--off:#58606c;--off-bg:#eaedf1;--focus:#7c6bc4;--tree-line:#c4ccd6;--code-word:#8b2fa0;--code-type:#0b5fd0;--code-key:#0b6b73;--code-str:#0f7a38;--code-num:#a65500;--code-note:#5b7083;--code-doc:#3f6b8f;--code-punct:#47494d}
+@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#191d23;--line:#2b313a;--soft:#222730;--text:#e7e9ec;--muted:#98a1ad;--brand:#1e1a2c;--brand-2:#473a68;--link:#a3b2ff;--ok:#52cc84;--ok-bg:#13301f;--bad:#ff8f82;--bad-bg:#3a1c19;--warn:#eec272;--warn-bg:#352a12;--off:#aab3bf;--off-bg:#262b33;--focus:#9d8cf0;--tree-line:#434e5b;--code-word:#d7a6ff;--code-type:#8ab4ff;--code-key:#67cfd8;--code-str:#7ee0a1;--code-num:#ffb86b;--code-note:#8b9bb0;--code-doc:#85a9c8;--code-punct:#bec0c4}}
 /* page: the type, the header and its navigation, the headings */
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -71,33 +71,65 @@ pre.code{max-height:none;tab-size:2}
    doc comment, `p` punctuation. One letter each because a file comes to
    thousands of spans and the class is in every one of them.
 
-   Only two of them are a colour of their own; the rest borrow the page's,
-   so there is one palette here and not two, and both forms of it are
-   below. A comment and a doc comment are the same grey, the second
-   italic — prose among code, and no third grey to tell from the first. */
+   Every one of them is a colour of its own rather than the page's, because
+   the page's greys were what a file looked like before: punctuation is the
+   commonest piece of a file by far, and grey punctuation greys the whole of
+   it. So punctuation is the text's own colour, only let down a little, and
+   the greys are gone — a comment is a slate that is not the text and not a
+   word of the language, and a doc comment the same slate turned towards
+   blue. **Neither is italic**: a file here opens on sixty lines of doc
+   comment, and sixty italic lines is a page nobody reads. The colour is
+   what tells them apart.
+
+   Each colour is at least 4.5:1 on the card it sits on, in both forms. */
 pre.code .k{color:var(--code-word)}
-pre.code .t{color:var(--link)}
+pre.code .t{color:var(--code-type)}
 pre.code .i{color:var(--code-key)}
-pre.code .s{color:var(--ok)}
-pre.code .n{color:var(--warn)}
-pre.code .c{color:var(--muted)}
-pre.code .d{color:var(--muted);font-style:italic}
-pre.code .p{color:var(--muted)}
+pre.code .s{color:var(--code-str)}
+pre.code .n{color:var(--code-num)}
+pre.code .c{color:var(--code-note)}
+pre.code .d{color:var(--code-doc)}
+pre.code .p{color:var(--code-punct)}
+/* the card a tree sits in is only as wide as the tree reads: a size
+   right-aligned across the whole of a wide page is too far from the name
+   beside it to be the same row. */
+.panel.tree{max-width:46rem}
 /* a deploy as a tree: a list inside the item that holds it, a line down the
    left of every list and a tick from it to each item on that line. The
    nesting is the markup, so it survives any width — which is why this is
    not a table: an indented cell reads as a tree only on a wide screen, and
    on a narrow one `table.cards` makes every row a card and the nesting is
    gone. A rule a level is gone with it; the lines nest because the lists
-   do. On a narrow screen the facts beside a name take a line of their own,
-   so a long name cannot push them off the side. */
-ul.tree{margin:0;padding:0;list-style:none;font-size:14px}
-ul.tree ul{margin:0;padding-left:1.2em;list-style:none;border-left:1px solid var(--line)}
-ul.tree li{position:relative;padding:.22em 0}
-ul.tree ul>li::before{content:"";position:absolute;top:1.05em;left:-1.2em;width:.85em;border-top:1px solid var(--line)}
-ul.tree li.dir>code{font-weight:650}
-ul.tree .meta{color:var(--muted);font-size:13px}
-ul.tree .meta .state{margin:0 .1em}
+   do.
+
+   The outermost list has a line of its own, and the lines are `--tree-line`
+   and not `--line`: a line drawn to divide a card from the page is too
+   faint to be the shape of a tree, and a tree whose top level has no line
+   reads as a list that is indented and not as a tree at all.
+
+   What is beside a name is in columns on a wide screen — a width each, the
+   size right against them — because the sizes lining up is what makes the
+   rows a list to read down rather than a paragraph each. On a narrow screen
+   the columns give way: the facts take a line of their own, with the dots
+   back between them, so a long name cannot push them off the side. */
+ul.tree{margin:0;padding:0 0 0 1.1em;list-style:none;font-size:14px;border-left:1px solid var(--tree-line)}
+ul.tree ul{margin:0;padding-left:1.1em;list-style:none;border-left:1px solid var(--tree-line)}
+ul.tree li{position:relative}
+ul.tree li::before{content:"";position:absolute;top:1.1em;left:-1.1em;width:.7em;border-top:1px solid var(--tree-line)}
+ul.tree .row{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 1.1em;padding:.3em .55em;border-radius:7px;line-height:1.5}
+ul.tree .row:hover{background:var(--soft)}
+ul.tree .row>a,ul.tree .row>code{flex:1 1 12em;min-width:0;overflow-wrap:anywhere}
+ul.tree .row>a{color:var(--link);text-decoration:none}
+ul.tree .row>a:hover{text-decoration:underline}
+/* a name is the one thing read down this list, so it is not also a chip:
+   inside the tree `code` keeps the face and drops the box it sits in */
+ul.tree .row code{padding:0;background:none;font-size:13.5px}
+ul.tree li.dir>.row>code{color:var(--text);font-weight:700}
+ul.tree .meta{display:flex;flex:0 0 auto;gap:0 1.1em;color:var(--muted);font-size:12.5px}
+ul.tree .meta .what{width:7.5em}
+ul.tree .meta .size{width:4.6em;text-align:right;font-variant-numeric:tabular-nums}
+ul.tree .meta .disk{width:8.5em}
+ul.tree .meta .state{margin:0}
 td.value{max-width:52em}
 td.value code{display:inline-block;max-width:100%;white-space:pre-wrap;word-break:break-all}
 @media (min-width:761px){td.nowrap{white-space:nowrap}}
@@ -154,7 +186,13 @@ table.log,table.log tr{display:block;width:auto}
 table.log tr{padding:.3em .1em}
 table.log td{display:inline;padding:0}
 table.log td.at{margin-right:.5em;font-size:11.5px}
-ul.tree .meta{display:block;margin-top:.1em}
+ul.tree{padding-left:.8em}
+ul.tree ul{padding-left:.8em}
+ul.tree li::before{left:-.8em;width:.5em}
+ul.tree .meta{flex:1 1 100%;flex-wrap:wrap;gap:0 .4em;margin-top:.05em}
+ul.tree .meta .what,ul.tree .meta .size,ul.tree .meta .disk{width:auto;text-align:left}
+ul.tree .meta .size::before,ul.tree .meta .disk::before{content:"· "}
+ul.tree .meta .disk:empty{display:none}
 td.value{max-width:none}
 .fields{grid-template-columns:1fr}
 .caps{grid-template-columns:repeat(auto-fill,minmax(10em,1fr))}

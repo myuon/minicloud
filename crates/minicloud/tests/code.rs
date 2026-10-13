@@ -704,7 +704,18 @@ fn the_page_shows_what_the_version_it_is_running_is_made_of() {
     // that names the module — and not a padding on a cell of a table.
     let own = page(&host, "/apps/admin/code");
     assert!(
-        own.body.contains("<li class=dir><code>text/</code>"),
+        own.body
+            .contains("<li class=dir><span class=row><code>text/</code>"),
+        "{}",
+        own.body
+    );
+    // What is beside a name is in columns of its own, so the sizes line up
+    // down the page rather than running on from the name as a sentence.
+    assert!(
+        own.body.contains(
+            "<span class=meta><span class=what><span class=muted>code</span></span>\
+             <span class=size>"
+        ),
         "{}",
         own.body
     );
@@ -829,7 +840,8 @@ fn the_tree_closes_every_list_it_opens() {
     // it, and the next file is an item of the list that is left.
     assert!(
         listing.body.contains(
-            "</li></ul></li></ul></li><li><a href=\"/apps/notes/code?file=assets%2Flogo.png\""
+            "</li></ul></li></ul></li><li><span class=row>\
+             <a href=\"/apps/notes/code?file=assets%2Flogo.png\""
         ),
         "{}",
         listing.body
