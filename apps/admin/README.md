@@ -22,8 +22,9 @@ in [docs/design.md, Administering apps at run time](../../docs/design.md#adminis
 
 | request | does |
 | --- | --- |
-| `GET /` | every app: state (`serving`, `disabled`, `refused`, `removed`) and why, version and tier, how it is reached, what its code requires and what it is granted (changes marked), its counters and store |
-| `GET /apps/<app>` | one app in full, its limits and recent errors, and the forms below |
+| `GET /` | every app, one card each: state (`serving`, `disabled`, `refused`, `removed`) and why, version and tier, how it is reached, what it has served — and, last and hardest to miss, what is worth a look about it, which is also the link to the page that shows it. The apps with something to say are first; the rest say `quiet`. What an app may do and what its code asks for are not here: they are what Settings is for |
+| `GET /apps/<app>` | the app's **Overview** (issue #108): the numbers (served, errors, in flight, queued), then **worth a look** — the host saying what is wrong before being asked — then a card for each store it has, the last lines of its log, and one line about how it is set up with the way to Settings |
+| `GET /apps/<app>/settings` | everything that *changes* the app: what the deploy says (read only), then the grant, the fetch allowlist and the limits as one form, then routing, then reset |
 | `POST /apps/<app>/enable`, `/disable` | routes to the app again, or stops (503; its data stays) |
 | `POST /apps/<app>/configure` | the grant (`cap.<name>` checkboxes), the allowlist (`allow`, one per line) and every limit (`maxHostCalls`, `deadlineMs`, `maxHeapWords`, `maxInFlight`, `maxQueued`, `maxRequestBytes`, `maxResponseBytes`) |
 | `POST /apps/<app>/reset` | drops the changes made here, back to `app.toml` |
@@ -53,14 +54,59 @@ that did not answers 422 with the reasons — the form's own (a field that is
 not a whole number, below its least value, an allowlist line that is not
 `http(s)://…`), or the host's (the reload's) — and the form as posted.
 
+## An app is a workspace
+
+Every page about one app opens the same way (issue #108): where it is, its
+name and state, one line of what it is serving and where, and a row of tabs
+— `Overview`, `Logs`, `Data`, `SQL`, `Queues`, `Code`, `Settings`.
+
+**A tab is there when the app has the thing.** An app not granted `sql` has
+no `SQL` tab, and the same for `kv` and `queue`: the capabilities an app was
+granted are the shape of its pages, which is this app saying what the
+capability model already says. The windows still answer for an app without
+the grant — a URL somebody kept is not a 404 — and say what is missing; they
+are simply not offered. `Overview`, `Code` and `Settings` are on every app,
+and so is `Logs`: the ring that page reads is the host's, so it holds the
+host's own lines about an app granted nothing at all.
+
+Every page's explanation is folded into a `<details>` whose `<summary>` is
+the one line worth reading. `<details>` is HTML and runs nothing, so the CSP
+is unchanged.
+
+### Worth a look
+
+The Overview's second heading is the thing these pages never had: the host
+saying what is wrong before being asked. A refusal and why; the requests
+that failed; requests turned away at a limit; what is held and what is dead
+on each queue; a store near what it may hold; a file of the deploy the app's
+directory holds differently; Cloudflare Access asked for in `app.toml` and
+not on. The worst first, each a line with the way to the page that shows it.
+
+**Nothing wrong is one green line saying so**, naming what was looked at.
+"Is anything wrong" is the question somebody opened the page to answer, and
+a page that answers it by being empty has not answered it.
+
+The one read there that is not free is the comparison with the app's
+directory, which reads every file of the deploy. The host does it under a
+budget ([`code::DISK_CHECK_BYTES`](../../crates/minicloud/src/code.rs), a
+megabyte) and says whether it looked: past that the page says it did not and
+sends the reader to the `Code` tab, which reads them all because somebody
+asked for exactly that. A cheaper comparison — size, modification time —
+would miss the hand edit that keeps the length, which is the case the
+comparison is for, so the page says "I did not look" rather than guessing.
+The list of apps does not compare at all, and says nothing about the files:
+it has every app on it.
+
 ## On a screen of any width
 
 The pages are one stylesheet, [`assets/style.css`](assets/style.css), and
 no script at all: what they do on a phone, they do in CSS. Nothing scrolls
-sideways under about 760 px — each row of a wide table (the apps, the
-history, the secrets, an app's recent errors) becomes a card, its cells
-labelled by the column headings they lose, and the forms' fields go one to a
-line. The colours are custom properties with a `prefers-color-scheme: dark`
+sideways under about 760 px — each row of a wide table (the history, the
+secrets) becomes a card, its cells labelled by the column headings they
+lose, an app's card stacks its facts under its name, and the forms' fields
+go one to a line. Under about 560 px the tabs are pills that wrap: six
+folder tabs do not fit a phone in one row, and a row that scrolls sideways
+hides the ones that matter behind a gesture. The colours are custom properties with a `prefers-color-scheme: dark`
 set beside them, and `color-scheme` tells the browser to draw its own parts —
 the checkboxes, the scrollbars, the login prompt — to match.
 

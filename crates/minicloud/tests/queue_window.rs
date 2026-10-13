@@ -452,10 +452,15 @@ fn the_page_shows_each_queue_what_is_waiting_and_the_dead_letters() {
         "the message is still on the queue"
     );
 
-    // The app's own page is the way here.
+    // The app's tabs are the way here, and the dead letter is said on the
+    // Overview before anybody goes looking for it.
     let app = page(&host, "/apps/post").body;
-    assert!(app.contains("/apps/post/queues\">what is waiting"), "{app}");
-    // And an app with no queue has no such row, and says so on the page.
+    assert!(
+        app.contains("<a href=\"/apps/post/queues\">Queues</a>"),
+        "{app}"
+    );
+    assert!(app.contains("dead letter"), "{app}");
+    // And an app not granted `queue` has no such tab.
     let notes = page(&host, "/apps/notes").body;
     assert!(!notes.contains("/apps/notes/queues"), "{notes}");
     let none = page(&host, "/apps/notes/queues").body;

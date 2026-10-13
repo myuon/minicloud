@@ -573,7 +573,7 @@ fn the_admin_app_needs_its_secret() {
     assert_eq!(get(host.addr, "/hello/").status, 200);
     let page = ui(&host, "GET", "/", &authed(), "");
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("<b>hello</b>"), "{}", page.body);
+    assert!(page.body.contains(">hello</a>"), "{}", page.body);
     let csp = page.header("content-security-policy").unwrap();
     assert!(csp.contains("default-src 'none'") && csp.contains("frame-ancestors 'none'"));
     assert!(!csp.contains("script-src"), "{csp}");
@@ -614,7 +614,10 @@ fn a_cross_site_form_changes_nothing() {
     // From its own pages, the same form goes through.
     let answer = ui(&host, "POST", "/apps/hello/disable", &same_site(), "");
     assert_eq!(answer.status, 303, "{}", answer.body);
-    assert_eq!(answer.header("location"), Some("/apps/hello?done=disable"));
+    assert_eq!(
+        answer.header("location"),
+        Some("/apps/hello/settings?done=disable")
+    );
     assert_eq!(get(host.addr, "/hello/").status, 503);
 }
 
@@ -709,10 +712,19 @@ fn the_pages_enable_disable_configure_and_reset() {
         &hello_form("3000"),
     );
     assert_eq!(applied.status, 303, "{}", applied.body);
-    let page = ui(&host, "GET", "/apps/hello?done=configure", &authed(), "");
+    let page = ui(
+        &host,
+        "GET",
+        "/apps/hello/settings?done=configure",
+        &authed(),
+        "",
+    );
     assert!(page.body.contains("Applied."), "{}", page.body);
+    // The field holds the new value and says the value is the admin's.
+    assert!(page.body.contains("value=\"3000\""), "{}", page.body);
     assert!(
-        page.body.contains("3000 <span class=added"),
+        page.body
+            .contains("host calls per request <span class=added title=\"set here, not in app.toml\">(changed)</span>"),
         "{}",
         page.body
     );
@@ -725,6 +737,23 @@ fn the_pages_enable_disable_configure_and_reset() {
     assert_eq!(get(addr, "/notes/x").status, 503);
     let overview = ui(&host, "GET", "/", &authed(), "").body;
     assert!(overview.contains("state refused"), "{overview}");
+    // A refused app is one the list has something to say about, so it is
+    // above the quiet ones and its pill is the way to the page that fixes
+    // it.
+    assert!(
+        overview.contains("href=\"/apps/notes/settings\">refused →</a>"),
+        "{overview}"
+    );
+    assert!(
+        overview.find("notes").unwrap() < overview.find(">hello</a>").unwrap(),
+        "the app with something to say is first:\n{overview}"
+    );
+    // And its Overview says why before anybody asks.
+    let its_own = ui(&host, "GET", "/apps/notes", &authed(), "").body;
+    assert!(
+        its_own.contains("Refused, so nothing reaches it"),
+        "{its_own}"
+    );
     // Reset brings it back.
     assert_eq!(
         ui(&host, "POST", "/apps/notes/reset", &same_site(), "").status,
@@ -750,7 +779,7 @@ fn the_pages_enable_disable_configure_and_reset() {
         "{}",
         itself.body
     );
-    let own = ui(&host, "GET", "/apps/admin", &authed(), "").body;
+    let own = ui(&host, "GET", "/apps/admin/settings", &authed(), "").body;
     assert!(
         !own.contains("action=\"/apps/admin/disable\""),
         "no disable button for itself"
@@ -813,6 +842,115 @@ fn a_persisted_override_with_the_removed_fuel_limit_does_not_stop_the_app() {
     // The next change written leaves it out.
     assert_eq!(op(&host, "/configure?app=hello&inflight=7").status, 200);
     assert!(!overrides(&apps.data).contains("fuel"));
+}
+
+/// An app is a workspace (issue #108): every page about it carries the same
+/// row of tabs, and a tab is there when the app has the thing.
+#[test]
+fn an_apps_tabs_are_what_it_was_granted() {
+    let apps = ui_apps();
+    let host = deployed(&apps);
+    let has = |page: &str, tab: &str| page.contains(&format!(">{tab}</a>"));
+    // `notes` is granted `kv` and `log`: a Data tab, and no store it has no
+    // grant for.
+    let notes = ui(&host, "GET", "/apps/notes", &authed(), "").body;
+    for tab in ["Overview", "Logs", "Data", "Code", "Settings"] {
+        assert!(has(&notes, tab), "no {tab} tab:\n{notes}");
+    }
+    for tab in ["SQL", "Queues"] {
+        assert!(!has(&notes, tab), "a {tab} tab:\n{notes}");
+    }
+    // `hello` is granted nothing at all, so no store has a tab — and Logs
+    // is still there, because the ring it reads is the host's and holds the
+    // host's own lines about the app.
+    let hello = ui(&host, "GET", "/apps/hello", &authed(), "").body;
+    for tab in ["Overview", "Logs", "Code", "Settings"] {
+        assert!(has(&hello, tab), "no {tab} tab:\n{hello}");
+    }
+    for tab in ["Data", "SQL", "Queues"] {
+        assert!(!has(&hello, tab), "a {tab} tab:\n{hello}");
+    }
+    // The tab the page is marks itself, and the row is on every page about
+    // the app, not only the Overview.
+    assert!(
+        hello.contains("<a href=\"/apps/hello\" aria-current=page>Overview</a>"),
+        "{hello}"
+    );
+    let log = ui(&host, "GET", "/apps/hello/logs", &authed(), "").body;
+    assert!(
+        log.contains("<a href=\"/apps/hello/logs\" aria-current=page>Logs</a>"),
+        "{log}"
+    );
+    let settings = ui(&host, "GET", "/apps/hello/settings", &authed(), "").body;
+    assert!(
+        settings.contains("<a href=\"/apps/hello/settings\" aria-current=page>Settings</a>"),
+        "{settings}"
+    );
+    // Settings holds every form and no way into a window: the tabs are the
+    // way, and a second one is a second thing to keep worded.
+    for form in ["/apps/hello/configure", "/apps/hello/reset"] {
+        assert!(settings.contains(form), "{settings}");
+    }
+    for gone in ["what it is", "what is waiting", "a statement to read them"] {
+        assert!(!settings.contains(gone), "{gone}:\n{settings}");
+    }
+}
+
+/// The Overview says what is worth a look before being asked — and says so
+/// when nothing is, which is the thing somebody came to find out.
+#[test]
+fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
+    let apps = ui_apps();
+    let host = deployed(&apps);
+    let quiet = ui(&host, "GET", "/apps/hello", &authed(), "").body;
+    assert!(quiet.contains("<h2>Worth a look</h2>"), "{quiet}");
+    assert!(quiet.contains("class=\"is-ok\""), "{quiet}");
+    assert!(quiet.contains("Nothing: no request failed"), "{quiet}");
+    // The green line names what was looked at, the comparison with the
+    // app's directory included — which this deploy is small enough for.
+    assert!(
+        quiet.contains("every file of the deploy is the same as the one in the app's directory"),
+        "{quiet}"
+    );
+    // The numbers are above it, and the way to Settings below.
+    assert!(quiet.contains("<h2>Now</h2>"), "{quiet}");
+    assert!(
+        quiet.contains("/apps/hello/settings\">Settings</a>:"),
+        "{quiet}"
+    );
+    // `/spin` runs past the deadline: one failed request, and the Overview
+    // leads with it.
+    assert_eq!(get(host.addr, "/hello/spin").status, 504);
+    let loud = ui(&host, "GET", "/apps/hello", &authed(), "").body;
+    assert!(loud.contains("A request failed"), "{loud}");
+    assert!(loud.contains("class=\"is-bad\""), "{loud}");
+    assert!(loud.contains("Nothing else: "), "{loud}");
+    assert!(
+        loud.find("is-bad").unwrap() < loud.find("is-ok").unwrap(),
+        "the bad news is first:\n{loud}"
+    );
+    // And the list puts it above the quiet apps, with the pill the way
+    // there.
+    let list = ui(&host, "GET", "/", &authed(), "").body;
+    // The failure, and the admin app itself: its `[access]` names a team
+    // and an aud the environment does not set here, so Access is off for it
+    // and the list says so.
+    assert!(list.contains("2 want a look."), "{list}");
+    assert!(list.contains("1 error."), "{list}");
+    assert!(
+        list.contains("href=\"/apps/hello\">1 failed →</a>"),
+        "{list}"
+    );
+    assert!(list.contains(">Access off →</a>"), "{list}");
+    assert!(
+        list.find(">hello</a>").unwrap() < list.find(">notes</a>").unwrap(),
+        "the app with something to say is first:\n{list}"
+    );
+    // A quiet app says so, and says it quietly.
+    assert!(list.contains("<span class=quiet>quiet</span>"), "{list}");
+    // The two capability lists are gone from here; they are what Settings
+    // is for.
+    assert!(!list.contains("code requires"), "{list}");
 }
 
 #[test]

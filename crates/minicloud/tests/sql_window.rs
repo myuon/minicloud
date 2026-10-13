@@ -343,14 +343,17 @@ fn the_page_lands_on_the_tables_and_answers_a_statement() {
         landing.body
     );
 
-    // The app's own page is the way here.
+    // The app's tabs are the way here: a tab for the store it has.
     let app = page(&host, "/apps/catalog");
     assert!(
-        app.body.contains("/apps/catalog/sql\">tables"),
+        app.body.contains("<a href=\"/apps/catalog/sql\">SQL</a>"),
         "{}",
         app.body
     );
-    // And an app with no store has no such row on it.
+    // The store is a card on the Overview, with what it holds.
+    assert!(app.body.contains("class=store"), "{}", app.body);
+    // And an app not granted `sql` has no such tab: the page on the other
+    // end of one would say only that the host keeps no file for it.
     let notes = page(&host, "/apps/notes");
     assert!(!notes.body.contains("/apps/notes/sql"), "{}", notes.body);
 

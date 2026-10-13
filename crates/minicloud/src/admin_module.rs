@@ -117,6 +117,12 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             Effect::Read,
         ),
         op(
+            "codeDisk",
+            &[STR],
+            HostType::Named("host.CodeDisk"),
+            Effect::Read,
+        ),
+        op(
             "codeFile",
             &[STR, STR],
             HostType::Result(&HostType::Named("host.CodeFile"), &HostType::Error),
@@ -269,6 +275,17 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 // -1 for an app with no store open.
                 field("kvKeys", INT),
                 field("kvBytes", INT),
+                // `[kv]`'s quotas: what that store may hold. 0 for an app
+                // with no version loaded.
+                field("kvMaxKeys", INT),
+                field("kvMaxBytes", INT),
+                // The SQL store on disk; -1 for an app that has none, as
+                // `kvKeys` is -1 for an app with no store open.
+                field("sqlBytes", INT),
+                field("sqlMaxBytes", INT),
+                // Why `[access]` is written and off; "" where Access is on
+                // and "" where the app asks for none.
+                field("accessOff", STR),
                 field(
                     "recentErrors",
                     HostType::Array(&HostType::Named("host.Failure")),
@@ -329,6 +346,24 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("kind", STR),
                 // The file's own bytes, escaped by nothing.
                 field("text", STR),
+            ],
+        },
+        // What the app's directory holds against the version that is
+        // running ([`crate::code::disk_check`]), as a count.
+        //
+        // `looked` is here because the comparison reads every file and a
+        // dashboard cannot afford that on a large deploy: a page told
+        // `looked: false` says it did not look, which is the one answer a
+        // page must never guess at.
+        TypeSchema {
+            name: "CodeDisk",
+            cases: &[],
+            fields: &[
+                field("looked", HostType::Bool),
+                field("differing", INT),
+                field("bytes", INT),
+                // The size past which nothing is read.
+                field("budget", INT),
             ],
         },
         // One row of what an app's deploy carries ([`crate::code`]).
@@ -601,6 +636,11 @@ fn app_value(info: AppInfo) -> Value {
                 "kvBytes",
                 info.kv.map_or(Value::int(-1), |(_, bytes)| int(bytes)),
             ),
+            ("kvMaxKeys", int(info.kv_max_keys)),
+            ("kvMaxBytes", int(info.kv_max_bytes)),
+            ("sqlBytes", info.sql_bytes.map_or(Value::int(-1), int)),
+            ("sqlMaxBytes", int(info.sql_max_bytes)),
+            ("accessOff", Value::string(info.access_off)),
             (
                 "recentErrors",
                 Value::array(info.recent_errors.into_iter().map(|failure| {
@@ -974,6 +1014,22 @@ impl HostApi for AdminHost {
                 let limit = args.get(1).and_then(Value::as_int).unwrap_or(0);
                 Ok(Value::array(
                     front.app_code(app, limit).into_iter().map(code_file_value),
+                ))
+            }
+            "codeDisk" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                let check = front.app_code_disk(app);
+                Ok(Value::structure(
+                    "host.CodeDisk",
+                    vec![
+                        ("looked", Value::bool(check.looked)),
+                        ("differing", int(check.differing)),
+                        ("bytes", int(check.bytes)),
+                        ("budget", int(crate::code::DISK_CHECK_BYTES)),
+                    ],
                 ))
             }
             "codeFile" => {
