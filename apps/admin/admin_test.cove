@@ -161,6 +161,81 @@ test fn saysWhereTheHostAnswersAnAssetItCannotShow() -> Result<Unit, Error> {
   Ok(())
 }
 
+test fn saysANullCellApartFromAnEmptyOne() -> Result<Unit, Error> {
+  // The store keeps the two apart, so the page does: neither is an empty
+  // cell, and each says which it is.
+  assert(sqlCell(None).contains("NULL"))?
+  assert(sqlCell(Some("")).contains("empty"))?
+  assertEqual(sqlCell(Some("x")), "<code>x</code>")?
+  Ok(())
+}
+
+test fn escapesACellWhateverTheAppStoredInIt() -> Result<Unit, Error> {
+  let said = sqlCell(Some("<img src=y>&\"'"))
+  assert(!said.contains("<img"))?
+  assert(said.contains("&lt;img src=y&gt;&amp;&quot;&#39;"))?
+  Ok(())
+}
+
+test fn putsTheStatementBackInTheBoxAsTheAttributesValue() -> Result<Unit, Error> {
+  // The statement goes back inside quotes. A quote in it has to come out
+  // as an entity, or the rest of the statement would be markup.
+  let said = sqlForm("/apps/notes", "SELECT \"a\" FROM t WHERE v = '<img src=y>'")
+  assert(said.contains("value=\"SELECT &quot;a&quot; FROM t WHERE v = &#39;&lt;img src=y&gt;&#39;\""))?
+  assert(!said.contains("<img"))?
+  // And it is a GET: a read is in the URL, and there is no change for a
+  // form on another site to make.
+  assert(said.contains("method=get"))?
+  Ok(())
+}
+
+test fn showsAnAnswerAsItsColumnsAndRows() -> Result<Unit, Error> {
+  let answer = host.SqlAnswer(
+    columns: Vector.of("title", "pages").freeze(),
+    rows: Vector.of(
+      host.SqlRow(values: Vector.of(Some("Dune"), Some("412")).freeze()),
+      host.SqlRow(values: Vector.of(Some("<b>"), None).freeze()),
+    )
+      .freeze(),
+  )
+  let said = sqlAnswerTable(answer)
+  assert(said.contains("<th>title</th>"))?
+  assert(said.contains("<code>Dune</code>"))?
+  assert(said.contains("&lt;b&gt;"))?
+  assert(said.contains("NULL"))?
+  assert(said.contains("2 rows."))?
+  // A column name is the host's too, and is escaped where it labels a cell.
+  let evil = host.SqlAnswer(
+    columns: Vector.of("<img src=y>").freeze(),
+    rows: Vector.of(host.SqlRow(values: Vector.of(Some("1")).freeze())).freeze(),
+  )
+  assert(!sqlAnswerTable(evil).contains("<img"))?
+  // An answer with no rows is said, not shown as an empty table.
+  let none = host.SqlAnswer(columns: Vector.of("n").freeze(), rows: Vector.of().freeze())
+  assert(sqlAnswerTable(none).contains("No rows."))?
+  Ok(())
+}
+
+test fn listsTheTablesWithAStatementForEach() -> Result<Unit, Error> {
+  let said = sqlTablesTable(
+    "/apps/notes",
+    Vector.of(
+      host.SqlTable(name: "books", rows: 2, counted: true),
+      host.SqlTable(name: "huge", rows: 0, counted: false),
+    )
+      .freeze(),
+  )
+  assert(said.contains("<code>books</code>"))?
+  assert(said.contains(">2</td>"))?
+  // A count that could not be taken says so, where a 0 would have been a
+  // wrong answer.
+  assert(said.contains("not counted"))?
+  assert(said.contains("/apps/notes/sql?q=SELECT%20%2A%20FROM%20%22books%22%20LIMIT%2050"))?
+  // A store with no tables is said in words.
+  assert(sqlTablesTable("/apps/notes", Vector.of().freeze()).contains("no tables"))?
+  Ok(())
+}
+
 fn asking(query: Map<String, String>) -> web.Request {
   web.Request(method: "GET", path: "/", query: query, headers: Map.of(), body: "")
 }

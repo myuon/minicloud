@@ -5,7 +5,8 @@ use host
 /// its arguments in the query, its answer as text: `/apps`,
 /// `/capabilities`, `/history?n=`, `/kv?app=&prefix=&after=&n=`,
 /// `/kvValue?app=&key=`, `/logs?app=&n=`, `/code?app=&n=`,
-/// `/codeFile?app=&file=`, `/enable?app=&on=`,
+/// `/codeFile?app=&file=`, `/sqlTables?app=`, `/sqlQuery?app=&q=`,
+/// `/enable?app=&on=`,
 /// `/configure?app=&grant=&allow=&hostcalls=&…` and `/reset?app=`; and `/origin`,
 /// what the app is told of how it was reached.
 export fn handle(request: web.Request) -> web.Response {
@@ -59,6 +60,35 @@ export fn handle(request: web.Request) -> web.Response {
   if request.path == "/codeFile" {
     return match host.codeFile(app, query.get("file").unwrapOr("")) {
       Ok(file) => answer(200, "{file.name} | {file.bytes} | {file.isText} | {file.cut} | {file.onDisk}\n{file.text}")
+      Err(error) => answer(404, error.message)
+    }
+  }
+  if request.path == "/sqlTables" {
+    var lines = Vector.of()
+    for table in host.sqlTables(app) {
+      lines.push("{table.name} | {table.rows} | {table.counted}")
+    }
+    return answer(200, "\n".join(lines.freeze()))
+  }
+  if request.path == "/sqlQuery" {
+    return match host.sqlQuery(app, query.get("q").unwrapOr("")) {
+      Ok(got) => {
+        var out = Vector.of()
+        out.push("|".join(got.columns))
+        for row in got.rows {
+          var cells = Vector.of()
+          for value in row.values {
+            // A NULL is not an empty string, so the two are not printed
+            // alike: the text is quoted and a NULL is not.
+            match value {
+              Some(said) => cells.push("'{said}'")
+              None => cells.push("NULL")
+            }
+          }
+          out.push("|".join(cells.freeze()))
+        }
+        answer(200, "\n".join(out.freeze()))
+      }
       Err(error) => answer(404, error.message)
     }
   }

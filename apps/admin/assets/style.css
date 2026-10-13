@@ -95,6 +95,9 @@ button.danger:hover{border-color:var(--bad);background:var(--bad-bg)}
 .inline{display:flex;flex-wrap:wrap;align-items:center;gap:.4em}
 .inline input{width:18em}
 .inline input[type=password]{width:11em}
+/* the SQL window's statement: a statement is longer than a key's prefix,
+   and it gives the page back rather than scrolling off it */
+.inline input.sql{width:44em;max-width:100%}
 .inline label{display:flex;align-items:center;gap:.35em;font-size:13px}
 /* narrow: a narrow screen, where nothing scrolls sideways */
 @media (max-width:760px){

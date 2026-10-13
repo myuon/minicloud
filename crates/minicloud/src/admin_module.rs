@@ -16,7 +16,9 @@
 //! | `host.history(limit)` | `Array<host.Change>`: the newest `limit` changes, newest first |
 //! | `host.kv(app, prefix, after, limit)` | `Array<host.KvEntry>`: keys of the app's store starting with `prefix` and greater than `after` (`""` for the first page), ascending, at most `limit` (0–500); each value cut to [`crate::kv::PEEK_VALUE_CHARS`] — read only, and empty for an app with no store |
 //! | `host.kvValue(app, key)` | `Result<host.KvEntry, Error>`: one key, its value cut past [`crate::kv::READ_VALUE_CHARS`]; an `Err` when the app has no such key |
-//! | `host.logs(app, limit)` | `Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
+//! | `host.sqlTables(app)` | `Array<host.SqlTable>`: the tables of the app's SQL store and how many rows each holds — read only, and empty for an app with no store |
+//! | `host.sqlQuery(app, statement)` | `Result<host.SqlAnswer, Error>`: one statement that only reads, against that store, under the window's own limits ([`crate::sql::PEEK_ROWS`] and the rest); an `Err` for a statement that writes, one the store refuses, or an app with no store |
+//! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
 //! | `host.setEnabled(app, enabled, who)` | `Result<String, Error>`: routes to the app again, or stops; nothing is reloaded |
 //! | `host.configure(app, settings, who)` | `Result<String, Error>`: the app's grant, allowlist and limits become `settings`, if the app loads with them |
 //! | `host.reset(app, who)` | `Result<String, Error>`: drops the admin's changes, back to `app.toml` |
@@ -50,6 +52,7 @@ use crate::hosts::{AppContext, HostModule, PendingWork};
 use crate::logs::Line;
 use crate::manage::{AppInfo, KvRow, SecretInfo, Settings, Via};
 use crate::overrides::{Change, Control};
+use crate::sql::{Answer as SqlAnswer, Table as SqlTable};
 
 const STR: HostType = HostType::String;
 const INT: HostType = HostType::Int;
@@ -167,6 +170,18 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             &[STR, HostType::Bool, STR],
             CHANGED,
             Effect::IrreversibleWrite,
+        ),
+        op(
+            "sqlTables",
+            &[STR],
+            HostType::Array(&HostType::Named("host.SqlTable")),
+            Effect::Read,
+        ),
+        op(
+            "sqlQuery",
+            &[STR, STR],
+            HostType::Result(&HostType::Named("host.SqlAnswer"), &HostType::Error),
+            Effect::Read,
         ),
     ],
     types: &[
@@ -293,6 +308,45 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 // compares: `same`, `differs`, `missing` or `unread`.
                 field("onDisk", STR),
             ],
+        },
+        // One table of an app's SQL store ([`crate::sql::peek_tables`]).
+        TypeSchema {
+            name: "SqlTable",
+            cases: &[],
+            fields: &[
+                field("name", STR),
+                // How many rows it holds; 0 where `counted` is false.
+                field("rows", INT),
+                // Whether the count was taken. A count is a statement under
+                // the window's deadline, and a table too large to count
+                // inside it is listed saying so rather than left out.
+                field("counted", HostType::Bool),
+            ],
+        },
+        // What one of the window's statements answered. The same shape as
+        // `sql.Rows`, declared again here because `sql.`'s types are the
+        // app-facing module's: the admin app is granted `admin` and not
+        // `sql`, so it has no `sql.Rows` to be given one of.
+        TypeSchema {
+            name: "SqlAnswer",
+            cases: &[],
+            fields: &[
+                field("columns", STRINGS),
+                field("rows", HostType::Array(&HostType::Named("host.SqlRow"))),
+            ],
+        },
+        // A cell is an `Option<String>` for the reason `sql` gives: a
+        // `TypeSchema`'s `cases` carry no payload, so a value that is
+        // sometimes a number and sometimes text cannot be declared, and
+        // everything is its decimal or its text. `None` is `NULL`, which is
+        // how `NULL` stays apart from the empty string.
+        TypeSchema {
+            name: "SqlRow",
+            cases: &[],
+            fields: &[field(
+                "values",
+                HostType::Array(&HostType::Option(&HostType::String)),
+            )],
         },
         TypeSchema {
             name: "LogLine",
@@ -459,6 +513,47 @@ fn code_file_value(file: CodeFile) -> Value {
             ("isText", Value::bool(file.is_text)),
             ("cut", Value::bool(file.cut)),
             ("onDisk", Value::string(file.on_disk)),
+        ],
+    )
+}
+
+fn sql_table_value(table: SqlTable) -> Value {
+    Value::structure(
+        "host.SqlTable",
+        vec![
+            ("name", Value::string(table.name)),
+            ("rows", Value::int(table.rows)),
+            ("counted", Value::bool(table.counted)),
+        ],
+    )
+}
+
+/// What a statement answered. A cell is `Some` of its text or `None` for
+/// `NULL`: the two are not the same cell, and a window that showed them
+/// alike would hide the one thing a nullable column is about.
+fn sql_answer_value(answer: SqlAnswer) -> Value {
+    Value::structure(
+        "host.SqlAnswer",
+        vec![
+            (
+                "columns",
+                Value::array(answer.columns.into_iter().map(Value::string)),
+            ),
+            (
+                "rows",
+                Value::array(answer.rows.into_iter().map(|row| {
+                    Value::structure(
+                        "host.SqlRow",
+                        vec![(
+                            "values",
+                            Value::array(row.into_iter().map(|cell| match cell {
+                                Some(text) => Value::some(Value::string(text)),
+                                None => Value::none(),
+                            })),
+                        )],
+                    )
+                })),
+            ),
         ],
     )
 }
@@ -711,6 +806,30 @@ impl HostApi for AdminHost {
                     Ok(None) => {
                         Value::err(Value::error(format!("no key `{key}` in `{app}`'s store")))
                     }
+                    Err(why) => Value::err(Value::error(why)),
+                })
+            }
+            "sqlTables" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                let tables = front
+                    .app_sql_tables(app)
+                    .map_err(|why| RuntimeError::new(format!("admin: sql: {why}")))?;
+                Ok(Value::array(tables.into_iter().map(sql_table_value)))
+            }
+            "sqlQuery" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let text = |at: usize| args.get(at).and_then(Value::as_str).unwrap_or_default();
+                // Every way a statement can fail is the window's `Err` and
+                // not the host's error: the refusal is the answer the page
+                // shows, and a statement that writes is the commonest of
+                // them.
+                Ok(match front.app_sql_query(text(0), text(1)) {
+                    Ok(answer) => Value::ok(sql_answer_value(answer)),
                     Err(why) => Value::err(Value::error(why)),
                 })
             }
