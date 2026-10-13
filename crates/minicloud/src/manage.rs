@@ -51,6 +51,7 @@ use std::sync::Arc;
 use serde_json::Value as Json;
 
 use crate::apps::{load_as, load_with, AppState, Lineage};
+use crate::code::CodeFile;
 use crate::config::{
     read_app_with, store_references, AppOverride, LimitsFile, RemovedKeys, ADMIN_APP,
     ADMIN_CAPABILITY,
@@ -359,6 +360,32 @@ impl Front {
             return Ok(None);
         };
         Ok(crate::kv::read(&path, key)?.map(KvRow::from))
+    }
+
+    /// The version of `app` new requests go to, for an app the host has: a
+    /// name that is not one of its slots names nothing, the same guard
+    /// [`Front::kv_path`] rests on.
+    fn deployed(&self, app: &str) -> Option<Arc<crate::apps::App>> {
+        self.engine.slot_named(app)?.current()
+    }
+
+    /// Every file of the version `app` is running, at most `limit`
+    /// ([`crate::code`]). Empty for an app the host does not have, and for
+    /// one whose slot has no version left (a removed app).
+    pub(crate) fn app_code(&self, app: &str, limit: i64) -> Vec<CodeFile> {
+        match self.deployed(app) {
+            Some(found) => crate::code::listing(&found, limit),
+            None => Vec::new(),
+        }
+    }
+
+    /// One file of the version `app` is running, by the name a listing gave
+    /// it, its text cut past [`crate::code::READ_TEXT_BYTES`].
+    pub(crate) fn app_code_file(&self, app: &str, name: &str) -> Result<CodeFile, String> {
+        match self.deployed(app) {
+            Some(found) => crate::code::one(&found, name),
+            None => Err(format!("the host has no app `{app}` with a version loaded")),
+        }
     }
 
     /// The last `n` lines of `app`'s log, oldest first; empty for an app the

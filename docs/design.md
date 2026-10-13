@@ -322,6 +322,56 @@ touches:
   what came of it, refused attempts included — one JSON line each, appended.
 - `<data>/_host/secrets`: the secret store, below.
 
+### Seeing the code that is deployed
+
+The pages say what version an app is (`v<n>-<hash>`) and a hash is only
+useful if you can get at what it is a hash of. `GET /apps/<app>/code` is
+that: the app's `app.toml`, its `.cove` files at any depth and its
+`assets/` — the whole of what a deploy carries ([Deploys](#deploys)) — with
+`?file=` for one file's text.
+
+**Nothing is read for this.** Every part was already held, each for its own
+reason, and `code.rs` only collects them:
+
+- the `.cove` text is the `SourceMap` the app was compiled with, kept
+  because a runtime error is rendered against it;
+- the asset bytes are the `Assets` read at load, kept so that a request for
+  one costs no disk access;
+- `app.toml` is the exception: it is parsed at load and the `Settings` are
+  what survive, so that one is a read of the app's directory.
+
+**What is in memory is what is running**, and that is the honest default: it
+cannot disagree with the version the page shows. The directory can — a
+deploy that was staged and not switched to, an edit made on the machine —
+and that disagreement is sometimes exactly the thing worth seeing, so every
+file says how the one of the same name beside it compares: `same`,
+`differs`, `missing`, or `unread` for one that cannot be read. The whole
+file is compared, not its size or its time, because an edit that keeps the
+length is the case this is for. `app.toml` has nothing to disagree with, as
+it is the directory's copy either way — which is also why the app's own
+page can show a grant or a limit that the file does not: a change made here
+is in `overrides.json`, not in `app.toml`, and seeing both is how that is
+noticed.
+
+**A name is never a path.** A listing is built from what the host holds, and
+one file's read finds its entry in that listing by name, so `..`, an
+absolute path or another app's file matches nothing rather than being
+reached for. The app is named and resolved through the host's slots, as it
+is for the store above. The only path joined from a name is the one that is
+read to compare with disk, and every component of that has to be an
+ordinary one.
+
+**Both limits are said rather than quietly applied.** One file's text is cut
+past 128 KiB, with the whole file's size beside it; a listing carries at
+most 500 files, and the page, which asks for 200, says when there are more.
+A file that is not UTF-8 — a PNG, a font — has no text at all, and the page
+says where the host answers it instead: a browser shows the file as it is,
+which is more than a page pretending to render it would.
+
+A refused app was never compiled and so has no source map: what is
+deployed, for it, is its `app.toml` and whatever the host read of its
+assets. That is the file somebody looking at a refusal came for anyway.
+
 ## Secrets set at run time
 
 An API key used to mean ssh, an edit of `~/cove-tools/env` and a restart.

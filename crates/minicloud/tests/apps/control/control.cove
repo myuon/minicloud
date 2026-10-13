@@ -4,7 +4,8 @@ use host
 /// Each path is one operation of the `host` module (capability `admin`),
 /// its arguments in the query, its answer as text: `/apps`,
 /// `/capabilities`, `/history?n=`, `/kv?app=&prefix=&after=&n=`,
-/// `/kvValue?app=&key=`, `/logs?app=&n=`, `/enable?app=&on=`,
+/// `/kvValue?app=&key=`, `/logs?app=&n=`, `/code?app=&n=`,
+/// `/codeFile?app=&file=`, `/enable?app=&on=`,
 /// `/configure?app=&grant=&allow=&hostcalls=&…` and `/reset?app=`; and `/origin`,
 /// what the app is told of how it was reached.
 export fn handle(request: web.Request) -> web.Response {
@@ -44,6 +45,20 @@ export fn handle(request: web.Request) -> web.Response {
   if request.path == "/kvValue" {
     return match host.kvValue(app, query.get("key").unwrapOr("")) {
       Ok(entry) => answer(200, "{entry.key} | {entry.value} | {entry.bytes} | {entry.cut}")
+      Err(error) => answer(404, error.message)
+    }
+  }
+  if request.path == "/code" {
+    var lines = Vector.of()
+    let n = Int.parse(query.get("n").unwrapOr("100")).unwrapOr(100)
+    for file in host.code(app, n) {
+      lines.push("{file.name} | {file.kind} | {file.bytes} | {file.isText} | {file.onDisk}")
+    }
+    return answer(200, "\n".join(lines.freeze()))
+  }
+  if request.path == "/codeFile" {
+    return match host.codeFile(app, query.get("file").unwrapOr("")) {
+      Ok(file) => answer(200, "{file.name} | {file.bytes} | {file.isText} | {file.cut} | {file.onDisk}\n{file.text}")
       Err(error) => answer(404, error.message)
     }
   }

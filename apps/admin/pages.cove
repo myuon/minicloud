@@ -179,7 +179,7 @@ fn appPage(
   }
   let held = if app.kvKeys < 0 { "<span class=muted>–</span>" } else { "{app.kvKeys} keys, {text.bytes(app.kvBytes)}" }
   let store = if app.granted.contains("kv") { "{held} · <a href=\"{h(at)}/kv\">browse</a>" } else { held }
-  let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>state</th><td>{badge(app.state)}</td></tr><tr><th>version</th><td><code>{h(app.version)}</code> <span class=muted>{h(app.tier)}</span></td></tr><tr><th>entry</th><td><code>{h(app.entry)}</code></td></tr><tr><th>reached</th><td>{if app.hosts.length() > 0 { "by hostname {names(app.hosts)} only" } else { "<code>/{h(app.name)}/</code>" }}</td></tr><tr><th>code requires</th><td>{names(app.required)}{if app.requiredOpen { " <span class=muted>(at least: it makes a call the checker cannot follow)</span>" } else { "" }}</td></tr><tr><th>granted</th><td>{grantList(app)}</td></tr><tr><th>fetch allowlist</th><td>{names(app.fetchAllow)}</td></tr><tr><th>requests</th><td>{app.served} served, {app.ok} ok, {app.errors} errors, {app.rejected} rejected; {app.inFlight} in flight, {app.queued} queued</td></tr><tr><th>store</th><td>{store}</td></tr></table></div><h2>Limits</h2><div class=\"scroll narrow\"><table class=facts>{"".join(limitRows.freeze())}</table></div>"
+  let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>state</th><td>{badge(app.state)}</td></tr><tr><th>version</th><td><code>{h(app.version)}</code> <span class=muted>{h(app.tier)}</span> · <a href=\"{h(at)}/code\">what it is</a></td></tr><tr><th>entry</th><td><code>{h(app.entry)}</code></td></tr><tr><th>reached</th><td>{if app.hosts.length() > 0 { "by hostname {names(app.hosts)} only" } else { "<code>/{h(app.name)}/</code>" }}</td></tr><tr><th>code requires</th><td>{names(app.required)}{if app.requiredOpen { " <span class=muted>(at least: it makes a call the checker cannot follow)</span>" } else { "" }}</td></tr><tr><th>granted</th><td>{grantList(app)}</td></tr><tr><th>fetch allowlist</th><td>{names(app.fetchAllow)}</td></tr><tr><th>requests</th><td>{app.served} served, {app.ok} ok, {app.errors} errors, {app.rejected} rejected; {app.inFlight} in flight, {app.queued} queued</td></tr><tr><th>store</th><td>{store}</td></tr></table></div><h2>Limits</h2><div class=\"scroll narrow\"><table class=facts>{"".join(limitRows.freeze())}</table></div>"
   layout(
     base,
     "apps",
@@ -402,6 +402,194 @@ fn storeKeyPage(base: String, app: host.App, key: String) -> String {
       "apps",
       "{app.name} store",
       "{crumb(base, app, "store")}<h1>{h(app.name)} <span class=muted>key</span></h1><div class=problem><b>Not read.</b> The host said:<pre>{h(error.message)}</pre></div>{back}",
+    )
+  }
+}
+
+// ------------------------------------- the code the app is running
+//
+// No entry in `nav` for this: it is an app's own page, like its store and
+// its log, reached from the app and placed by `crumb`. The navigation is
+// the three things that are not about one app (apps, secrets, history).
+
+/// How many files a page of a deploy shows.
+fn codePageSize() -> Int {
+  200
+}
+
+/// The longest file text the host carries (`crate::code::READ_TEXT_BYTES`),
+/// so that a page that was cut can say at what.
+fn codeTextBytes() -> Int {
+  131072
+}
+
+/// What `assets/` is called in a deploy's names, which is also what comes
+/// off one to leave the path the host answers that file on.
+fn assetsPrefix() -> String {
+  "assets/"
+}
+
+/// What a file is, as the listing says it. The configuration first, because
+/// it is the thing that decides what the app may do and the usual reason to
+/// look.
+fn codeKind(file: host.CodeFile) -> String {
+  if file.kind == "config" {
+    return "<span class=muted>configuration</span>"
+  }
+  if file.kind == "cove" {
+    return "<span class=muted>code</span>"
+  }
+  if file.isText {
+    return "<span class=muted>asset</span>"
+  }
+  "<span class=muted>asset, not text</span>"
+}
+
+/// What the file of the same name in the app's directory says of this one.
+/// `same` is the quiet case; the others are what a deploy that was staged
+/// and not switched to, or an edit made on the machine, looks like from
+/// here. The colours are the state badges' rather than two more of their
+/// own: a difference is the bad news and a file that is not there to
+/// compare is the odd news.
+fn onDisk(file: host.CodeFile) -> String {
+  if file.kind == "config" {
+    // There is nothing for it to disagree with: the load keeps only what
+    // it parsed to, so this file is the directory's.
+    return "<span class=muted title=\"this file is read from the app's directory\">read from there</span>"
+  }
+  if file.onDisk == "same" {
+    return "<span class=muted>same</span>"
+  }
+  if file.onDisk == "differs" {
+    return "<span class=\"state refused\" title=\"the file in the app's directory is not the one that is running\">differs</span>"
+  }
+  if file.onDisk == "missing" {
+    return "<span class=\"state removed\" title=\"the app's directory has no such file\">missing</span>"
+  }
+  "<span class=\"state removed\" title=\"the file in the app's directory could not be read\">unread</span>"
+}
+
+/// Where the host answers an asset of this app, as a path: the whole path is
+/// the app's where it is reached by hostname, and `/<app>/…` where it is
+/// reached by path.
+///
+/// Only an asset has one — the name it takes `assets/` off is an asset's —
+/// so the caller asks this of nothing else.
+fn servedAt(app: host.App, file: host.CodeFile) -> String {
+  let prefix = assetsPrefix()
+  let within = file.name.sliceBytes(prefix.byteLength(), file.name.byteLength()).unwrapOr("")
+  if app.hosts.length() > 0 {
+    return "/{within}"
+  }
+  "/{app.name}/{within}"
+}
+
+/// Which hostname that path is on. Said rather than linked: these pages are
+/// reached by a hostname of their own, and a hostname bound to an app
+/// reaches that app with the whole path, so `/{app}/file` written from here
+/// would be a request to this app and a 404.
+fn servedOn(app: host.App) -> String {
+  match app.hosts.get(0) {
+    Some(hostname) => "<code>{h(hostname)}</code>"
+    None => "whichever hostname reaches the host's apps by path"
+  }
+}
+
+/// What the version the app is running is made of: its `app.toml`, its
+/// `.cove` files at any depth and its `assets/` — the whole of what a deploy
+/// carries — or, with `?file=`, one file's text.
+///
+/// What is shown is what is **running**: the code is the source map the app
+/// was compiled with and the assets are the bytes the host serves, both held
+/// since the app was loaded, so neither can disagree with the version above.
+/// `app.toml` is the exception — the load keeps only what it parsed to — and
+/// is read from the app's directory.
+fn codePage(base: String, app: host.App, request: web.Request) -> String {
+  let file = request.query.get("file").unwrapOr("")
+  if file != "" {
+    return codeFilePage(base, app, file)
+  }
+  let at = appAt(base, app)
+  // One more than the page, to know whether there are more.
+  let size = codePageSize()
+  let found = host.code(app.name, size + 1)
+  var rows = Vector.of()
+  var at_ = 0
+  var differing = 0
+  for entry in found {
+    if at_ < size {
+      let link = "{at}/code?file={text.urlEncode(entry.name)}"
+      rows.push(
+        "<tr><td class=title data-label=file><a href=\"{h(link)}\"><code>{h(entry.name)}</code></a></td><td data-label=what>{codeKind(entry)}</td><td class=nums data-label=size>{text.bytes(entry.bytes)}</td><td data-label=\"on disk\">{onDisk(entry)}</td></tr>",
+      )
+      if entry.kind != "config" && entry.onDisk != "same" {
+        differing = differing + 1
+      }
+    }
+    at_ = at_ + 1
+  }
+  let table = if rows.length() == 0 {
+    "<p class=muted>The host has no version of this app loaded, so there is nothing it is running.</p>"
+  } else {
+    "<div class=\"scroll cardwrap\"><table class=cards><tr class=head><th>file</th><th>what</th><th>size</th><th>on disk</th></tr>{"".join(rows.freeze())}</table></div>"
+  }
+  let differs = if differing == 0 {
+    ""
+  } else {
+    let count = if differing == 1 {
+      "One file in the app's directory is not the one that is running."
+    } else {
+      "{differing} files in the app's directory are not the ones that are running."
+    }
+    "<div class=problem><b>{h(count)}</b> A deploy that was staged and not switched to, or an edit made on the machine: either way, what is below is what the host is running, and the directory holds something else.</div>"
+  }
+  let more = if at_ > size {
+    "<p class=muted>The first {size} files; this deploy has more, which this page does not show.</p>"
+  } else {
+    ""
+  }
+  layout(
+    base,
+    "apps",
+    "{app.name} code",
+    "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>code</span></h1><p class=lead>What <code>{h(app.version)}</code> is made of: its <code>app.toml</code>, its <code>.cove</code> files and its <code>assets/</code>, which is the whole of what a deploy carries. The code and the assets are the ones the host is running, held since the app was loaded; <code>app.toml</code> is read from the app's directory, because the load keeps only the settings it parsed to — which is why the app's own page can show a grant or a limit this file does not. “on disk” is how the file of the same name in the directory compares. Reading only.</p>{differs}{table}{more}",
+  )
+}
+
+/// One file of a deploy: its text, cut at what the host carries, which the
+/// page says. A file that is not UTF-8 has no text to show — a page that
+/// pretended to render a PNG would say less than this does — so where the
+/// host answers it is said instead.
+fn codeFilePage(base: String, app: host.App, name: String) -> String {
+  let at = appAt(base, app)
+  let back = "<p class=actions><a href=\"{h(at)}/code\">← every file</a></p>"
+  match host.codeFile(app.name, name) {
+    Ok(file) => {
+      let cut = if file.cut { " <span class=muted>(cut at {text.bytes(codeTextBytes())}: the whole file is {text.bytes(file.bytes)})</span>" } else { "" }
+      let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>file</th><td><code>{h(file.name)}</code></td></tr><tr><th>what</th><td>{codeKind(file)}</td></tr><tr><th>size</th><td>{text.bytes(file.bytes)}{cut}</td></tr><tr><th>on disk</th><td>{onDisk(file)}</td></tr></table></div>"
+      let body = if file.isText {
+        "<h2>{if file.cut { "The first {text.bytes(codeTextBytes())}" } else { "The file" }}</h2><pre class=code>{h(file.text)}</pre>"
+      } else if file.kind == "asset" {
+        "<h2>Not text</h2><p class=muted>Not UTF-8, so there is no text of it to show. The host answers this file itself, at <code>{h(servedAt(app, file))}</code> on {servedOn(app)}, where a browser shows it as it is.</p>"
+      } else {
+        // Only an asset is meant not to be text. A `.cove` file that is not
+        // could not have compiled, and an `app.toml` that is not could not
+        // have been read — so this is the app's page saying why it is
+        // refused, from the other end.
+        "<h2>Not text</h2><p class=muted>Not UTF-8, which for this file is not a kind of file but a fault: the host reads it as text or does not load the app at all.</p>"
+      }
+      layout(
+        base,
+        "apps",
+        "{app.name} code",
+        "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>file</span></h1>{facts}{body}{back}",
+      )
+    }
+    Err(error) => layout(
+      base,
+      "apps",
+      "{app.name} code",
+      "{crumb(base, app, "code")}<h1>{h(app.name)} <span class=muted>file</span></h1><div class=problem><b>Not read.</b> The host said:<pre>{h(error.message)}</pre></div>{back}",
     )
   }
 }
