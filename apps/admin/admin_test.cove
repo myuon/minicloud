@@ -199,14 +199,23 @@ test fn saysWhenTheFileOnDiskIsNotTheOneRunning() -> Result<Unit, Error> {
 
 /// A row of the tree is the item it opens: the name is the last part of the
 /// path, the whole path is where the link points and what it is titled, and
-/// what the file is and what it comes to are beside the name.
+/// what the file is and what it comes to are beside the name, each in a
+/// column the stylesheet can line up with the rows above and below.
 test fn opensAnItemForEachRowOfTheTree() -> Result<Unit, Error> {
   let top = codeRow("/apps/notes", aRow("app.toml", "app.toml", 0, "config"))
-  assert(top.startsWith("<li>"))?
+  // The name and what is beside it are one row inside the item, because the
+  // item also holds the list of what is under a directory.
+  assert(top.startsWith("<li><span class=row>"))?
   assert(top.contains("code?file=app.toml"))?
-  // What the table had in columns is beside the name now.
+  // What the table had in columns is beside the name now — and is named, so
+  // the stylesheet can hold each to a width of its own.
   assert(top.contains("configuration"))?
   assert(top.contains("1.0 KiB"))?
+  assert(top.contains("<span class=what>"))?
+  assert(top.contains("<span class=size>1.0 KiB</span>"))?
+  assert(top.contains("<span class=disk>"))?
+  // The row closes and the item does not: the row is the name's line.
+  assert(top.endsWith("</span>"))?
   let under = codeRow("/apps/notes", aRow("text/text.cove", "text.cove", 1, "cove"))
   assert(under.contains("title=\"text/text.cove\""))?
   assert(under.contains("code?file=text%2Ftext.cove"))?
@@ -216,10 +225,14 @@ test fn opensAnItemForEachRowOfTheTree() -> Result<Unit, Error> {
   // A directory is not a link — there is no file of it to show — and it
   // says so where a file says what it is.
   let dir = codeRow("/apps/notes", aRow("assets", "assets", 0, "dir"))
-  assert(dir.startsWith("<li class=dir>"))?
+  assert(dir.startsWith("<li class=dir><span class=row>"))?
   assert(dir.contains("<code>assets/</code>"))?
   assert(!dir.contains("href"))?
   assert(dir.contains("directory"))?
+  // A directory has nothing on disk to differ from, so the column is empty
+  // rather than gone: a column that comes and goes is one that never lines
+  // up with the rows around it.
+  assert(dir.contains("<span class=disk></span>"))?
   // The item is left open: what is under a directory goes inside it.
   assert(!dir.contains("</li>"))?
   Ok(())

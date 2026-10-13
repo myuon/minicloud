@@ -534,18 +534,28 @@ fn servedOn(app: host.App) -> String {
 ///
 /// What the file is, what it comes to and how the directory's copy compares
 /// are beside the name rather than in columns of their own — the tree is the
-/// shape here, and a column is what cost it the nesting.
+/// shape here, and a column is what cost it the nesting. They are **named**
+/// here all the same, `what`, `size` and `disk`, so the stylesheet can hold
+/// each to a width and line them up down the page: a list of sizes that does
+/// not line up is a list nobody reads down. A directory has nothing on disk
+/// to differ from, so its `disk` is empty and keeps the column open.
+///
+/// The name and what is beside it are one `row` inside the item, because the
+/// item also holds the list of what is under a directory, and a row that is
+/// the whole item would take that list into it.
 ///
 /// The name shown is the last part of it, since the parts above are the rows
 /// above; the whole path is the link's `title`, where it is still readable
 /// and still escaped. A directory is not a link: the host has no text of one
 /// to answer, so there is nothing for it to point at.
 fn codeRow(at: String, file: host.CodeFile) -> String {
+  let disk = if file.kind == "dir" { "" } else { onDisk(file) }
+  let meta = "<span class=meta><span class=what>{codeKind(file)}</span><span class=size>{text.bytes(file.bytes)}</span><span class=disk>{disk}</span></span>"
   if file.kind == "dir" {
-    return "<li class=dir><code>{h(file.label)}/</code> <span class=meta>{codeKind(file)} · {text.bytes(file.bytes)}</span>"
+    return "<li class=dir><span class=row><code>{h(file.label)}/</code> {meta}</span>"
   }
   let link = "{at}/code?file={text.urlEncode(file.name)}"
-  "<li><a href=\"{h(link)}\" title=\"{h(file.name)}\"><code>{h(file.label)}</code></a> <span class=meta>{codeKind(file)} · {text.bytes(file.bytes)} · {onDisk(file)}</span>"
+  "<li><span class=row><a href=\"{h(link)}\" title=\"{h(file.name)}\"><code>{h(file.label)}</code></a> {meta}</span>"
 }
 
 /// The rows as a tree: a list inside the item that holds it, which is what
@@ -635,7 +645,7 @@ fn codePage(base: String, app: host.App, request: web.Request) -> String {
   let tree = if shown.length() == 0 {
     "<p class=muted>The host has no version of this app loaded, so there is nothing it is running.</p>"
   } else {
-    "<div class=panel>{codeTree(at, shown.freeze())}</div>"
+    "<div class=\"panel tree\">{codeTree(at, shown.freeze())}</div>"
   }
   let differs = if differing == 0 {
     ""
