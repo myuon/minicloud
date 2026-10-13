@@ -40,6 +40,7 @@ pub mod cron;
 pub mod defer;
 pub mod deploy;
 pub mod fetch;
+pub mod highlight;
 pub mod histogram;
 pub mod hosts;
 pub mod internal;

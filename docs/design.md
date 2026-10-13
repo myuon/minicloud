@@ -372,6 +372,77 @@ A refused app was never compiled and so has no source map: what is
 deployed, for it, is its `app.toml` and whatever the host read of its
 assets. That is the file somebody looking at a refusal came for anyway.
 
+**The listing is a tree, and the host is what nests it** (issue 100). The
+names carry the structure already — `text/text.cove`, `assets/img/icon.svg`
+— and a flat list of paths makes the reader do the nesting in their head. So
+`code.rs` puts a row where a directory begins and says, for every row, how
+deep it is; the page indents by the depth it is told and decides nothing.
+Grouping a flat list of paths is a sort and a walk, which Cove can do and
+awkwardly, and the host sorted them in the first place. One pass over the
+names is enough because the order they are already in puts every file of a
+directory next to the others in it, and that order is the one there is a
+reason to read in: `app.toml` first because it decides what the app may do,
+then the code, then the assets. There is **no collapsing**, because the CSP
+is `default-src 'none'` and that is not what to spend it on; a deploy is
+bounded and small, and all of it indented is the whole feature. A directory
+row says what the files under it come to, so "how large is `assets/`" needs
+no column added up.
+
+**A file's text is coloured by the host, and `.cove` by the real lexer.**
+The same CSP means no highlighter runs in the browser, so the colouring is
+server-side: `highlight.rs` cuts a file into pieces, the page wraps each in
+a `<span>` with a class and `assets/style.css` colours it. For `.cove` that
+is `cove_syntax::lexer::lex_recovered` — **the lexer the host compiled the
+file with** — so a colour cannot disagree with what the host runs, and the
+first time the language gains a keyword or a literal this gains it too. A
+hand-written approximation would have been wrong from that moment and gone
+on looking right. Its diagnostics are ignored and its tokens are used: a
+file that does not lex is exactly the file somebody is looking at.
+
+**The gaps between the token spans are walked**, and that is not a detail.
+The lexer keeps a `///` as a token and **drops every other comment**,
+recording only that a line break happened — so an ordinary `//` is not a
+token at all and lives between two spans. Walking the gaps is how it gets
+coloured, and it has a second effect worth more than the first: because the
+text between two spans is emitted whatever is in it, **no byte of the file
+is dropped**, including whatever a lexical error made the lexer skip. The
+test that matters most is that the pieces concatenated are the file, byte
+for byte, and it is run over the files this repository ships as well as over
+written-out cases. The languages with no lexer to borrow have scanners
+written the same way — TOML for `app.toml`, which is the file people come to
+read, and CSS and XML for the assets that are text — each either recognising
+the run in front of it or stepping one byte into the plain run between, so
+each keeps the same property for free. **A file no scanner claims is shown
+plain**, and the page says so: a colouring guessed from a name is a claim
+about the file, and none is no claim.
+
+**The host answers pieces and never HTML.** Every other value these pages
+show goes through the admin app's `escapeHtml`, and a file's own text is the
+value likeliest to *be* markup — a comment holding `<img src=y>`, a string
+literal holding `<script>`. A host that returned `<span>`s would split the
+escaping between the two sides of the boundary and leave the page unable to
+check its own. So `host.CodePiece` is a kind and a run of the file's bytes,
+the page puts every one of them through `h`, and the class names live in the
+page beside the stylesheet that colours them. The vocabulary is nine kinds
+for four languages — `plain`, `keyword`, `type`, `ident`, `string`,
+`number`, `comment`, `doc`, `punct` — because a kind is a *role*: a Cove
+type, a CSS selector and an XML tag all want the colour of "the name the
+language gives meaning to". A kind the page has no colour for is its text
+and no element at all, which is how the host may grow one.
+
+**The colouring has a limit, and it is said.** The limit is on *pieces*
+rather than bytes, because a piece is what the page carries — a `<span>`
+with a class, for each of them — and bytes are a poor guess at how many
+there will be: runs of one kind are joined, so this repository's longest
+file is 58 KiB and 6,500 pieces while the same length of nothing but
+alternating operators and names would be twenty times that. Past 20,000 a
+file is shown plain. A file whose text was **cut** is not coloured either,
+whatever it is: the pieces of half a file would say the rest of it is
+whatever the cut fell inside — an unclosed string literal colours everything
+after it — which is a page making a claim about a part of the file it is not
+showing. Each of the three reasons is said on the page rather than left to
+look like a file with nothing in it worth colouring.
+
 ### Reading an app's SQL store
 
 The state of an app like `watch` or `aidaily` is in its `sql` store, and

@@ -5,7 +5,8 @@ use host
 /// its arguments in the query, its answer as text: `/apps`,
 /// `/capabilities`, `/history?n=`, `/kv?app=&prefix=&after=&n=`,
 /// `/kvValue?app=&key=`, `/logs?app=&n=`, `/code?app=&n=`,
-/// `/codeFile?app=&file=`, `/sqlTables?app=`, `/sqlQuery?app=&q=`,
+/// `/codeFile?app=&file=`, `/codePieces?app=&file=`,
+/// `/sqlTables?app=`, `/sqlQuery?app=&q=`,
 /// `/queues?app=`, `/queueMessages?app=&n=`, `/queueDead?app=&n=`,
 /// `/queueMessage?app=&id=`,
 /// `/enable?app=&on=`,
@@ -55,13 +56,29 @@ export fn handle(request: web.Request) -> web.Response {
     var lines = Vector.of()
     let n = Int.parse(query.get("n").unwrapOr("100")).unwrapOr(100)
     for file in host.code(app, n) {
-      lines.push("{file.name} | {file.kind} | {file.bytes} | {file.isText} | {file.onDisk}")
+      lines.push("{file.name} | {file.kind} | {file.bytes} | {file.isText} | {file.onDisk} | {file.depth} | {file.label}")
     }
     return answer(200, "\n".join(lines.freeze()))
   }
   if request.path == "/codeFile" {
     return match host.codeFile(app, query.get("file").unwrapOr("")) {
       Ok(file) => answer(200, "{file.name} | {file.bytes} | {file.isText} | {file.cut} | {file.onDisk}\n{file.text}")
+      Err(error) => answer(404, error.message)
+    }
+  }
+  // The pieces one file's text is coloured by, in a form a test can take
+  // apart and put back together: each is `kind`, a NUL, its text, a NUL, so
+  // that a piece holding a newline or a `|` is still one piece.
+  if request.path == "/codePieces" {
+    return match host.codeFile(app, query.get("file").unwrapOr("")) {
+      Ok(file) => {
+        var out = Vector.of()
+        out.push("{file.plain} | {file.pieces.length()}\n")
+        for piece in file.pieces {
+          out.push("{piece.kind}\0{piece.text}\0")
+        }
+        answer(200, "".join(out.freeze()))
+      }
       Err(error) => answer(404, error.message)
     }
   }

@@ -28,7 +28,7 @@ in [docs/design.md, Administering apps at run time](../../docs/design.md#adminis
 | `POST /apps/<app>/configure` | the grant (`cap.<name>` checkboxes), the allowlist (`allow`, one per line) and every limit (`maxHostCalls`, `deadlineMs`, `maxHeapWords`, `maxInFlight`, `maxQueued`, `maxRequestBytes`, `maxResponseBytes`) |
 | `POST /apps/<app>/reset` | drops the changes made here, back to `app.toml` |
 | `GET /apps/<app>/kv` | a page of the app's store: 50 keys at a time (`prefix` to narrow, `after` to go on), each value cut to a line; `?key=<key>` is one key, its value whole. **Reading only** — nothing here writes to another app's store |
-| `GET /apps/<app>/code` | what the version it is running is made of: its `app.toml` first, then its `.cove` files at any depth, then its `assets/` — each with its size and how the file of the same name in the app's directory compares; `?file=<name>` is one file's text, cut past 128 KiB, which the page says. **Reading only** |
+| `GET /apps/<app>/code` | what the version it is running is made of, as a tree: its `app.toml` first, then its `.cove` files at any depth, then its `assets/` — each row with its size and how the file of the same name in the app's directory compares, indented by the depth the host gave it; `?file=<name>` is one file's text, syntax-coloured, cut past 128 KiB, which the page says. **Reading only** |
 | `GET /apps/<app>/sql` | the app's SQL store: its tables and how many rows each has (`not counted` where counting ran out of the time); `?q=<statement>` runs that one statement and shows the answer as a table. At most 200 rows — more is an error naming the limit, not the first 200 shown as the whole — and 1000 ms. `NULL` and the empty string are written apart. **Reading only** — a statement that writes is refused, and nothing typed here is kept in the history |
 | `GET /apps/<app>/queues` | the app's queues: each one its `[[queues]]` declares, with what is **due** (the next delivery tick may take it), what is **held** (its due time is ahead — a delivery's lease, or a failed delivery waiting for its retry; the store keeps one due time for both) and how many dead letters it has, beside the settings the host delivers it by; then the messages waiting, what is due first, with their tries and when each is next due; then the dead letters, newest first, with why each was buried. `?message=<id>` is one message, its body whole (cut past 64 KiB, which the page says) — a listing cuts a body to the column, and a queue's body is a payload. At most 200 of each are listed and the counts above them are whole, so a page that is showing the first 200 says so. **Reading only** — the window leases nothing and counts no attempt, so a queue somebody looks at is delivered exactly as it would have been, and putting a dead letter back is `minicloud queues <app> --revive <id>` on the machine |
 | `GET /apps/<app>/logs` | the last lines the app logged and the host said of it, oldest first, with their level; `?n=` how many (1–1000, 200 by default). The ring is in memory, so a restart empties it |
@@ -39,8 +39,9 @@ in [docs/design.md, Administering apps at run time](../../docs/design.md#adminis
 
 The secret store and what a change to it does are in
 [docs/design.md, Secrets set at run time](../../docs/design.md#secrets-set-at-run-time);
-the code window, and why it shows what is in memory rather than what is on
-disk, is in
+the code window — why it shows what is in memory rather than what is on
+disk, why the host nests the tree and colours the text, and why it answers
+pieces rather than HTML — is in
 [docs/design.md, Seeing the code that is deployed](../../docs/design.md#seeing-the-code-that-is-deployed);
 the SQL window, and why it reads through the store the app has open, is in
 [docs/design.md, Reading an app's SQL store](../../docs/design.md#reading-an-apps-sql-store);
