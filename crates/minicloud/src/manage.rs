@@ -260,6 +260,34 @@ pub(crate) struct QueueInfo {
     pub max_body_bytes: u64,
 }
 
+/// One line of some app's log, with the app it came from.
+///
+/// The app is on the line and not on the call because the host's whole log
+/// is one sequence: a page that mixes two apps' lines has to say which app
+/// each came from, and a page that shows one app's has the name already and
+/// draws no column for it.
+pub(crate) struct AppLine {
+    pub app: String,
+    /// Milliseconds since the epoch, as [`crate::logs::Line`] read it; 0 for
+    /// a line it could not read.
+    pub at_ms: u64,
+    pub level: String,
+    pub text: String,
+}
+
+/// Every app's log as one sequence, and who has one.
+pub(crate) struct AllLogs {
+    /// Every app whose ring holds a line, in load order.
+    ///
+    /// This is not "the apps in `lines`": an app that logged an hour ago is
+    /// here even when nothing of its is in the window, because the page
+    /// offers these as the way to each app's own log and a way in that comes
+    /// and goes with `?n=` is not a way in.
+    pub apps: Vec<String>,
+    /// The last lines, oldest first.
+    pub lines: Vec<AppLine>,
+}
+
 /// One key of an app's store, as the admin app sees it.
 pub(crate) struct KvRow {
     pub key: String,
@@ -645,6 +673,66 @@ impl Front {
             .slot_named(app)
             .map(|slot| slot.logs.tail_lines(n))
             .unwrap_or_default()
+    }
+
+    /// Every app's log as one sequence, the last `n` lines of it, oldest
+    /// first (issue #108).
+    ///
+    /// **"The last `n`" is the last `n` of the host's whole log**, and not a
+    /// sample of each app's: every line of the host's log is a line of some
+    /// app's, so the newest `n` across the host are all among the newest `n`
+    /// of the apps they came from. Taking `n` from each ring and cutting the
+    /// merge back to `n` is therefore exactly those lines, however many apps
+    /// there are.
+    ///
+    /// Which means **one app that is talking fills the page**, and the
+    /// others' lines fall off the end. That is what the last `n` lines of a
+    /// log *are*; the page's `?n=` is how to see past the talking, and an
+    /// app's own Logs is how to read it alone. The alternative — `n` lines
+    /// from each app, kept — is a page whose top line is a different time
+    /// per app, which is not one sequence and is the thing this answers.
+    ///
+    /// A line [`crate::logs::Line`] could not read has no time of its own
+    /// (`at_ms` 0). It is never dropped: a log that loses lines is the worst
+    /// thing this could do. It is not sorted to the epoch either, which
+    /// would bury it under everything and cut it first — it is ordered by
+    /// the line before it in its own ring, which is where the ring put it,
+    /// and it still says 0, because that is all that is known about it.
+    pub(crate) fn all_logs(&self, n: usize) -> AllLogs {
+        let mut apps = Vec::new();
+        // The sort key beside the line: the line's own time, or the last one
+        // before it in the same ring.
+        let mut keyed: Vec<(u64, AppLine)> = Vec::new();
+        for slot in self.engine.slots() {
+            let tail = slot.logs.tail_lines(n);
+            if tail.is_empty() {
+                continue;
+            }
+            apps.push(slot.name.clone());
+            let mut last = 0;
+            for line in tail {
+                if line.at_ms != 0 {
+                    last = line.at_ms;
+                }
+                keyed.push((
+                    last,
+                    AppLine {
+                        app: slot.name.clone(),
+                        at_ms: line.at_ms,
+                        level: line.level,
+                        text: line.text,
+                    },
+                ));
+            }
+        }
+        // Stable, so two apps that logged in the same millisecond stay in
+        // load order and a reload of the page is the same page.
+        keyed.sort_by_key(|(at, _)| *at);
+        let over = keyed.len().saturating_sub(n);
+        AllLogs {
+            apps,
+            lines: keyed.drain(over..).map(|(_, line)| line).collect(),
+        }
     }
 
     /// Records a change refused before anything was tried.

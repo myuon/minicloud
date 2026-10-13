@@ -1,0 +1,7 @@
+# The app the log tests are run on (issue #108): it says whatever it is
+# given, as often as it is asked to, so a test can write the line it wants
+# to read back and can make one app talk over the others.
+grant = ["log"]
+
+[limits]
+max_host_calls = 2000
