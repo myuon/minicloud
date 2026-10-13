@@ -6,6 +6,8 @@ use host
 /// `/capabilities`, `/history?n=`, `/kv?app=&prefix=&after=&n=`,
 /// `/kvValue?app=&key=`, `/logs?app=&n=`, `/code?app=&n=`,
 /// `/codeFile?app=&file=`, `/sqlTables?app=`, `/sqlQuery?app=&q=`,
+/// `/queues?app=`, `/queueMessages?app=&n=`, `/queueDead?app=&n=`,
+/// `/queueMessage?app=&id=`,
 /// `/enable?app=&on=`,
 /// `/configure?app=&grant=&allow=&hostcalls=&…` and `/reset?app=`; and `/origin`,
 /// what the app is told of how it was reached.
@@ -92,6 +94,35 @@ export fn handle(request: web.Request) -> web.Response {
       Err(error) => answer(404, error.message)
     }
   }
+  if request.path == "/queues" {
+    var lines = Vector.of()
+    for queue in host.queues(app) {
+      lines.push(
+        "{queue.name} | {queue.path} | due={queue.due} held={queue.held} dead={queue.dead} | declared={queue.declared} | depth={queue.maxDepth} attempts={queue.maxAttempts} retry={queue.retryMs} lease={queue.leaseMs} batch={queue.batch} body={queue.maxBodyBytes}",
+      )
+    }
+    return answer(200, "\n".join(lines.freeze()))
+  }
+  if request.path == "/queueMessages" {
+    var lines = Vector.of()
+    for one in host.queueMessages(app, Int.parse(query.get("n").unwrapOr("50")).unwrapOr(50)) {
+      lines.push(queued(one))
+    }
+    return answer(200, "\n".join(lines.freeze()))
+  }
+  if request.path == "/queueDead" {
+    var lines = Vector.of()
+    for one in host.queueDead(app, Int.parse(query.get("n").unwrapOr("50")).unwrapOr(50)) {
+      lines.push(queued(one))
+    }
+    return answer(200, "\n".join(lines.freeze()))
+  }
+  if request.path == "/queueMessage" {
+    return match host.queueMessage(app, Int.parse(query.get("id").unwrapOr("0")).unwrapOr(0)) {
+      Ok(one) => answer(200, queued(one))
+      Err(error) => answer(404, error.message)
+    }
+  }
   if request.path == "/logs" {
     var lines = Vector.of()
     for line in host.logs(app, Int.parse(query.get("n").unwrapOr("50")).unwrapOr(50)) {
@@ -112,6 +143,12 @@ export fn handle(request: web.Request) -> web.Response {
     }
   }
   answer(404, "no such operation")
+}
+
+/// One message of a queue, waiting or buried: the same line either way, so
+/// a test can see that `why` is empty for one that is still waiting.
+fn queued(one: host.QueueMessage) -> String {
+  "{one.id} | {one.queue} | {one.state} | attempts={one.attempts} | {one.body} | bytes={one.bytes} cut={one.cut} | due={one.dueMs} sent={one.sentMs} buried={one.buriedMs} | {one.why}"
 }
 
 fn describe(info: host.App) -> String {

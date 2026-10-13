@@ -18,6 +18,10 @@
 //! | `host.kvValue(app, key)` | `Result<host.KvEntry, Error>`: one key, its value cut past [`crate::kv::READ_VALUE_CHARS`]; an `Err` when the app has no such key |
 //! | `host.sqlTables(app)` | `Array<host.SqlTable>`: the tables of the app's SQL store and how many rows each holds — read only, and empty for an app with no store |
 //! | `host.sqlQuery(app, statement)` | `Result<host.SqlAnswer, Error>`: one statement that only reads, against that store, under the window's own limits ([`crate::sql::PEEK_ROWS`] and the rest); an `Err` for a statement that writes, one the store refuses, or an app with no store |
+//! | `host.queues(app)` | `Array<host.Queue>`: each queue the app declares (`[[queues]]`) with what is due, what is held and how many dead letters it has, and the settings the host delivers it by; after them, any queue the store holds messages for that the app no longer declares |
+//! | `host.queueMessages(app, limit)` | `Array<host.QueueMessage>`: the messages still on those queues, what is due first, at most `limit` (0–[`crate::queue::PEEK_MESSAGES`]) — a read that leases nothing |
+//! | `host.queueDead(app, limit)` | `Array<host.QueueMessage>`: the dead letters, newest buried first, each with `why`; at most `limit` as above |
+//! | `host.queueMessage(app, id)` | `Result<host.QueueMessage, Error>`: one of them whole, its body cut past [`crate::queue::READ_BODY_CHARS`]; an `Err` for an id no queue of the app holds |
 //! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
 //! | `host.setEnabled(app, enabled, who)` | `Result<String, Error>`: routes to the app again, or stops; nothing is reloaded |
 //! | `host.configure(app, settings, who)` | `Result<String, Error>`: the app's grant, allowlist and limits become `settings`, if the app loads with them |
@@ -50,8 +54,9 @@ use crate::code::CodeFile;
 use crate::config::{LimitsFile, ADMIN_CAPABILITY};
 use crate::hosts::{AppContext, HostModule, PendingWork};
 use crate::logs::Line;
-use crate::manage::{AppInfo, KvRow, SecretInfo, Settings, Via};
+use crate::manage::{AppInfo, KvRow, QueueInfo, SecretInfo, Settings, Via};
 use crate::overrides::{Change, Control};
+use crate::queue::Peeked;
 use crate::sql::{Answer as SqlAnswer, Table as SqlTable};
 
 const STR: HostType = HostType::String;
@@ -181,6 +186,30 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             "sqlQuery",
             &[STR, STR],
             HostType::Result(&HostType::Named("host.SqlAnswer"), &HostType::Error),
+            Effect::Read,
+        ),
+        op(
+            "queues",
+            &[STR],
+            HostType::Array(&HostType::Named("host.Queue")),
+            Effect::Read,
+        ),
+        op(
+            "queueMessages",
+            &[STR, INT],
+            HostType::Array(&HostType::Named("host.QueueMessage")),
+            Effect::Read,
+        ),
+        op(
+            "queueDead",
+            &[STR, INT],
+            HostType::Array(&HostType::Named("host.QueueMessage")),
+            Effect::Read,
+        ),
+        op(
+            "queueMessage",
+            &[STR, INT],
+            HostType::Result(&HostType::Named("host.QueueMessage"), &HostType::Error),
             Effect::Read,
         ),
     ],
@@ -347,6 +376,76 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 "values",
                 HostType::Array(&HostType::Option(&HostType::String)),
             )],
+        },
+        // One queue of an app ([`crate::queue`]), with its counts whole:
+        // what the listing below shows is at most
+        // [`crate::queue::PEEK_MESSAGES`] of them, so a page needs the
+        // numbers from somewhere that is not the listing.
+        TypeSchema {
+            name: "Queue",
+            cases: &[],
+            fields: &[
+                field("name", STR),
+                // Where a message is delivered, below the app's prefix; ""
+                // for a queue the app no longer declares.
+                field("path", STR),
+                // Messages the next delivery tick may take.
+                field("due", INT),
+                // Messages whose due time is still ahead: a delivery's
+                // lease, or a failed delivery waiting for its retry. One
+                // `due` column carries both, so the host cannot say which,
+                // and neither does the page.
+                field("held", INT),
+                field("dead", INT),
+                // Whether the app's `[[queues]]` still declares it. A queue
+                // taken out of `app.toml` keeps what was on it and nothing
+                // will deliver it; its settings below are 0.
+                field("declared", HostType::Bool),
+                field("maxDepth", INT),
+                field("maxAttempts", INT),
+                // Milliseconds, as every other duration this module
+                // carries, though `[[queues]]` is written in seconds.
+                field("retryMs", INT),
+                field("leaseMs", INT),
+                field("batch", INT),
+                field("maxBodyBytes", INT),
+            ],
+        },
+        // One message of a queue, waiting or buried.
+        //
+        // The two are one type, with `why` and `buriedMs` empty for a
+        // message still on the queue: a `TypeSchema`'s `cases` are names and
+        // carry no payload, so "waiting, or buried with this reason" cannot
+        // be said as one type whichever way it is cut, and two types would
+        // be eleven fields written twice for a difference of two. `state` says
+        // which a message is, so nothing has to be inferred from an empty
+        // `why`.
+        TypeSchema {
+            name: "QueueMessage",
+            cases: &[],
+            fields: &[
+                field("id", INT),
+                field("queue", STR),
+                // The body, cut to [`crate::queue::PEEK_BODY_CHARS`].
+                field("body", STR),
+                // The whole body's length in bytes.
+                field("bytes", INT),
+                // Whether `body` is shorter than the whole.
+                field("cut", HostType::Bool),
+                // Deliveries tried, the one in flight counted: the host
+                // counts a try when it leases the message.
+                field("attempts", INT),
+                // `due`, `held` or `dead`.
+                field("state", STR),
+                // When it may next be tried. For a dead letter, the due
+                // time it had when it was buried, which is past.
+                field("dueMs", INT),
+                field("sentMs", INT),
+                // Why it was buried; "" unless `state` is `dead`.
+                field("why", STR),
+                // When it was buried; 0 unless `state` is `dead`.
+                field("buriedMs", INT),
+            ],
         },
         TypeSchema {
             name: "LogLine",
@@ -554,6 +653,49 @@ fn sql_answer_value(answer: SqlAnswer) -> Value {
                     )
                 })),
             ),
+        ],
+    )
+}
+
+fn queue_value(queue: QueueInfo) -> Value {
+    Value::structure(
+        "host.Queue",
+        vec![
+            ("name", Value::string(queue.name)),
+            ("path", Value::string(queue.path)),
+            ("due", Value::int(queue.due)),
+            ("held", Value::int(queue.held)),
+            ("dead", Value::int(queue.dead)),
+            ("declared", Value::bool(queue.declared)),
+            ("maxDepth", Value::int(queue.max_depth)),
+            ("maxAttempts", int(queue.max_attempts)),
+            ("retryMs", int(queue.retry_ms)),
+            ("leaseMs", int(queue.lease_ms)),
+            ("batch", int(queue.batch)),
+            ("maxBodyBytes", int(queue.max_body_bytes)),
+        ],
+    )
+}
+
+/// One message of a queue. The store keeps a `due` and a `sent` in seconds,
+/// where this module says every time in milliseconds — `atMs` on a log line
+/// and on a change — so they are carried as milliseconds and the page's own
+/// clock needs nothing of its own.
+fn queue_message_value(message: Peeked) -> Value {
+    Value::structure(
+        "host.QueueMessage",
+        vec![
+            ("id", Value::int(message.id)),
+            ("queue", Value::string(message.queue)),
+            ("body", Value::string(message.body)),
+            ("bytes", Value::int(message.bytes)),
+            ("cut", Value::bool(message.cut)),
+            ("attempts", Value::int(message.attempts)),
+            ("state", Value::string(message.state)),
+            ("dueMs", int(message.due_unix.saturating_mul(1000))),
+            ("sentMs", int(message.sent_unix.saturating_mul(1000))),
+            ("why", Value::string(message.why)),
+            ("buriedMs", int(message.buried_unix.saturating_mul(1000))),
         ],
     )
 }
@@ -830,6 +972,56 @@ impl HostApi for AdminHost {
                 // them.
                 Ok(match front.app_sql_query(text(0), text(1)) {
                     Ok(answer) => Value::ok(sql_answer_value(answer)),
+                    Err(why) => Value::err(Value::error(why)),
+                })
+            }
+            "queues" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                let queues = front
+                    .app_queues(app)
+                    .map_err(|why| RuntimeError::new(format!("admin: queue: {why}")))?;
+                Ok(Value::array(queues.into_iter().map(queue_value)))
+            }
+            // Both listings are bounded by the window's own limit, not by
+            // what the page asks for: a queue's `max_depth` is the app's and
+            // may be thousands.
+            "queueMessages" | "queueDead" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                let limit = args
+                    .get(1)
+                    .and_then(Value::as_int)
+                    .unwrap_or(0)
+                    .clamp(0, crate::queue::PEEK_MESSAGES);
+                let found = if op == "queueDead" {
+                    front.app_queue_dead(app, limit)
+                } else {
+                    front.app_queue_messages(app, limit)
+                };
+                let found =
+                    found.map_err(|why| RuntimeError::new(format!("admin: queue: {why}")))?;
+                Ok(Value::array(found.into_iter().map(queue_message_value)))
+            }
+            "queueMessage" => {
+                let front = control
+                    .front()
+                    .ok_or_else(|| RuntimeError::new("admin: the host is shutting down"))?;
+                let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                let id = args.get(1).and_then(Value::as_int).unwrap_or(0);
+                Ok(match front.app_queue_message(app, id) {
+                    Ok(Some(message)) => Value::ok(queue_message_value(message)),
+                    // An id that is on no queue of this app's — a message
+                    // delivered since the page was drawn, or one of another
+                    // app's — is the window's `Err` and not the host's
+                    // error: it is an ordinary answer to a stale link.
+                    Ok(None) => Value::err(Value::error(format!(
+                        "no message {id} on `{app}`'s queues; it may have been delivered since"
+                    ))),
                     Err(why) => Value::err(Value::error(why)),
                 })
             }

@@ -186,7 +186,14 @@ fn appPage(
   } else {
     ""
   }
-  let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>state</th><td>{badge(app.state)}</td></tr><tr><th>version</th><td><code>{h(app.version)}</code> <span class=muted>{h(app.tier)}</span> · <a href=\"{h(at)}/code\">what it is</a></td></tr><tr><th>entry</th><td><code>{h(app.entry)}</code></td></tr><tr><th>reached</th><td>{if app.hosts.length() > 0 { "by hostname {names(app.hosts)} only" } else { "<code>/{h(app.name)}/</code>" }}</td></tr><tr><th>code requires</th><td>{names(app.required)}{if app.requiredOpen { " <span class=muted>(at least: it makes a call the checker cannot follow)</span>" } else { "" }}</td></tr><tr><th>granted</th><td>{grantList(app)}</td></tr><tr><th>fetch allowlist</th><td>{names(app.fetchAllow)}</td></tr><tr><th>requests</th><td>{app.served} served, {app.ok} ok, {app.errors} errors, {app.rejected} rejected; {app.inFlight} in flight, {app.queued} queued</td></tr><tr><th>store</th><td>{store}</td></tr>{relational}</table></div><h2>Limits</h2><div class=\"scroll narrow\"><table class=facts>{"".join(limitRows.freeze())}</table></div>"
+  // As above: an app not granted `queue` has no queue store, so there
+  // would be nothing on the other end of this.
+  let queues = if app.granted.contains("queue") {
+    "<tr><th>queues</th><td><a href=\"{h(at)}/queues\">what is waiting, held and dead</a></td></tr>"
+  } else {
+    ""
+  }
+  let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>state</th><td>{badge(app.state)}</td></tr><tr><th>version</th><td><code>{h(app.version)}</code> <span class=muted>{h(app.tier)}</span> · <a href=\"{h(at)}/code\">what it is</a></td></tr><tr><th>entry</th><td><code>{h(app.entry)}</code></td></tr><tr><th>reached</th><td>{if app.hosts.length() > 0 { "by hostname {names(app.hosts)} only" } else { "<code>/{h(app.name)}/</code>" }}</td></tr><tr><th>code requires</th><td>{names(app.required)}{if app.requiredOpen { " <span class=muted>(at least: it makes a call the checker cannot follow)</span>" } else { "" }}</td></tr><tr><th>granted</th><td>{grantList(app)}</td></tr><tr><th>fetch allowlist</th><td>{names(app.fetchAllow)}</td></tr><tr><th>requests</th><td>{app.served} served, {app.ok} ok, {app.errors} errors, {app.rejected} rejected; {app.inFlight} in flight, {app.queued} queued</td></tr><tr><th>store</th><td>{store}</td></tr>{relational}{queues}</table></div><h2>Limits</h2><div class=\"scroll narrow\"><table class=facts>{"".join(limitRows.freeze())}</table></div>"
   layout(
     base,
     "apps",
@@ -758,6 +765,235 @@ fn sqlPage(base: String, app: host.App, request: web.Request) -> String {
   }
   let back = "<p class=actions><a href=\"{h(at)}/sql\">← the tables</a></p>"
   layout(base, "apps", "{app.name} sql", "{head}{sqlLead(app)}{form}{answered}{back}")
+}
+
+// ------------------------------------------- an app's queues
+//
+// Reading only, and not by a rule of this page's: the host's window leases
+// nothing, counts no attempt and moves no due time, so a queue somebody
+// opened is delivered exactly as it would have been. `queue.lease` — the
+// only way the delivery loop sees a message — could not be used for a page
+// at all, which is why the host grew reads of its own for this.
+//
+// There is no button to put a dead letter back. That is a change, and a
+// change on these pages has a confirmation and a line in the history;
+// `minicloud queues <app> --revive <id>` on the machine has both already,
+// so the page says so rather than growing a half of one.
+
+/// The most messages the host's window lists
+/// (`crate::queue::PEEK_MESSAGES`), so the page can say what it is bounded
+/// by rather than leaving somebody to find out.
+fn queueListSize() -> Int {
+  200
+}
+
+/// How much of a body a row shows, as the store's page cuts a value.
+fn queueBodyBytes() -> Int {
+  140
+}
+
+/// A duration the host carries in milliseconds, written as `[[queues]]`
+/// writes it: `30s`, or milliseconds where seconds would round.
+fn queueDuration(millis: Int) -> String {
+  if millis % 1000 == 0 {
+    return "{millis / 1000}s"
+  }
+  "{millis}ms"
+}
+
+/// What a message is, as the store can say it.
+///
+/// `held` is the one that has to be explained: a message whose due time is
+/// ahead is either a delivery holding it on lease or a failed delivery
+/// waiting for its retry, and the store keeps one `due` for both — so this
+/// says `held` rather than calling a backoff a lease.
+fn queueState(state: String) -> String {
+  if state == "due" {
+    return "<span class=\"state serving\" title=\"the next delivery tick may take it\">due</span>"
+  }
+  if state == "held" {
+    return "<span class=\"state disabled\" title=\"its due time is ahead: a delivery holding it on lease, or a failed delivery waiting for its retry. The store keeps one due time for both, so the host does not say which.\">held</span>"
+  }
+  "<span class=\"state refused\" title=\"buried as a dead letter: nothing delivers it again until somebody puts it back\">dead</span>"
+}
+
+/// A message's body in a row. A queue carries whatever an app sent — a
+/// webhook's payload, a form somebody filled in — so this is the likeliest
+/// markup on these pages and every part of it goes through `h`.
+fn queueBodyCell(message: host.QueueMessage) -> String {
+  if message.bytes == 0 {
+    return "<span class=muted title=\"the message's body is empty\">empty</span>"
+  }
+  // The host cut at its own length; a row of a table wants less again.
+  let preview = text.truncateBytes(message.body, queueBodyBytes())
+  let cut = message.cut || preview.byteLength() < message.body.byteLength()
+  if cut {
+    return "<code>{h(preview)}<span class=muted>…</span></code>"
+  }
+  "<code>{h(message.body)}</code>"
+}
+
+/// Each queue of an app with what it holds and how the host delivers it.
+///
+/// Every queue the app declares is here, a queue nothing was ever sent to
+/// included: 0 is an answer, and a missing row would read as "no such
+/// queue". A queue the store holds messages for that the app no longer
+/// declares is here too, saying so — nothing will ever deliver it.
+fn queuesTable(queues: Array<host.Queue>) -> String {
+  var rows = Vector.of()
+  for queue in queues {
+    let delivered = if queue.declared {
+      "<code>{h(queue.path)}</code>"
+    } else {
+      "<span class=\"state removed\" title=\"the app's [[queues]] no longer declares this queue, so the host delivers nothing from it\">not declared</span>"
+    }
+    let settings = if queue.declared {
+      "<span class=muted>{queue.maxAttempts} attempts, retry {h(queueDuration(queue.retryMs))} doubling, lease {h(queueDuration(queue.leaseMs))}, {queue.batch} at once, depth {queue.maxDepth}, body {text.bytes(queue.maxBodyBytes)}</span>"
+    } else {
+      "<span class=muted>–</span>"
+    }
+    rows.push(
+      "<tr><td class=title data-label=queue><code>{h(queue.name)}</code></td><td data-label=\"delivered to\">{delivered}</td><td class=nums data-label=due>{queue.due}</td><td class=nums data-label=held>{queue.held}</td><td class=nums data-label=dead>{queue.dead}</td><td class=block data-label=settings>{settings}</td></tr>",
+    )
+  }
+  "<div class=\"scroll cardwrap\"><table class=cards><tr class=head><th>queue</th><th>delivered to</th><th>due</th><th>held</th><th>dead</th><th>settings</th></tr>{"".join(rows.freeze())}</table></div>"
+}
+
+/// The whole stamp of a queue's time, not the time of day the log shows: a
+/// retry's delay doubles, so a message can be due days off, and a dead
+/// letter can be weeks old — a clock alone would read as today.
+fn queueTime(millis: Int) -> String {
+  text.isoTime(millis)
+}
+
+/// A message's id, as the way to the whole of it — the shape the store's
+/// page has for a key, and for the same reason: a listing cuts a body, and
+/// a queue's body is a payload that is often longer than the cut.
+fn queueIdLink(at: String, message: host.QueueMessage) -> String {
+  "<a href=\"{h(at)}/queues?message={message.id}\"><code>{message.id}</code></a>"
+}
+
+/// The messages still on an app's queues, what is due first — the order the
+/// host will take them in.
+fn queueMessagesTable(at: String, messages: Array<host.QueueMessage>) -> String {
+  if messages.length() == 0 {
+    return "<p class=muted>Nothing is waiting.</p>"
+  }
+  var rows = Vector.of()
+  for message in messages {
+    rows.push(
+      "<tr><td class=title data-label=id>{queueIdLink(at, message)}</td><td data-label=queue><code>{h(message.queue)}</code></td><td data-label=state>{queueState(message.state)}</td><td class=nums data-label=tries>{message.attempts}</td><td class=when data-label=\"due (UTC)\">{queueTime(message.dueMs)}</td><td class=when data-label=\"sent (UTC)\">{queueTime(message.sentMs)}</td><td class=\"value block\" data-label=body>{queueBodyCell(message)}</td></tr>",
+    )
+  }
+  "<div class=\"scroll cardwrap\"><table class=cards><tr class=head><th>id</th><th>queue</th><th>state</th><th>tries</th><th>due (UTC)</th><th>sent (UTC)</th><th>body</th></tr>{"".join(rows.freeze())}</table></div>"
+}
+
+/// The dead letters, newest buried first, each with why it was buried —
+/// which is the status and the first line the consumer answered, or that it
+/// did not answer at all.
+fn queueDeadTable(at: String, messages: Array<host.QueueMessage>) -> String {
+  if messages.length() == 0 {
+    return "<p class=muted>No dead letters.</p>"
+  }
+  var rows = Vector.of()
+  for message in messages {
+    let why = if message.why == "" { "<span class=muted>–</span>" } else { "<code>{h(message.why)}</code>" }
+    rows.push(
+      "<tr><td class=title data-label=id>{queueIdLink(at, message)}</td><td data-label=queue><code>{h(message.queue)}</code></td><td class=nums data-label=tries>{message.attempts}</td><td class=when data-label=\"buried (UTC)\">{queueTime(message.buriedMs)}</td><td class=\"value block\" data-label=why>{why}</td><td class=\"value block\" data-label=body>{queueBodyCell(message)}</td></tr>",
+    )
+  }
+  "<div class=\"scroll cardwrap\"><table class=cards><tr class=head><th>id</th><th>queue</th><th>tries</th><th>buried (UTC)</th><th>why</th><th>body</th></tr>{"".join(rows.freeze())}</table></div>"
+}
+
+/// What a listing that reached the window's limit says. The counts in the
+/// table above are whole, so the difference between them and what is listed
+/// is what this page is not showing — which is worth saying, because a page
+/// that showed 200 of 4000 as though they were all of them would be the one
+/// wrong answer here.
+fn queueMore(listed: Int, counted: Int, what: String) -> String {
+  if listed < queueListSize() {
+    return ""
+  }
+  "<p class=muted>The first {listed} {h(what)}, which is this window's limit; the counts above are whole. <code>minicloud queues</code> on the machine reads the rest.</p>"
+}
+
+/// What the page says above the tables: what the window is, and what it
+/// will not do.
+fn queuesLead(app: host.App) -> String {
+  "<p class=lead>What is on <code>{h(app.name)}</code>'s queues. <b>Reading only</b>: the host's window leases nothing and counts no attempt, so a message read here is delivered exactly as if nobody had looked, and there is nothing on this page that sends, deletes or revives one. <b>due</b> is what the next delivery tick may take, oldest sent first; <b>held</b> is a message whose due time is ahead — a delivery holding it on lease, or a failed delivery waiting for its retry — and the store keeps one due time for both, so neither the host nor this page claims to know which. At most {queueListSize()} messages are listed, and a body longer than the column is cut — the id opens it whole. A dead letter is kept until somebody deals with it: the host prunes none, so a number here that grows is work nobody has looked at. To put one back: <code>minicloud queues {h(app.name)} --revive &lt;id&gt;</code> on the machine, because reviving is a change and a change wants the confirmation and the line in the history that the forms here have.</p>"
+}
+
+/// One app's queues: each declared queue with what it holds, the messages
+/// waiting, and the dead letters — or, with `?message=`, one message whole.
+fn queuesPage(base: String, app: host.App, request: web.Request) -> String {
+  match Int.parse(request.query.get("message").unwrapOr("").trim()) {
+    Ok(id) => return queueMessagePage(base, app, id)
+    Err(_) => {}
+  }
+  let head = "{crumb(base, app, "queues")}<h1>{h(app.name)} <span class=muted>queues</span></h1>"
+  let title = "{app.name} queues"
+  let queues = host.queues(app.name)
+  if queues.length() == 0 {
+    // Two different nothings, and which it is decides what to do about it.
+    let why = if app.granted.contains("queue") {
+      "<code>{h(app.name)}</code> is granted <code>queue</code>, and its <code>app.toml</code> declares no <code>[[queues]]</code>: a queue must be declared before anything can be sent to it."
+    } else {
+      "<code>{h(app.name)}</code> is not granted <code>queue</code>: it has no queue, and the host keeps no file for it."
+    }
+    return layout(base, "apps", title, "{head}<p class=lead>{why}</p>")
+  }
+  var waiting = 0
+  var dead = 0
+  for queue in queues {
+    waiting = waiting + queue.due + queue.held
+    dead = dead + queue.dead
+  }
+  let at = appAt(base, app)
+  let messages = host.queueMessages(app.name, queueListSize())
+  let buried = host.queueDead(app.name, queueListSize())
+  layout(
+    base,
+    "apps",
+    title,
+    "{head}{queuesLead(app)}<h2>Queues</h2>{queuesTable(queues)}<h2>Waiting</h2>{queueMessagesTable(at, messages)}{queueMore(messages.length(), waiting, "of what is waiting")}<h2>Dead letters</h2>{queueDeadTable(at, buried)}{queueMore(buried.length(), dead, "dead letters")}",
+  )
+}
+
+/// The longest body one message's read carries
+/// (`crate::queue::READ_BODY_CHARS`), so that a page that was cut can say
+/// at what.
+fn queueBodyChars() -> Int {
+  65536
+}
+
+/// One message of a queue, waiting or buried: what the host knows of it,
+/// and its body whole — cut at what the host carries, which the page says.
+fn queueMessagePage(base: String, app: host.App, id: Int) -> String {
+  let at = appAt(base, app)
+  let head = "{crumb(base, app, "queues")}<h1>{h(app.name)} <span class=muted>message</span></h1>"
+  let title = "{app.name} queues"
+  let back = "<p class=actions><a href=\"{h(at)}/queues\">← every queue</a></p>"
+  match host.queueMessage(app.name, id) {
+    Ok(message) => {
+      let cut = if message.cut { " <span class=muted>(cut at {text.bytes(queueBodyChars())} of text: the whole body is {text.bytes(message.bytes)})</span>" } else { "" }
+      // A dead letter's due time is the one it had when it was buried, so
+      // showing it as "due" would be saying something untrue; the two rows
+      // it has instead are when it was buried and why.
+      let when = if message.state == "dead" {
+        "<tr><th>buried</th><td class=when>{queueTime(message.buriedMs)}</td></tr><tr><th>why</th><td><pre>{h(message.why)}</pre></td></tr>"
+      } else {
+        "<tr><th>next due</th><td class=when>{queueTime(message.dueMs)}</td></tr>"
+      }
+      let facts = "<div class=\"scroll narrow\"><table class=facts><tr><th>id</th><td><code>{message.id}</code></td></tr><tr><th>queue</th><td><code>{h(message.queue)}</code></td></tr><tr><th>state</th><td>{queueState(message.state)}</td></tr><tr><th>tries</th><td>{message.attempts}</td></tr><tr><th>sent</th><td class=when>{queueTime(message.sentMs)}</td></tr>{when}<tr><th>size</th><td>{text.bytes(message.bytes)}{cut}</td></tr></table></div>"
+      layout(base, "apps", title, "{head}{facts}<h2>Body</h2><pre>{h(message.body)}</pre>{back}")
+    }
+    Err(error) => layout(
+      base,
+      "apps",
+      title,
+      "{head}<div class=problem><b>Not read.</b> The host said:<pre>{h(error.message)}</pre></div>{back}",
+    )
+  }
 }
 
 /// The last few lines of an app's log, on the app's own page, with the

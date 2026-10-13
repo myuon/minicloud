@@ -32,6 +32,31 @@
 //! This layer never discards a dead letter by itself: how long they are kept
 //! is the caller's decision, carried out with [`Queues::prune_dead`].
 //!
+//! # The admin's window
+//!
+//! [`Queues::lease`] is the only way the delivery loop sees a message, and
+//! it is a side effect: it takes the message, counts the try and starts the
+//! lease. A page cannot be built on it. So the window the admin app opens
+//! (issue 90) has reads of its own — [`peek_depths`], [`peek_waiting`],
+//! [`peek_dead`] and [`peek_one`] — which take nothing and change nothing,
+//! and go through the store the app has open where one is open
+//! (`with_reader`, the shape [`crate::kv::peek`] and
+//! [`crate::sql::peek_tables`] have for the same job). Their limits are the
+//! window's own ([`PEEK_MESSAGES`], [`PEEK_BODY_CHARS`] and
+//! [`READ_BODY_CHARS`]): an app's `[[queues]]` is for the app, and reading
+//! its queue should not mean raising anything.
+//!
+//! **A message is `due` or it is `held`, and the store says no more than
+//! that.** `due` is the next tick's work: `lease` takes what is due, oldest
+//! sent first. `held` is a message whose `due` is still ahead — which is
+//! either a delivery holding it on lease ([`Queues::lease`] pushed `due` out
+//! by the queue's `lease`) or a failed delivery waiting for its retry
+//! ([`Queues::retry`] pushed it out by the delay). One column carries both,
+//! so nothing here can tell them apart, and the window says so rather than
+//! calling a backoff a lease. `attempts` is the useful difference: a held
+//! message with 0 attempts cannot exist, and one with 2 has been tried
+//! twice whichever of the two it is in.
+//!
 //! Error messages never carry the file path: they reach HTTP responses and
 //! logs that outsiders may read, and the data directory's layout is not
 //! theirs to learn.
@@ -40,7 +65,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 
 /// The most messages one `lease` takes.
 pub const MAX_LEASE: usize = 1000;
@@ -375,6 +402,321 @@ pub fn usage(path: &Path) -> Option<Vec<(String, i64, i64)>> {
     Some(depths)
 }
 
+// -------------------------------------------------- the admin's window
+
+/// The most messages one of the window's listings answers.
+///
+/// A page somebody reads, not a queue being drained: a queue's `max_depth`
+/// is the app's and may be thousands, and a listing is not paged. The counts
+/// beside it ([`peek_depths`]) are whole, so a page that has this many of
+/// more than this can say so, rather than letting the first 200 stand for
+/// the queue — the one wrong answer a window like this can give.
+pub const PEEK_MESSAGES: i64 = 200;
+
+/// How much of a body, or of a reason a message was buried, one row
+/// carries, in characters.
+///
+/// A body is `max_body_bytes` (64 KiB by default) and a listing holds
+/// [`PEEK_MESSAGES`] of them, so the whole of each is not what a listing is
+/// for. The same length `kv`'s listing carries of a value
+/// ([`crate::kv::PEEK_VALUE_CHARS`]), for the same reason: it is a value of
+/// an app's of the same kind, and the page cuts it again to what a column
+/// shows.
+pub const PEEK_BODY_CHARS: usize = 512;
+
+/// How much of a body one message's read carries, in characters.
+///
+/// A listing shows the start of two hundred bodies; this is one message
+/// somebody opened, and a queue carries what an app sent — a webhook's
+/// payload is routinely more than [`PEEK_BODY_CHARS`], so a window that
+/// could not show the rest of one would be answering a question with half
+/// an answer. The length `kv`'s own read carries
+/// ([`crate::kv::READ_VALUE_CHARS`]), for the same reason: the app's
+/// `max_body_bytes` may be larger still, and a browser wants an end to a
+/// `<pre>`.
+pub const READ_BODY_CHARS: usize = 64 * 1024;
+
+/// What one queue of an app holds, as the window counts it: whole counts,
+/// not a page's worth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Depth {
+    pub name: String,
+    /// Messages the next delivery tick may take: `due` at or before now.
+    pub due: i64,
+    /// Messages whose `due` is still ahead — a delivery's lease, or a failed
+    /// delivery waiting for its retry. The store keeps one `due` for both,
+    /// so this does not say which.
+    pub held: i64,
+    pub dead: i64,
+}
+
+/// One message, as the window sees it.
+///
+/// Waiting and buried are one type, with `why` and `buried_unix` empty for a
+/// message that is still on the queue. A `TypeSchema`'s cases carry no
+/// payload (`cove_runtime::TypeSchema`), so the admin module could not
+/// declare "waiting, or buried with this reason" as one type anyway; and the
+/// fields that would differ are two of eleven, against a page, a host
+/// operation and a row renderer that would be written twice. `state` says
+/// which it is, and never has to be guessed from an empty `why`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Peeked {
+    pub id: i64,
+    pub queue: String,
+    /// The body, cut to [`PEEK_BODY_CHARS`] characters in a listing and to
+    /// [`READ_BODY_CHARS`] in one message's read; `bytes` is how long the
+    /// whole of it is.
+    pub body: String,
+    pub bytes: i64,
+    /// Whether `body` is shorter than the whole.
+    pub cut: bool,
+    /// How many deliveries have been tried. `lease` counts the try it hands
+    /// out, so a message being delivered now already counts this one.
+    pub attempts: i64,
+    /// When it may next be tried, in seconds since the epoch. For a dead
+    /// letter this is the `due` it had when it was buried, which is past.
+    pub due_unix: i64,
+    pub sent_unix: i64,
+    /// `due`, `held` (see [`Depth`]) or `dead`.
+    pub state: &'static str,
+    /// Why it was buried, cut as the body is; empty unless `state` is
+    /// `dead`.
+    pub why: String,
+    /// When it was buried; 0 unless `state` is `dead`.
+    pub buried_unix: i64,
+}
+
+/// What each queue of the store at `path` holds at `now_unix`.
+///
+/// Only the queues the store has rows for: the queues an app *declares* are
+/// in its `[[queues]]`, and joining the two is the caller's (`Front`'s
+/// `app_queues`, in [`crate::manage`]), so that a queue declared and never
+/// used is shown as empty rather than missing.
+///
+/// Empty for an app with no store, which is every app not granted `queue`.
+pub fn peek_depths(path: &Path, now_unix: i64) -> Result<Vec<Depth>, String> {
+    with_reader(path, Vec::new(), |conn| {
+        let mut statement = conn.prepare(
+            "SELECT queue, sum(due), sum(held), sum(buried) FROM (
+                SELECT queue,
+                       CASE WHEN due <= ?1 THEN 1 ELSE 0 END AS due,
+                       CASE WHEN due <= ?1 THEN 0 ELSE 1 END AS held,
+                       0 AS buried
+                FROM message
+                UNION ALL
+                SELECT queue, 0, 0, 1 FROM dead
+             ) GROUP BY queue ORDER BY queue",
+        )?;
+        let rows = statement.query_map([now_unix], |row| {
+            Ok(Depth {
+                name: row.get(0)?,
+                due: row.get(1)?,
+                held: row.get(2)?,
+                dead: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    })
+}
+
+/// The messages still on the queues of the store at `path`, at most `limit`
+/// (0–[`PEEK_MESSAGES`]), every queue together.
+///
+/// What is due first, in the order [`Queues::lease`] will take it — oldest
+/// sent first — so the head of the list is the next delivery; then what is
+/// held, soonest due first, which is the order it comes back in.
+///
+/// **This takes nothing.** No `attempts` is counted and no `due` is moved,
+/// so a message read here is delivered exactly as if nobody had looked.
+pub fn peek_waiting(path: &Path, now_unix: i64, limit: i64) -> Result<Vec<Peeked>, String> {
+    let limit = limit.clamp(0, PEEK_MESSAGES);
+    with_reader(path, Vec::new(), |conn| {
+        let mut statement = conn.prepare(
+            "SELECT id, queue, substr(body, 1, ?2), attempts, due, sent, \
+                    length(body), length(CAST(body AS BLOB)) \
+             FROM message \
+             ORDER BY CASE WHEN due <= ?1 THEN 0 ELSE 1 END, \
+                      CASE WHEN due <= ?1 THEN sent ELSE due END, id \
+             LIMIT ?3",
+        )?;
+        let rows =
+            statement.query_map(params![now_unix, PEEK_BODY_CHARS as i64, limit], |row| {
+                let peeked = peeked_row(row)?;
+                Ok(Peeked {
+                    state: if peeked.due_unix <= now_unix {
+                        "due"
+                    } else {
+                        "held"
+                    },
+                    ..peeked
+                })
+            })?;
+        rows.collect()
+    })
+}
+
+/// The dead letters of the store at `path`, newest buried first, at most
+/// `limit` (0–[`PEEK_MESSAGES`]), each with why it was buried.
+///
+/// The same read [`Queues::dead`] does for `minicloud queues <app>`, with
+/// the bodies cut and the time of the burial carried: the window shows many
+/// at once where the command shows a few.
+pub fn peek_dead(path: &Path, limit: i64) -> Result<Vec<Peeked>, String> {
+    let limit = limit.clamp(0, PEEK_MESSAGES);
+    with_reader(path, Vec::new(), |conn| {
+        let mut statement = conn.prepare(
+            "SELECT id, queue, substr(body, 1, ?1), attempts, due, sent, \
+                    length(body), length(CAST(body AS BLOB)), \
+                    substr(why, 1, ?1), buried \
+             FROM dead ORDER BY buried DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![PEEK_BODY_CHARS as i64, limit], |row| {
+            // `state`, `why` and `buried` are this read's; the rest is the
+            // row every listing of a message reads.
+            Ok(Peeked {
+                state: "dead",
+                why: row.get(8)?,
+                buried_unix: row.get(9)?,
+                ..peeked_row(row)?
+            })
+        })?;
+        rows.collect()
+    })
+}
+
+/// One message of the store at `path`, waiting or buried, by id; `None`
+/// for an id neither holds.
+///
+/// Both tables are asked, because a page reaches this from either listing
+/// and an id tells the two apart by itself: ids are never reused, a dead
+/// letter keeps the id it had, and reviving moves that id back — so a
+/// message is in one table or the other and never in both.
+///
+/// The body is cut at [`READ_BODY_CHARS`] rather than the listing's length:
+/// this is the read that shows the whole of what was sent.
+pub fn peek_one(path: &Path, id: i64, now_unix: i64) -> Result<Option<Peeked>, String> {
+    with_reader(path, None, |conn| {
+        let waiting = conn
+            .query_row(
+                "SELECT id, queue, substr(body, 1, ?2), attempts, due, sent, \
+                        length(body), length(CAST(body AS BLOB)) \
+                 FROM message WHERE id = ?1",
+                params![id, READ_BODY_CHARS as i64],
+                |row| {
+                    let peeked = read_row(row)?;
+                    Ok(Peeked {
+                        state: if peeked.due_unix <= now_unix {
+                            "due"
+                        } else {
+                            "held"
+                        },
+                        ..peeked
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(found) = waiting {
+            return Ok(Some(found));
+        }
+        conn.query_row(
+            "SELECT id, queue, substr(body, 1, ?2), attempts, due, sent, \
+                    length(body), length(CAST(body AS BLOB)), \
+                    substr(why, 1, ?2), buried \
+             FROM dead WHERE id = ?1",
+            params![id, READ_BODY_CHARS as i64],
+            |row| {
+                Ok(Peeked {
+                    state: "dead",
+                    why: row.get(8)?,
+                    buried_unix: row.get(9)?,
+                    ..read_row(row)?
+                })
+            },
+        )
+        .optional()
+    })
+}
+
+/// A row of `SELECT id, queue, substr(body, …), attempts, due, sent,
+/// length(body), length(CAST(body AS BLOB))` as a listing reads it — the
+/// body cut at [`PEEK_BODY_CHARS`] — with `state` and what only a dead
+/// letter has left to the caller.
+fn peeked_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Peeked> {
+    let chars: i64 = row.get(6)?;
+    Ok(Peeked {
+        id: row.get(0)?,
+        queue: row.get(1)?,
+        body: row.get(2)?,
+        bytes: row.get(7)?,
+        cut: chars > PEEK_BODY_CHARS as i64,
+        attempts: row.get(3)?,
+        due_unix: row.get(4)?,
+        sent_unix: row.get(5)?,
+        state: "due",
+        why: String::new(),
+        buried_unix: 0,
+    })
+}
+
+/// The same row where the body was cut at [`READ_BODY_CHARS`]: only the
+/// length `cut` is measured against differs.
+fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Peeked> {
+    let chars: i64 = row.get(6)?;
+    Ok(Peeked {
+        cut: chars > READ_BODY_CHARS as i64,
+        ..peeked_row(row)?
+    })
+}
+
+/// Runs `read` on the store at `path`, reading only; `empty` when there is
+/// no file there.
+///
+/// The connection is **the app's own** where a version of the app has the
+/// store open, as [`crate::kv::peek`] and [`crate::sql::peek_tables`] do and
+/// for the same two reasons. A second connection on a WAL database reads the
+/// snapshot its transaction started with, so a message sent a moment ago
+/// would be missing from a window whose whole job is to say what is waiting;
+/// and two connections on one file take locks against each other, so a read
+/// would wait on a delivery's write or be refused as busy. The cost is the
+/// other way round — the next `lease` waits for the window's read — which is
+/// why these reads are three statements and no more.
+///
+/// A file that is not there is **no store** rather than an error:
+/// [`Queues::open`] would create one, and an app not granted `queue` must
+/// not come to have a queue store because somebody looked at it.
+fn with_reader<T>(
+    path: &Path,
+    empty: T,
+    read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> Result<T, String> {
+    let open = open_stores()
+        .lock()
+        .unwrap()
+        .get(path)
+        .and_then(Weak::upgrade);
+    let outcome = if let Some(store) = open {
+        let store = store.lock().unwrap_or_else(|p| p.into_inner());
+        read(&store.conn)
+    } else {
+        if !path.is_file() {
+            return Ok(empty);
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|_| "cannot open the queue store".to_string())?;
+        read(&conn)
+    };
+    match outcome {
+        Ok(found) => Ok(found),
+        // A file that is not a queue store of ours — nothing creates one,
+        // but a hand-made file would — has nothing waiting on it.
+        Err(e) if e.to_string().contains("no such table") => Ok(empty),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,5 +933,276 @@ mod tests {
             "{why}"
         );
         let _ = std::fs::remove_file(&blocker);
+    }
+
+    // ---------------------------------------------- the admin's window
+
+    /// An empty directory of this test's own.
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("minicloud-queue-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn bodies(found: &[Peeked]) -> Vec<&str> {
+        found.iter().map(|m| m.body.as_str()).collect()
+    }
+
+    fn states(found: &[Peeked]) -> Vec<&str> {
+        found.iter().map(|m| m.state).collect()
+    }
+
+    #[test]
+    fn the_window_says_what_is_due_apart_from_what_is_held() {
+        let dir = scratch("window");
+        let path = dir.join("queue.sqlite3");
+        {
+            let q = Queues::open(&path).unwrap();
+            send(&q, "mail", "first", T);
+            send(&q, "mail", "second", T + 1);
+            send(&q, "other", "third", T + 2);
+            // Leased: `due` is pushed out to the end of the lease, which is
+            // the only mark a delivery in flight leaves.
+            q.lease(T + 3, 1, 30).unwrap();
+        }
+        let found = peek_waiting(&path, T + 3, 10).unwrap();
+        assert_eq!(bodies(&found), ["second", "third", "first"]);
+        assert_eq!(states(&found), ["due", "due", "held"]);
+        assert_eq!((found[2].attempts, found[2].due_unix), (1, T + 33));
+        // The counts are whole and by queue, and say the same of each.
+        assert_eq!(
+            peek_depths(&path, T + 3).unwrap(),
+            vec![
+                Depth {
+                    name: "mail".into(),
+                    due: 1,
+                    held: 1,
+                    dead: 0
+                },
+                Depth {
+                    name: "other".into(),
+                    due: 1,
+                    held: 0,
+                    dead: 0
+                },
+            ]
+        );
+        // The lease runs out and the message is due again, with nothing
+        // changed by the looking.
+        let later = peek_waiting(&path, T + 33, 10).unwrap();
+        assert_eq!(states(&later), ["due", "due", "due"]);
+        assert_eq!(bodies(&later), ["first", "second", "third"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The window is a read, and a read that took a message would be the one
+    /// thing it must not be: the delivery that follows must be the delivery
+    /// that would have happened.
+    #[test]
+    fn reading_the_window_takes_nothing() {
+        let dir = scratch("takes-nothing");
+        let path = dir.join("queue.sqlite3");
+        let q = Queues::open(&path).unwrap();
+        let id = send(&q, "mail", "untouched", T);
+        for _ in 0..3 {
+            assert_eq!(peek_waiting(&path, T, 10).unwrap().len(), 1);
+            assert_eq!(peek_depths(&path, T).unwrap()[0].due, 1);
+        }
+        let taken = q.lease(T, 10, 30).unwrap();
+        assert_eq!(ids(&taken), [id]);
+        // The first try, as it would have been had nobody looked.
+        assert_eq!(taken[0].attempts, 1);
+        assert_eq!(taken[0].body, "untouched");
+        q.done(id).unwrap();
+        assert!(peek_waiting(&path, T, 10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed delivery waiting for its retry is `held` like a lease: one
+    /// `due` column carries both, and the window does not claim to know
+    /// which of the two a message is in.
+    #[test]
+    fn a_message_waiting_for_its_retry_is_held_and_says_when_it_is_due() {
+        let dir = scratch("retry");
+        let path = dir.join("queue.sqlite3");
+        let q = Queues::open(&path).unwrap();
+        let id = send(&q, "mail", "again", T);
+        q.lease(T, 1, 30).unwrap();
+        q.retry(id, T + 5, 100).unwrap();
+        let found = peek_waiting(&path, T + 5, 10).unwrap();
+        assert_eq!(states(&found), ["held"]);
+        assert_eq!((found[0].attempts, found[0].due_unix), (1, T + 105));
+        assert_eq!(found[0].sent_unix, T);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dead_letter_comes_with_why_and_when_it_was_buried() {
+        let dir = scratch("dead");
+        let path = dir.join("queue.sqlite3");
+        let q = Queues::open(&path).unwrap();
+        let first = send(&q, "mail", "one", T);
+        let second = send(&q, "mail", "two", T);
+        q.lease(T, 2, 30).unwrap();
+        q.bury(first, T + 10, "500 no").unwrap();
+        q.bury(second, T + 20, "no answer").unwrap();
+        let dead = peek_dead(&path, 10).unwrap();
+        // Newest buried first, which is the one somebody came to read.
+        assert_eq!(bodies(&dead), ["two", "one"]);
+        assert_eq!(states(&dead), ["dead", "dead"]);
+        assert_eq!(dead[0].why, "no answer");
+        assert_eq!(dead[0].buried_unix, T + 20);
+        assert_eq!(dead[0].attempts, 1);
+        assert_eq!(dead[1].why, "500 no");
+        // They are not waiting, and the counts keep the two apart.
+        assert!(peek_waiting(&path, T + 100, 10).unwrap().is_empty());
+        assert_eq!(
+            peek_depths(&path, T + 100).unwrap(),
+            vec![Depth {
+                name: "mail".into(),
+                due: 0,
+                held: 0,
+                dead: 2
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One message by id, from either table: a page reaches it from the
+    /// waiting listing or from the dead letters, and the id is enough.
+    #[test]
+    fn one_message_is_read_by_id_from_either_table() {
+        let dir = scratch("one");
+        let path = dir.join("queue.sqlite3");
+        let q = Queues::open(&path).unwrap();
+        let waiting = send(&q, "mail", "still here", T);
+        let buried = send(&q, "mail", "gave up", T);
+        q.lease(T, 2, 30).unwrap();
+        q.bury(buried, T + 5, "500 no").unwrap();
+
+        let found = peek_one(&path, waiting, T + 60).unwrap().unwrap();
+        assert_eq!((found.body.as_str(), found.state), ("still here", "due"));
+        assert_eq!((found.attempts, found.why.as_str()), (1, ""));
+        // Still leased at this moment, so it is held and not due.
+        assert_eq!(peek_one(&path, waiting, T).unwrap().unwrap().state, "held");
+
+        let dead = peek_one(&path, buried, T + 60).unwrap().unwrap();
+        assert_eq!((dead.body.as_str(), dead.state), ("gave up", "dead"));
+        assert_eq!((dead.why.as_str(), dead.buried_unix), ("500 no", T + 5));
+        // An id neither table has is no message, not an error.
+        assert!(peek_one(&path, 9999, T).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One message's read carries what a listing cuts: a queue's body is a
+    /// payload, and more than the listing's length is the ordinary case.
+    #[test]
+    fn one_messages_read_carries_more_than_a_listing_does() {
+        let dir = scratch("whole");
+        let path = dir.join("queue.sqlite3");
+        let q = Queues::open(&path).unwrap();
+        let long = "p".repeat(PEEK_BODY_CHARS + 100);
+        let id = q.send("mail", &long, T, 1 << 20, DEPTH).unwrap();
+        let listed = &peek_waiting(&path, T, 10).unwrap()[0];
+        assert!(listed.cut);
+        assert_eq!(listed.body.len(), PEEK_BODY_CHARS);
+
+        let whole = peek_one(&path, id, T).unwrap().unwrap();
+        assert!(!whole.cut);
+        assert_eq!(whole.body, long);
+        // And its own length is a limit as well, which `cut` says.
+        let longer = "q".repeat(READ_BODY_CHARS + 10);
+        let id = q.send("mail", &longer, T, 1 << 20, DEPTH).unwrap();
+        let cut = peek_one(&path, id, T).unwrap().unwrap();
+        assert!(cut.cut);
+        assert_eq!(cut.body.len(), READ_BODY_CHARS);
+        assert_eq!(cut.bytes, READ_BODY_CHARS as i64 + 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_body_is_cut_and_says_how_long_the_whole_is() {
+        let dir = scratch("cut");
+        let path = dir.join("queue.sqlite3");
+        let q = Queues::open(&path).unwrap();
+        let long = "é".repeat(PEEK_BODY_CHARS + 10);
+        q.send("mail", &long, T, 1 << 20, DEPTH).unwrap();
+        send(&q, "mail", "short", T + 1);
+        let found = peek_waiting(&path, T + 1, 10).unwrap();
+        assert!(found[0].cut);
+        assert_eq!(found[0].body.chars().count(), PEEK_BODY_CHARS);
+        assert_eq!(found[0].bytes, 2 * (PEEK_BODY_CHARS as i64 + 10));
+        assert!(!found[1].cut);
+        assert_eq!((found[1].body.as_str(), found[1].bytes), ("short", 5));
+        // A reason is cut the same way; a 500's first line can be anything.
+        let id = found[1].id;
+        q.bury(id, T + 2, &"x".repeat(PEEK_BODY_CHARS + 5)).unwrap();
+        let dead = peek_dead(&path, 10).unwrap();
+        assert_eq!(dead[0].why.chars().count(), PEEK_BODY_CHARS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The listing stops at the window's own limit; the counts beside it do
+    /// not, so a page can say how many more there are.
+    #[test]
+    fn the_listing_stops_at_the_windows_limit_and_the_counts_do_not() {
+        let dir = scratch("limit");
+        let path = dir.join("queue.sqlite3");
+        let q = Queues::open(&path).unwrap();
+        let more = PEEK_MESSAGES + 5;
+        for n in 0..more {
+            q.send("mail", &format!("{n}"), T, 1024, more * 2).unwrap();
+        }
+        assert_eq!(
+            peek_waiting(&path, T, PEEK_MESSAGES + 100).unwrap().len() as i64,
+            PEEK_MESSAGES
+        );
+        assert_eq!(peek_waiting(&path, T, 3).unwrap().len(), 3);
+        // A limit of 0 answers nothing rather than everything.
+        assert!(peek_waiting(&path, T, 0).unwrap().is_empty());
+        assert_eq!(peek_depths(&path, T).unwrap()[0].due, more);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reader goes through the store the app has open where one is open,
+    /// so a message sent a moment ago is in the window: a second connection
+    /// on a WAL database would read the snapshot it started with.
+    #[test]
+    fn the_window_reads_through_the_store_the_app_has_open() {
+        let dir = scratch("shared");
+        let path = dir.join("queue.sqlite3");
+        let store = shared(&path).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .send("mail", "just now", T, 1024, DEPTH)
+            .unwrap();
+        assert_eq!(bodies(&peek_waiting(&path, T, 10).unwrap()), ["just now"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_store_that_is_not_there_is_no_queue_and_is_not_created() {
+        let dir = scratch("absent");
+        let path = dir.join("app").join("queue.sqlite3");
+        assert!(peek_depths(&path, T).unwrap().is_empty());
+        assert!(peek_waiting(&path, T, 10).unwrap().is_empty());
+        assert!(peek_dead(&path, 10).unwrap().is_empty());
+        // An app not granted `queue` has no file, and looking must not make
+        // one — nor the directory it would live in.
+        assert!(!path.exists());
+        assert!(!dir.join("app").exists());
+        // A file that is not a queue store of ours has nothing waiting.
+        let bare = dir.join("bare.sqlite3");
+        Connection::open(&bare)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x);")
+            .unwrap();
+        assert!(peek_depths(&bare, T).unwrap().is_empty());
+        assert!(peek_waiting(&bare, T, 10).unwrap().is_empty());
+        assert!(peek_dead(&bare, 10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

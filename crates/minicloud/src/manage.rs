@@ -212,6 +212,41 @@ fn sql_why(error: crate::sql::SqlError) -> String {
     }
 }
 
+/// Now, in seconds since the epoch, as the queue store keeps a `due` and a
+/// `sent`: whether a message is due is a comparison with this.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64)
+}
+
+/// One queue of an app, as the admin app sees it: what it holds now, and
+/// the settings the host delivers it by.
+///
+/// The counts are whole ([`crate::queue::peek_depths`]), not a page's worth,
+/// so a listing cut at the window's limit can say how much it is not
+/// showing.
+pub(crate) struct QueueInfo {
+    pub name: String,
+    /// Where a message is delivered, below the app's prefix.
+    pub path: String,
+    pub due: i64,
+    pub held: i64,
+    pub dead: i64,
+    /// Whether the app's `[[queues]]` still declares it. A queue taken out
+    /// of `app.toml` keeps whatever was on it, and nothing will ever
+    /// deliver it: the window shows it saying so, because a store that
+    /// holds work nobody will do is the thing this page is for. Its
+    /// settings are 0, because it no longer has any.
+    pub declared: bool,
+    pub max_depth: i64,
+    pub max_attempts: u32,
+    pub retry_ms: u64,
+    pub lease_ms: u64,
+    pub batch: u32,
+    pub max_body_bytes: u64,
+}
+
 /// One key of an app's store, as the admin app sees it.
 pub(crate) struct KvRow {
     pub key: String,
@@ -437,6 +472,126 @@ impl Front {
             Some(found) => crate::code::one(&found, name),
             None => Err(format!("the host has no app `{app}` with a version loaded")),
         }
+    }
+
+    /// The file of `app`'s queue store, under the same guard as
+    /// [`Front::kv_path`]: a name that is not one of the host's slots names
+    /// no path, so nothing a request can write reaches outside the data
+    /// directory.
+    fn queue_path(&self, app: &str) -> Option<std::path::PathBuf> {
+        self.engine.slot_named(app)?;
+        let data = self.options.data.as_ref()?;
+        Some(data.join(app).join("queue.sqlite3"))
+    }
+
+    /// Each queue of `app` and what it holds now (issue 90).
+    ///
+    /// **The queues are the app's `[[queues]]`**, not the store's rows: a
+    /// queue declared and never sent to has no rows, and leaving it out
+    /// would read as "there is no such queue" when the answer is "nothing is
+    /// waiting on it". A queue the store has rows for and the app no longer
+    /// declares is listed after them, saying so.
+    ///
+    /// Empty for an app the host does not have or has no version of.
+    pub(crate) fn app_queues(&self, app: &str) -> Result<Vec<QueueInfo>, String> {
+        let Some(found) = self.deployed(app) else {
+            return Ok(Vec::new());
+        };
+        let depths = match self.queue_path(app) {
+            Some(path) => crate::queue::peek_depths(&path, now_unix())?,
+            None => Vec::new(),
+        };
+        // What the store holds for a queue by that name; nothing at all for
+        // one that has never been sent to.
+        let counts = |name: &str| {
+            depths
+                .iter()
+                .find(|depth| depth.name == name)
+                .map(|depth| (depth.due, depth.held, depth.dead))
+                .unwrap_or((0, 0, 0))
+        };
+        let mut out: Vec<QueueInfo> = found
+            .queues
+            .iter()
+            .map(|policy| {
+                let (due, held, dead) = counts(&policy.name);
+                QueueInfo {
+                    name: policy.name.clone(),
+                    path: policy.path.clone(),
+                    due,
+                    held,
+                    dead,
+                    declared: true,
+                    max_depth: policy.max_depth,
+                    max_attempts: policy.max_attempts,
+                    retry_ms: policy.retry.as_millis() as u64,
+                    lease_ms: policy.lease.as_millis() as u64,
+                    batch: policy.batch,
+                    max_body_bytes: policy.max_body_bytes,
+                }
+            })
+            .collect();
+        for depth in &depths {
+            if found.queues.iter().any(|policy| policy.name == depth.name) {
+                continue;
+            }
+            out.push(QueueInfo {
+                name: depth.name.clone(),
+                path: String::new(),
+                due: depth.due,
+                held: depth.held,
+                dead: depth.dead,
+                declared: false,
+                max_depth: 0,
+                max_attempts: 0,
+                retry_ms: 0,
+                lease_ms: 0,
+                batch: 0,
+                max_body_bytes: 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The messages still on `app`'s queues, at most `limit`
+    /// ([`crate::queue::peek_waiting`]). A read: nothing is leased, counted
+    /// or moved by it.
+    pub(crate) fn app_queue_messages(
+        &self,
+        app: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::queue::Peeked>, String> {
+        let Some(path) = self.queue_path(app) else {
+            return Ok(Vec::new());
+        };
+        crate::queue::peek_waiting(&path, now_unix(), limit)
+    }
+
+    /// The dead letters of `app`'s queues, newest buried first, at most
+    /// `limit` ([`crate::queue::peek_dead`]).
+    pub(crate) fn app_queue_dead(
+        &self,
+        app: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::queue::Peeked>, String> {
+        let Some(path) = self.queue_path(app) else {
+            return Ok(Vec::new());
+        };
+        crate::queue::peek_dead(&path, limit)
+    }
+
+    /// One message of `app`'s queues, waiting or buried, with its body cut
+    /// at [`crate::queue::READ_BODY_CHARS`] rather than the listing's
+    /// length ([`crate::queue::peek_one`]).
+    pub(crate) fn app_queue_message(
+        &self,
+        app: &str,
+        id: i64,
+    ) -> Result<Option<crate::queue::Peeked>, String> {
+        let Some(path) = self.queue_path(app) else {
+            return Ok(None);
+        };
+        crate::queue::peek_one(&path, id, now_unix())
     }
 
     /// The last `n` lines of `app`'s log, oldest first; empty for an app the

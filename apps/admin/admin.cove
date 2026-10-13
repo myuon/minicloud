@@ -18,6 +18,9 @@ use text
 ///   one file's text.
 /// - `GET /apps/<app>/sql` is the tables of its SQL store and their row
 ///   counts, and `?q=` is one statement that only reads.
+/// - `GET /apps/<app>/queues` is each queue it declares with what is due,
+///   held and dead, the messages waiting and the dead letters with why;
+///   `?message=` is one message, its body whole.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -97,6 +100,12 @@ export fn handle(request: web.Request) -> web.Response {
   // calls go through, which refuses one that writes.
   if action == "sql" && get {
     return htmlResponse(200, sqlPage(at, app, request))
+  }
+  // And what is on its queues. Reading only, and nothing of it is a
+  // choice this app makes: the host's window leases nothing, so a page
+  // somebody opened cannot take a message the delivery loop was about to.
+  if action == "queues" && get {
+    return htmlResponse(200, queuesPage(at, app, request))
   }
   if get || parts.length() > 4 {
     return textResponse(404, "no such page\n")
