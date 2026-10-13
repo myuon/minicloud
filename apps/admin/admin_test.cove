@@ -197,15 +197,17 @@ test fn saysWhenTheFileOnDiskIsNotTheOneRunning() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// The host says the order and the depth and the page indents by it: a row
-/// shows its last part, and the whole path is where the link points and
-/// what it is titled.
-test fn indentsARowByTheDepthTheHostGaveIt() -> Result<Unit, Error> {
+/// A row of the tree is the item it opens: the name is the last part of the
+/// path, the whole path is where the link points and what it is titled, and
+/// what the file is and what it comes to are beside the name.
+test fn opensAnItemForEachRowOfTheTree() -> Result<Unit, Error> {
   let top = codeRow("/apps/notes", aRow("app.toml", "app.toml", 0, "config"))
-  assert(top.contains("class=\"title dep0\""))?
+  assert(top.startsWith("<li>"))?
   assert(top.contains("code?file=app.toml"))?
+  // What the table had in columns is beside the name now.
+  assert(top.contains("configuration"))?
+  assert(top.contains("1.0 KiB"))?
   let under = codeRow("/apps/notes", aRow("text/text.cove", "text.cove", 1, "cove"))
-  assert(under.contains("class=\"title dep1\""))?
   assert(under.contains("title=\"text/text.cove\""))?
   assert(under.contains("code?file=text%2Ftext.cove"))?
   // The row says the last part; the parts above it are the rows above it.
@@ -214,12 +216,39 @@ test fn indentsARowByTheDepthTheHostGaveIt() -> Result<Unit, Error> {
   // A directory is not a link — there is no file of it to show — and it
   // says so where a file says what it is.
   let dir = codeRow("/apps/notes", aRow("assets", "assets", 0, "dir"))
+  assert(dir.startsWith("<li class=dir>"))?
   assert(dir.contains("<code>assets/</code>"))?
   assert(!dir.contains("href"))?
   assert(dir.contains("directory"))?
-  // Deeper than the stylesheet has a rule for, the rows stop moving.
-  let deep = codeRow("/apps/notes", aRow("a/b/c/d/e/f/g/h.cove", "h.cove", 7, "cove"))
-  assert(deep.contains("class=\"title dep6\""))?
+  // The item is left open: what is under a directory goes inside it.
+  assert(!dir.contains("</li>"))?
+  Ok(())
+}
+
+/// **The tree closes every list it opens**, whatever the depths do: the
+/// nesting is the markup, so a list left open is the rest of the page in
+/// the wrong place. A depth that skips a level opens one list and no more,
+/// and a row two levels shallower closes the two that are open.
+test fn closesEveryListTheTreeOpens() -> Result<Unit, Error> {
+  let at = "/apps/notes"
+  let top = aRow("app.toml", "app.toml", 0, "config")
+  let dir = aRow("assets", "assets", 0, "dir")
+  let img = aRow("assets/img", "img", 1, "dir")
+  // Two deeper than the row above it, which the host does not do.
+  let deep = aRow("assets/img/icons/a.svg", "a.svg", 3, "asset")
+  let last = aRow("assets/style.css", "style.css", 1, "asset")
+  assertEqual(
+    codeTree(at, Vector.of(top, dir, img, deep, last).freeze()),
+    "<ul class=tree>{codeRow(at, top)}</li>{codeRow(at, dir)}<ul>{codeRow(at, img)}<ul>{codeRow(at, deep)}</li></ul></li>{codeRow(at, last)}</li></ul></li></ul>",
+  )?
+  // As many closes as opens, which is the whole of what must hold.
+  let shown = codeTree(at, Vector.of(top, dir, img, deep, last).freeze())
+  assertEqual(shown.split("<ul").length(), shown.split("</ul").length())?
+  assertEqual(shown.split("<li").length(), shown.split("</li").length())?
+  // A row deeper than nothing opens the one list, and no rows open none.
+  let alone = codeTree(at, Vector.of(aRow("a.cove", "a.cove", 4, "cove")).freeze())
+  assertEqual(alone, "<ul class=tree>{codeRow(at, aRow("a.cove", "a.cove", 4, "cove"))}</li></ul>")?
+  assertEqual(codeTree(at, Vector.of().freeze()), "")?
   Ok(())
 }
 
