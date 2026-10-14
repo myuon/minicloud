@@ -733,48 +733,59 @@ public origin's scheme, and its port if it has one) — the name the route
 matched, never one the client chose — so an app's same-origin check compares
 against the origin its own pages were served from.
 
-## One run at a time for one key
+## State that outlives a request is safe one statement at a time
 
-Issue #55 asked for "a single writer per key holding state and an alarm,
-as Cloudflare's Durable Objects are", and said it needed a design note
-first. This is it.
+An app that keeps state — a count, a latch, a seat — has to keep it
+somewhere a run's heap is not, because the heap ends with the run. That
+place is the app's own `kv` or `sql`, and **what makes it safe is that one
+statement is atomic by itself.** It is why the SQL authorizer refuses
+`BEGIN`, `COMMIT` and `SAVEPOINT` (the table at the top of `sql.rs`): a
+transaction held open across host calls would keep the connection locked if
+the run hit its deadline in between. There is no transaction to open, so
+there is none to leave open.
 
-**What a Durable Object is, is three things**: an address, a single writer,
-and state held in memory between requests. The third one cannot exist here
-and should not: a run's heap ends with the run, which is what makes a
-request's cost a request's cost, and an object that lived between requests
-would be a heap with no owner and no budget. The first two can, and they
-are the two that make the state safe.
+So **a read-modify-write is written as one conditional `UPDATE` whose row
+count is the answer**, which is a compare-and-swap. Read the state, decide,
+and write it back is three calls, and two runs can interleave them and both
+act on the same reading. `examples/watch` tells somebody when a target goes
+from up to down and must tell exactly once, however many checks saw it
+(`changed()` in `store.cove`):
 
-So: **the key is in the request** and the host takes that key's turn before
-admitting it, holding it until the answer. The app reads, decides and
-writes into its own `kv` or `sql` with nobody in the middle — which is what
-the object was for — and the state is on disk rather than in a heap, which
-is where state that outlives a request belongs anyway.
+```sql
+INSERT OR IGNORE INTO state (target, ok) VALUES (?1, ?2)  -- first check: not a change
+UPDATE state SET ok = ?1 WHERE target = ?2 AND ok != ?1   -- rows > 0: this run flipped it
+```
 
-The key has to come from the request rather than from the app's code,
-because the waiting happens **before** the run starts; it is a query
-parameter or a header that `[keyed] by` names. That is a real limit: the
-key cannot be computed. It is also what keeps the whole feature out of the
-scheduler — the turn is taken on the HTTP task, which is already waiting
-for the answer, and nothing in `sched.rs` knows any of this happened.
+Of any number of runs that saw the target flip, one makes the row say so
+and the rest find nothing to change. When the critical section holds
+something that is not SQL — a call out, say — the same idea is a claim:
+`UPDATE … SET busy_until = ? WHERE id = ? AND busy_until < ?`. The run that
+gets a row owns the work until `busy_until`; the run that gets none steps
+aside instead of waiting, which is what a run should do when waiting would
+spend its own deadline.
 
-**The lock is `tokio`'s**, which is fair, so a key's requests are served in
-the order they arrived rather than whichever wakes first. `max_waiting`
-bounds the queue behind one key: without it, one hot key could fill the
-host's admission limit with requests that are all waiting for each other.
-A key nobody is holding or waiting for is swept, because it is the same as
-a key that was never there.
+**This holds on every path a run can come by**: a client's request, the
+clock's `[[triggers]]`, a queue delivery, a deferred run. It survives a
+restart, because the state is on disk. And it does not depend on there being
+one process, because the database is what decides.
 
-**An alarm is a key with a time on it.** One per key — a key is one thing —
-in the app's own SQLite file, taken when it goes off, and run under the
-key's turn like everything else about that key. An alarm that fires while a
-request about the same key is running waits for it, which is the only
-behaviour that makes an alarm as safe as a request.
+**A lock in the host was tried, and removed.** Issue #55 asked for
+Cloudflare's Durable Objects' single writer per key, and `[keyed]` was
+built: the host took a key's turn before admitting a request and held it
+until the answer. It only ever covered the HTTP path. A run the host starts
+itself — a trigger, a delivery, a deferred run — never took a turn, so the
+guarantee it named was not the one it gave, and the example that
+leaned on it said a check by the clock and one by hand could not both write
+a target's history when they could. The lock was also in memory and
+per-process, so a restart or a second process dropped it. What was given up
+is the convenience: an app now writes its own compare-and-swap rather than
+being handed a turn. What was gained is a guarantee that is the one it says.
 
-The one deadlock is an app that calls itself with the same key from inside
-a keyed run. It waits for itself and its deadline ends it; there is nothing
-else to do about it, and saying so is better than pretending.
+**The other half of #55, an alarm per key, is a queue message with a
+delay.** `queue.sendAfter` is below, under
+[queues](#queues-work-that-is-written-down-first): it leases rather than
+deletes, it retries, and what it cannot deliver is a dead letter somebody
+can read — none of which the alarm had.
 
 ## Queues: work that is written down first
 
@@ -810,6 +821,14 @@ each queue ([Seeing what is on an app's queues](#seeing-what-is-on-an-apps-queue
 app's counters, so a slow consumer cannot be given the whole queue at once;
 the host looks for due messages once a second, which is one indexed
 `SELECT` per app that has a queue.
+
+**Work that should happen later is `queue.sendAfter`**: a send with a delay,
+which is delivered no sooner than that many seconds from now. It is the same
+message — on disk when the call answers, leased rather than deleted, retried
+with backoff and buried if it cannot be delivered — so a reminder survives a
+restart and a failed one is a dead letter someone can read, which a timer
+held in memory is not. What it does not give is a moment: delivery is
+looked for once a second, so "later" is "about then".
 
 ## A run the host asks for
 

@@ -18,11 +18,6 @@
 //! max_bytes = 8388608             # the files of `assets/` together
 //! cache_control = "no-cache"      # what every one of them is answered with
 //!
-//! [keyed]                         # one run at a time for one key
-//! by = "query:room"               # or "header:x-room"; without it there is no key
-//! max_waiting = 64                # requests waiting for one key
-//! alarm_path = "/alarm"           # where a due alarm runs, with `keyed` granted
-//!
 //! [[queues]]                      # a durable queue, with `queue` granted
 //! name = "mail"                   # what `queue.send` names
 //! path = "/queue/mail"            # where a message is delivered
@@ -142,9 +137,6 @@ pub struct AppFile {
     /// delivers them ([`crate::queue`]).
     #[serde(default)]
     pub queues: Vec<QueueFile>,
-    /// `[keyed]`: one run at a time for one key ([`crate::keyed`]).
-    #[serde(default)]
-    pub keyed: KeyedFile,
     /// Named secrets the app may check a presented credential against
     /// (`auth.check`), or the host sends as a header (`[fetch.headers]`);
     /// never read.
@@ -446,15 +438,6 @@ pub struct KvFile {
     pub max_value_bytes: Option<usize>,
     pub max_keys: Option<u64>,
     pub max_bytes: Option<u64>,
-}
-
-/// `[keyed]` as written.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct KeyedFile {
-    pub by: Option<String>,
-    pub max_waiting: Option<u32>,
-    pub alarm_path: Option<String>,
 }
 
 /// One `[[queues]]` entry as written.
@@ -1080,26 +1063,6 @@ impl Default for SqlLimits {
     }
 }
 
-/// Where the key of a keyed request is.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum KeyIn {
-    /// A query parameter, `?room=…`.
-    Query(String),
-    /// A header, which is where a key that should not be in a URL goes.
-    Header(String),
-}
-
-/// `[keyed]`: one run at a time for one key, and where its alarms run.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeyedPolicy {
-    pub by: KeyIn,
-    /// Requests waiting for one key; past it the answer is 429.
-    pub max_waiting: u32,
-    /// Where a due alarm runs, below the app's prefix. The key reaches it
-    /// the way `by` says, so the app reads it the same way either way.
-    pub alarm_path: String,
-}
-
 /// How many queues one app may declare.
 pub const MAX_QUEUES: usize = 16;
 
@@ -1179,9 +1142,6 @@ pub struct AppConfig {
     pub defer: DeferLimits,
     /// `[[queues]]`: the queues this app may send to.
     pub queues: Vec<QueuePolicy>,
-    /// `[keyed]`: one run at a time for one key; `None` for an app that
-    /// does not ask for it.
-    pub keyed: Option<KeyedPolicy>,
     /// `[rate]`: how often one caller may reach this app; `None` for no
     /// limit of its own, which is the default.
     pub rate: Option<RatePolicy>,
@@ -1584,52 +1544,6 @@ pub fn parse_app_with(
             .unwrap_or(8),
         });
     }
-    // `[keyed]` is off unless `by` says where the key is: a maximum and a
-    // path with nothing to key on is not half a policy, it is a mistake.
-    let keyed = match (
-        &file.keyed.by,
-        file.keyed.max_waiting,
-        &file.keyed.alarm_path,
-    ) {
-        (None, None, None) => None,
-        (None, ..) => {
-            return Err(
-                "`[keyed]` needs `by`: where the key is, as `query:<name>` or `header:<name>`"
-                    .to_string(),
-            )
-        }
-        (Some(by), max_waiting, path) => {
-            let by = match by.split_once(':') {
-                Some(("query", name)) if is_header_name(name) => KeyIn::Query(name.to_string()),
-                Some(("header", name)) if is_header_name(name) => {
-                    KeyIn::Header(name.to_ascii_lowercase())
-                }
-                _ => {
-                    return Err(format!(
-                        "`[keyed] by = \"{by}\"` is not a key: `query:<name>` or `header:<name>`"
-                    ))
-                }
-            };
-            let alarm_path = path.clone().unwrap_or_else(|| "/alarm".to_string());
-            if !alarm_path.starts_with('/') || !alarm_path.chars().all(|c| c.is_ascii_graphic()) {
-                return Err(format!(
-                    "`[keyed] alarm_path = \"{alarm_path}\"` is not a path: it starts with `/` \
-                     and holds no space"
-                ));
-            }
-            Some(KeyedPolicy {
-                by,
-                max_waiting: u32::try_from(positive(
-                    "keyed",
-                    "max_waiting",
-                    max_waiting.map(u64::from),
-                    64,
-                )?)
-                .unwrap_or(64),
-                alarm_path,
-            })
-        }
-    };
     let defer = DeferLimits {
         max_in_flight: positive(
             "defer",
@@ -1740,7 +1654,6 @@ pub fn parse_app_with(
         sql,
         defer,
         queues,
-        keyed,
         rate,
         triggers,
         fetch,

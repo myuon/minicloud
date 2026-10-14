@@ -152,9 +152,6 @@ pub(crate) struct Front {
     pub(crate) triggers: Arc<crate::triggers::Triggers>,
     /// The `[rate]` buckets of every app ([`crate::rate`]).
     pub(crate) rates: crate::rate::Limiter,
-    /// Whose turn it is, for the apps that key their requests
-    /// ([`crate::keyed`]).
-    pub(crate) keys: crate::keyed::Keys,
     /// What each app did, minute by minute ([`crate::series`]); `None` for
     /// a host with no data directory, which keeps no history.
     pub(crate) series: Option<Arc<std::sync::Mutex<crate::series::Series>>>,
@@ -345,7 +342,6 @@ impl Host {
             control: Arc::clone(&control),
             triggers: Arc::clone(&triggers),
             rates: crate::rate::Limiter::default(),
-            keys: crate::keyed::Keys::default(),
             certificates,
             series,
             sampled: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -368,7 +364,6 @@ impl Host {
         runtime.spawn(crate::defer::deliver(Arc::clone(&front), deferred));
         if options_data_kept {
             runtime.spawn(crate::queue_host::deliver(Arc::clone(&front)));
-            runtime.spawn(crate::keyed::ring(Arc::clone(&front)));
         }
         if front.series.is_some() {
             runtime.spawn(crate::ops::sample(Arc::clone(&front)));
@@ -825,30 +820,6 @@ impl Front {
             }
         }
 
-        // The key this request is about, if the app keys them. Taken from
-        // the request because the waiting has to happen before the run
-        // starts, and only the request can say what it is about.
-        let keyed = app.keyed.as_ref().and_then(|policy| {
-            let found = match &policy.by {
-                crate::config::KeyIn::Query(name) => request
-                    .uri()
-                    .query()
-                    .and_then(|query| {
-                        form_urlencoded::parse(query.as_bytes())
-                            .find(|(key, _)| key == name.as_str())
-                            .map(|(_, value)| value.into_owned())
-                    })
-                    .unwrap_or_default(),
-                crate::config::KeyIn::Header(name) => request
-                    .headers()
-                    .get(name.as_str())
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or_default()
-                    .to_string(),
-            };
-            (!found.is_empty() && found.len() <= crate::keyed::MAX_KEY).then_some(found)
-        });
-
         // The app's own files, answered here: no queue, no isolate, no run
         // ([`crate::assets`]). A `GET` or a `HEAD` whose path names one of
         // them never reaches `handle`; any other method, and any path that
@@ -949,34 +920,6 @@ impl Front {
             return Reply::text(400, "the request body is not UTF-8\n");
         };
 
-        // One run at a time for one key ([`crate::keyed`]): the turn is
-        // taken before the request is admitted and held until it is
-        // answered, so the next request for this key starts when this one
-        // has ended.
-        let _turn = match (&app.keyed, &keyed) {
-            (Some(policy), Some(key)) => {
-                match self
-                    .keys
-                    .take(&app.name, key, policy.max_waiting as usize)
-                    .await
-                {
-                    Ok(turn) => Some(turn),
-                    Err(crate::keyed::NoTurn::TooMany(waiting)) => {
-                        app.counters.rejected(Rejection::QueueFull);
-                        return Reply::text(
-                            429,
-                            format!(
-                                "app `{}` has {waiting} request(s) waiting for this key \
-                                 already; try again later\n",
-                                app.name
-                            ),
-                        )
-                        .with_header("retry-after", "1");
-                    }
-                }
-            }
-            _ => None,
-        };
         let (reply, answer) = oneshot::channel();
         let cancel = Cancel::new();
         let answering = crate::stream::Answering::new(reply);

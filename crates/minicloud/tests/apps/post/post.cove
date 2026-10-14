@@ -5,7 +5,8 @@ use log
 
 /// Sends to a queue, and takes what the host delivers.
 ///
-/// `/send?body=` puts one message on `mail`; `/depth` answers how many are
+/// `/send?body=` puts one message on `mail`; `/send-after?body=&secs=` puts
+/// one there to be delivered `secs` from now; `/depth` answers how many are
 /// waiting; `/taken` answers what has been delivered, newest last.
 /// `/queue/mail` is where the host delivers, and it refuses anyone but the
 /// host. `?fail=1` on a message's body makes that delivery fail, which is
@@ -13,6 +14,13 @@ use log
 export fn handle(request: web.Request) -> web.Response {
   if request.path == "/send" {
     return match queue.send("mail", request.query.get("body").unwrapOr("")) {
+      Ok(id) => answer(202, "{id}")
+      Err(error) => answer(429, error.message)
+    }
+  }
+  if request.path == "/send-after" {
+    let secs = Int.parse(request.query.get("secs").unwrapOr("0")).unwrapOr(0)
+    return match queue.sendAfter("mail", request.query.get("body").unwrapOr(""), secs) {
       Ok(id) => answer(202, "{id}")
       Err(error) => answer(429, error.message)
     }

@@ -46,8 +46,7 @@ fn a_query_in_the_path_reaches_the_app_as_a_query() {
         count(&host, "errand", "deferred_runs") == 1
     });
     // The app sees the path and the query apart, as it does for a request
-    // off a connection — and `[keyed]` could not read a key out of a query
-    // that had stayed in the path.
+    // off a connection.
     assert_eq!(
         get(host.addr, "/errand/asked-for").body.trim(),
         "/work about=a thing n=2"

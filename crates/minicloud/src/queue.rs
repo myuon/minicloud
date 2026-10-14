@@ -181,16 +181,22 @@ impl Queues {
         Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate).map_err(fail)
     }
 
-    /// Puts a message on `queue`, due now, and answers its id.
+    /// Puts a message on `queue`, to be delivered from `due_unix`, and
+    /// answers its id. `now_unix` is when it was sent, kept apart from the
+    /// due time so a message held back for a while still says when it was
+    /// asked for; `lease` hands it out only once `due_unix` has come.
     ///
     /// Refuses (`Err`) a body past `max_body_bytes` or a queue that already
     /// holds `max_depth` messages, naming the limit. Dead letters do not
-    /// count towards the depth: they are no longer waiting.
+    /// count towards the depth: they are no longer waiting. A message held
+    /// back for later does count — it is waiting, and a queue that could be
+    /// filled with them unseen would have no bound at all.
     pub fn send(
         &self,
         queue: &str,
         body: &str,
         now_unix: i64,
+        due_unix: i64,
         max_body_bytes: usize,
         max_depth: i64,
     ) -> Result<i64, String> {
@@ -219,8 +225,8 @@ impl Queues {
             ));
         }
         tx.execute(
-            "INSERT INTO message (queue, body, attempts, due, sent) VALUES (?1, ?2, 0, ?3, ?3)",
-            params![queue, body, now_unix],
+            "INSERT INTO message (queue, body, attempts, due, sent) VALUES (?1, ?2, 0, ?3, ?4)",
+            params![queue, body, due_unix, now_unix],
         )
         .map_err(fail)?;
         let id = tx.last_insert_rowid();
@@ -726,7 +732,7 @@ mod tests {
     const DEPTH: i64 = 100;
 
     fn send(q: &Queues, queue: &str, body: &str, at: i64) -> i64 {
-        q.send(queue, body, at, BODY, DEPTH).unwrap()
+        q.send(queue, body, at, at, BODY, DEPTH).unwrap()
     }
 
     fn ids(messages: &[Message]) -> Vec<i64> {
@@ -841,37 +847,59 @@ mod tests {
     fn send_refuses_bad_names_and_says_what_is_allowed() {
         let q = Queues::in_memory().unwrap();
         for bad in ["", "Mail", "a b", "a/b", "é", &"a".repeat(65)] {
-            let why = q.send(bad, "x", T, BODY, DEPTH).unwrap_err();
+            let why = q.send(bad, "x", T, T, BODY, DEPTH).unwrap_err();
             assert!(why.contains("a-z") && why.contains("64"), "{why}");
         }
         for good in ["a", "mail_out-2", &"a".repeat(64)] {
-            q.send(good, "x", T, BODY, DEPTH).unwrap();
+            q.send(good, "x", T, T, BODY, DEPTH).unwrap();
         }
+    }
+
+    #[test]
+    fn a_message_sent_for_later_is_held_until_it_is_due() {
+        let q = Queues::in_memory().unwrap();
+        let id = q.send("a", "later", T, T + 60, BODY, DEPTH).unwrap();
+        assert!(q.lease(T, 10, 30).unwrap().is_empty());
+        assert!(q.lease(T + 59, 10, 30).unwrap().is_empty());
+        let got = q.lease(T + 60, 10, 30).unwrap();
+        assert_eq!(ids(&got), [id]);
+        // It still says when it was asked for, not when it came due.
+        assert_eq!(got[0].sent_unix, T);
+    }
+
+    #[test]
+    fn a_held_message_still_counts_towards_the_depth() {
+        let q = Queues::in_memory().unwrap();
+        q.send("a", "1", T, T + 60, 4, 2).unwrap();
+        q.send("a", "2", T, T + 60, 4, 2).unwrap();
+        let why = q.send("a", "3", T, T, 4, 2).unwrap_err();
+        assert!(why.contains("max_depth of 2"), "{why}");
+        assert_eq!(q.depths().unwrap(), vec![("a".to_string(), 2, 0)]);
     }
 
     #[test]
     fn send_refuses_past_the_depth_and_the_body_limit() {
         let q = Queues::in_memory().unwrap();
-        q.send("a", "1", T, 4, 2).unwrap();
-        q.send("a", "2", T, 4, 2).unwrap();
-        let why = q.send("a", "3", T, 4, 2).unwrap_err();
+        q.send("a", "1", T, T, 4, 2).unwrap();
+        q.send("a", "2", T, T, 4, 2).unwrap();
+        let why = q.send("a", "3", T, T, 4, 2).unwrap_err();
         assert!(
             why.contains("max_depth of 2") && why.contains("2 messages"),
             "{why}"
         );
         // Another queue has its own depth.
-        q.send("b", "1", T, 4, 2).unwrap();
-        let why = q.send("b", "12345", T, 4, 2).unwrap_err();
+        q.send("b", "1", T, T, 4, 2).unwrap();
+        let why = q.send("b", "12345", T, T, 4, 2).unwrap_err();
         assert!(
             why.contains("max_body_bytes of 4") && why.contains("5 bytes"),
             "{why}"
         );
         // Bytes, not characters.
-        assert!(q.send("b", "ééé", T, 4, 2).is_err());
+        assert!(q.send("b", "ééé", T, T, 4, 2).is_err());
         // Room opens when a message is done.
         let first = q.lease(T, 1, 10).unwrap()[0].id;
         q.done(first).unwrap();
-        q.send("a", "3", T, 4, 2).unwrap();
+        q.send("a", "3", T, T, 4, 2).unwrap();
     }
 
     #[test]
@@ -1104,7 +1132,7 @@ mod tests {
         let path = dir.join("queue.sqlite3");
         let q = Queues::open(&path).unwrap();
         let long = "p".repeat(PEEK_BODY_CHARS + 100);
-        let id = q.send("mail", &long, T, 1 << 20, DEPTH).unwrap();
+        let id = q.send("mail", &long, T, T, 1 << 20, DEPTH).unwrap();
         let listed = &peek_waiting(&path, T, 10).unwrap()[0];
         assert!(listed.cut);
         assert_eq!(listed.body.len(), PEEK_BODY_CHARS);
@@ -1114,7 +1142,7 @@ mod tests {
         assert_eq!(whole.body, long);
         // And its own length is a limit as well, which `cut` says.
         let longer = "q".repeat(READ_BODY_CHARS + 10);
-        let id = q.send("mail", &longer, T, 1 << 20, DEPTH).unwrap();
+        let id = q.send("mail", &longer, T, T, 1 << 20, DEPTH).unwrap();
         let cut = peek_one(&path, id, T).unwrap().unwrap();
         assert!(cut.cut);
         assert_eq!(cut.body.len(), READ_BODY_CHARS);
@@ -1128,7 +1156,7 @@ mod tests {
         let path = dir.join("queue.sqlite3");
         let q = Queues::open(&path).unwrap();
         let long = "é".repeat(PEEK_BODY_CHARS + 10);
-        q.send("mail", &long, T, 1 << 20, DEPTH).unwrap();
+        q.send("mail", &long, T, T, 1 << 20, DEPTH).unwrap();
         send(&q, "mail", "short", T + 1);
         let found = peek_waiting(&path, T + 1, 10).unwrap();
         assert!(found[0].cut);
@@ -1153,7 +1181,8 @@ mod tests {
         let q = Queues::open(&path).unwrap();
         let more = PEEK_MESSAGES + 5;
         for n in 0..more {
-            q.send("mail", &format!("{n}"), T, 1024, more * 2).unwrap();
+            q.send("mail", &format!("{n}"), T, T, 1024, more * 2)
+                .unwrap();
         }
         assert_eq!(
             peek_waiting(&path, T, PEEK_MESSAGES + 100).unwrap().len() as i64,
@@ -1177,7 +1206,7 @@ mod tests {
         store
             .lock()
             .unwrap()
-            .send("mail", "just now", T, 1024, DEPTH)
+            .send("mail", "just now", T, T, 1024, DEPTH)
             .unwrap();
         assert_eq!(bodies(&peek_waiting(&path, T, 10).unwrap()), ["just now"]);
         let _ = std::fs::remove_dir_all(&dir);

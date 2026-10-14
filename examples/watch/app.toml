@@ -2,9 +2,9 @@
 # it is there, keeps the answers, shows them, and tells somebody when one
 # changes. It is the example that uses what a host gained after 0.5 —
 # `[[triggers]]`, `sql`, `[[queues]]`, `defer`, `stream`, `socket`,
-# `[keyed]`, `[rate]` and `assets/` — in the shape an app that does a real
-# job uses them.
-grant = ["sql", "fetch", "queue", "defer", "stream", "socket", "keyed", "timer", "time", "log", "auth"]
+# `[rate]` and `assets/` — in the shape an app that does a real job uses
+# them.
+grant = ["sql", "fetch", "queue", "defer", "stream", "socket", "timer", "time", "log", "auth"]
 
 [limits]
 # A socket is held for as long as its run lives, so this is also how long a
@@ -17,13 +17,6 @@ max_host_calls = 2000
 # by the host before the app runs.
 [assets]
 cache_control = "no-cache"
-
-# One run at a time for one target, so that a check started by the clock
-# and one asked for by hand cannot both write that target's history. The
-# key is `?target=`, which every path about one target carries.
-[keyed]
-by = "query:target"
-alarm_path = "/alarm"
 
 # Every minute: check the targets that are due.
 [[triggers]]
@@ -38,6 +31,17 @@ name = "notify"
 path = "/queue/notify"
 max_attempts = 4
 retry = "20s"
+
+# A target that is down is asked again in half a minute rather than at the
+# next minute: a message that is not delivered until then (`sendAfter`),
+# which the host keeps trying like any other. Twice, ten seconds apart is
+# enough — a re-check that cannot run is one the next minute's tick
+# replaces, so it is not worth the twenty seconds a notification gets.
+[[queues]]
+name = "recheck"
+path = "/queue/recheck"
+max_attempts = 2
+retry = "10s"
 
 [sql]
 max_bytes = 16777216
