@@ -306,12 +306,12 @@ with a `Content-Security-Policy` that allows no script.
 | `stats/` | medians and spreads; numbers written for people |
 | `compare/` | matching two sides' measurements, the comparability verdict, differences, the largest ones |
 | `chart/` | the trend chart as SVG: scale, ticks, series, gaps, whiskers, legend |
-| `json/`, `text/` | the webhook lab's JSON and text helpers (the JSON parser here also refuses a field named twice; `text` also reads ISO 8601 times) |
+| `fields/`, `text/` | reading a named field of a stored object with a fallback, over `std.json`'s accessors; the webhook lab's text helpers, plus reading ISO 8601 times |
 | `importer/ledger_import.py` | converts the existing results, and posts runs |
 | `samples/` | the converted runs |
 
 `minicloud test --apps examples ledger` runs the Cove tests in `schema/`, `stats/`,
-`compare/`, `chart/`, `json/` and `text/`. The Rust tests in `crates/minicloud/tests/ledger.rs` drive the
+`compare/`, `chart/`, `fields/` and `text/`. The Rust tests in `crates/minicloud/tests/ledger.rs` drive the
 app over HTTP.
 
 ## Issue #3's completion criteria

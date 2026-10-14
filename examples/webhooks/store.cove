@@ -1,7 +1,8 @@
 use kv
 use random
-use json
-use json.Json
+use std.json
+use std.json.Json
+use fields
 use text
 
 // The lab's records in the app's key-value store, as JSON:
@@ -108,12 +109,12 @@ fn endpointJson(endpoint: Endpoint) -> Json {
 
 fn endpointOf(value: Json) -> Endpoint {
   Endpoint(
-    id: json.text(value, "id"),
-    name: json.text(value, "name"),
-    created: json.int(value, "created", 0),
-    mask: json.bool(value, "mask", true),
-    maxBody: json.int(value, "maxBody", 65536),
-    retention: json.int(value, "retention", 100),
+    id: fields.text(value, "id"),
+    name: fields.text(value, "name"),
+    created: fields.int(value, "created", 0),
+    mask: fields.bool(value, "mask", true),
+    maxBody: fields.int(value, "maxBody", 65536),
+    retention: fields.int(value, "retention", 100),
   )
 }
 
@@ -131,8 +132,8 @@ fn eventJson(event: Event) -> Json {
       MapEntry(key: "receivedAt", value: Json.Text(text.isoTime(event.received))),
       MapEntry(key: "method", value: Json.Text(event.method)),
       MapEntry(key: "path", value: Json.Text(event.path)),
-      MapEntry(key: "query", value: json.fromTextMap(event.query)),
-      MapEntry(key: "headers", value: json.fromTextMap(event.headers)),
+      MapEntry(key: "query", value: fields.fromTextMap(event.query)),
+      MapEntry(key: "headers", value: fields.fromTextMap(event.headers)),
       MapEntry(key: "body", value: Json.Text(event.body)),
       MapEntry(key: "bytes", value: number(event.bytes)),
       MapEntry(key: "truncated", value: Json.Bool(event.truncated)),
@@ -156,18 +157,18 @@ fn eventOf(value: Json) -> Event {
     _ => {}
   }
   Event(
-    id: json.text(value, "id"),
-    endpoint: json.text(value, "endpoint"),
-    received: json.int(value, "received", 0),
-    method: json.text(value, "method"),
-    path: json.text(value, "path"),
-    query: json.textMap(value, "query"),
-    headers: json.textMap(value, "headers"),
-    body: json.text(value, "body"),
-    bytes: json.int(value, "bytes", 0),
-    truncated: json.bool(value, "truncated", false),
+    id: fields.text(value, "id"),
+    endpoint: fields.text(value, "endpoint"),
+    received: fields.int(value, "received", 0),
+    method: fields.text(value, "method"),
+    path: fields.text(value, "path"),
+    query: fields.textMap(value, "query"),
+    headers: fields.textMap(value, "headers"),
+    body: fields.text(value, "body"),
+    bytes: fields.int(value, "bytes", 0),
+    truncated: fields.bool(value, "truncated", false),
     masked: masked.freeze(),
-    answered: json.int(value, "answered", 0),
+    answered: fields.int(value, "answered", 0),
   )
 }
 
@@ -190,13 +191,13 @@ fn summaryJson(event: Event) -> Json {
 
 fn summaryOf(value: Json) -> Summary {
   Summary(
-    id: json.text(value, "id"),
-    received: json.int(value, "received", 0),
-    method: json.text(value, "method"),
-    path: json.text(value, "path"),
-    bytes: json.int(value, "bytes", 0),
-    contentType: json.text(value, "contentType"),
-    answered: json.int(value, "answered", 0),
+    id: fields.text(value, "id"),
+    received: fields.int(value, "received", 0),
+    method: fields.text(value, "method"),
+    path: fields.text(value, "path"),
+    bytes: fields.int(value, "bytes", 0),
+    contentType: fields.text(value, "contentType"),
+    answered: fields.int(value, "answered", 0),
   )
 }
 

@@ -256,8 +256,8 @@ those places.
 | `resend.cove` | resending, and the attempts, `resend:<id>:<event>:<n>` |
 | `simulate.cove` | what an endpoint answers (`reply:<id>`), its delay, and its error schedule (`count:<id>`, by `kv.increment`) |
 | `pages.cove` | the HTML |
-| `json/` | a JSON parser and renderer, adapted from the Cove repository's `examples/cq/json` (with `\u` escapes and an indented renderer) |
+| `fields/` | reading a named field of a stored object as text, an `Int`, a flag or a map of text, with a fallback, over `std.json`'s accessors. The parser and the renderers themselves are `std.json`'s |
 | `text/` | HTML escaping, form decoding (`+`, `%XX`, UTF-8), ISO 8601 times, byte sizes, truncation at a character boundary |
 
-`minicloud test --apps examples webhooks` runs the Cove tests in `json/` and `text/`. The Rust
+`minicloud test --apps examples webhooks` runs the Cove tests in `fields/` and `text/`. The Rust
 tests in `crates/minicloud/tests/webhooks.rs` drive the app over HTTP.

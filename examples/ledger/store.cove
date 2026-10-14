@@ -1,6 +1,7 @@
 use kv
-use json
-use json.Json
+use std.json
+use std.json.Json
+use fields
 use schema
 use schema.Run
 use schema.Measurement
@@ -110,9 +111,9 @@ fn summaryJson(summary: Summary) -> Json {
     MapEntry(key: "measuredAtMs", value: Json.Number(summary.measuredAt.toFloat())),
     MapEntry(key: "results", value: Json.Number(summary.results.toFloat())),
     MapEntry(key: "backends", value: Json.Items(backends.freeze())),
-    MapEntry(key: "environment", value: json.fromTextMap(summary.environment)),
-    MapEntry(key: "toolchain", value: json.fromTextMap(summary.toolchain)),
-    MapEntry(key: "conditions", value: json.fromTextMap(summary.conditions)),
+    MapEntry(key: "environment", value: fields.fromTextMap(summary.environment)),
+    MapEntry(key: "toolchain", value: fields.fromTextMap(summary.toolchain)),
+    MapEntry(key: "conditions", value: fields.fromTextMap(summary.conditions)),
     MapEntry(key: "source", value: Json.Text(summary.source)),
   )
   match summary.loadLeast {
@@ -144,18 +145,18 @@ fn summaryFrom(value: Json) -> Summary {
     _ => {}
   }
   Summary(
-    id: json.text(value, "id"),
-    repository: json.text(value, "repository"),
-    commit: json.text(value, "commit"),
-    measuredAt: json.int(value, "measuredAtMs", 0),
-    results: json.int(value, "results", 0),
+    id: fields.text(value, "id"),
+    repository: fields.text(value, "repository"),
+    commit: fields.text(value, "commit"),
+    measuredAt: fields.int(value, "measuredAtMs", 0),
+    results: fields.int(value, "results", 0),
     backends: backends.freeze(),
     loadLeast: numberField(value, "loadLeast"),
     loadMost: numberField(value, "loadMost"),
-    environment: json.textMap(value, "environment"),
-    toolchain: json.textMap(value, "toolchain"),
-    conditions: json.textMap(value, "conditions"),
-    source: json.text(value, "source"),
+    environment: fields.textMap(value, "environment"),
+    toolchain: fields.textMap(value, "toolchain"),
+    conditions: fields.textMap(value, "conditions"),
+    source: fields.text(value, "source"),
   )
 }
 
@@ -199,8 +200,8 @@ fn pointJson(run: Run, result: Measurement) -> Json {
       MapEntry(key: "case", value: Json.Text(result.case)),
       MapEntry(key: "input", value: Json.Text(result.input)),
       MapEntry(key: "backend", value: Json.Text(result.backend)),
-      MapEntry(key: "conditions", value: json.fromTextMap(result.conditions)),
-      MapEntry(key: "environment", value: json.fromTextMap(run.environment)),
+      MapEntry(key: "conditions", value: fields.fromTextMap(result.conditions)),
+      MapEntry(key: "environment", value: fields.fromTextMap(run.environment)),
       MapEntry(key: "metrics", value: Json.Fields(metrics)),
     ),
   )

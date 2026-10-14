@@ -1,5 +1,5 @@
 use web
-use json
+use std.json
 use text
 
 // The admin pages. Every value that came from outside — an endpoint's name,
@@ -148,6 +148,13 @@ fn eventPage(base: String, endpoint: Endpoint, event: Event, attempts: Array<Att
     "<p class=muted>Masked before storing: {h(", ".join(event.masked))}</p>"
   }
   let summary = "<table><tr><th>received</th><td>{text.isoTime(event.received)}</td></tr><tr><th>method</th><td>{h(event.method)}</td></tr><tr><th>path</th><td><code>{h(event.path)}</code></td></tr><tr><th>body</th><td>{size}</td></tr></table>"
+  // The only JSON here that this app did not write itself: a body some
+  // sender posted. `std.json` is strict — an object that names a field twice
+  // is refused rather than read with one of the two values — so a body like
+  // that falls to the `Err` arm and loses its "As JSON" block. That is the
+  // right answer: the raw body is on the page either way, and a pretty print
+  // that silently dropped one of the two values would be a prettier lie than
+  // showing nothing.
   let formatted = match json.parse(event.body) {
     Ok(value) => {
       if event.body.trim() == "" {

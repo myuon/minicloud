@@ -1,11 +1,12 @@
 use web
 use kv
-use json
-use json.Json
+use std.json
+use std.json.Json
 use chart
 use chart.Point
 use chart.Series
 use chart.Tick
+use fields
 use stats
 use text
 
@@ -45,14 +46,14 @@ fn pointsOf(case: String, input: String) -> Array<Stored> {
           }
           out.push(
             Stored(
-              run: json.text(value, "run"),
-              commit: json.text(value, "commit"),
-              measuredAt: json.int(value, "measuredAtMs", 0),
-              backend: json.text(value, "backend"),
-              conditions: json.textMap(value, "conditions"),
-              environment: json.textMap(value, "environment"),
+              run: fields.text(value, "run"),
+              commit: fields.text(value, "commit"),
+              measuredAt: fields.int(value, "measuredAtMs", 0),
+              backend: fields.text(value, "backend"),
+              conditions: fields.textMap(value, "conditions"),
+              environment: fields.textMap(value, "environment"),
               metrics: metrics,
-              series: json.text(value, "backend"),
+              series: fields.text(value, "backend"),
             ),
           )
         }
@@ -140,7 +141,7 @@ fn allCases() -> Array<CaseName> {
     let page = kv.list("case:", after, 500)
     for entry in page {
       match json.parse(entry.value) {
-        Ok(value) => out.push(CaseName(case: json.text(value, "case"), input: json.text(value, "input")))
+        Ok(value) => out.push(CaseName(case: fields.text(value, "case"), input: fields.text(value, "input")))
         Err(_) => {}
       }
       after = entry.key
@@ -210,8 +211,8 @@ fn pointOf(at: String, stored: Stored, metric: String) -> Option<Point> {
       let median = numberIn(value, "median")
       let least = numberIn(value, "least")
       let most = numberIn(value, "most")
-      let count = json.int(value, "count", 0)
-      let unit = json.text(value, "unit")
+      let count = fields.int(value, "count", 0)
+      let unit = fields.text(value, "unit")
       let range = if count > 1 { " ({stats.show(least)}–{stats.show(most)}, ×{count})" } else { " (×1)" }
       Some(
         Point(
@@ -239,7 +240,7 @@ fn numberIn(value: Json, name: String) -> Float {
 fn unitIn(points: Array<Stored>, metric: String) -> String {
   for point in points {
     match point.metrics.get(metric) {
-      Some(value) => return json.text(value, "unit")
+      Some(value) => return fields.text(value, "unit")
       None => {}
     }
   }
