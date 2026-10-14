@@ -337,7 +337,7 @@ li.app{grid-template-columns:1fr;gap:.25em;padding:.65em .8em}
 li.app .flags{justify-content:flex-start;margin-top:.15em}
 li.app .count{font-size:13px}
 }
-/* the speed page: the chart is the width of the page and as tall as its own box makes it — no max-height, which would letterbox it: the viewBox would be fitted to the shorter side and the line would stop short of both edges. two lines on one chart, told apart by their dashes as well as their colour — someone may not see colour — and drawn at the width of the page, which is what the viewBox is for. non-scaling-stroke keeps a line as thick on a phone as on a desk, where scaling the box down would thin it to a hair */
+/* the metrics page: the chart is the width of the page and as tall as its own box makes it — no max-height, which would letterbox it: the viewBox would be fitted to the shorter side and the line would stop short of both edges. two lines on one chart, told apart by their dashes as well as their colour — someone may not see colour — and drawn at the width of the page, which is what the viewBox is for. non-scaling-stroke keeps a line as thick on a phone as on a desk, where scaling the box down would thin it to a hair */
 svg.chart{display:block;width:100%;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
 .ln{fill:none;stroke-width:2;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .ln-served,.ln-p50{stroke:var(--link)}
