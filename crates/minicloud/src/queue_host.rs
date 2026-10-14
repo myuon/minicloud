@@ -4,6 +4,7 @@
 //! | operation | answers |
 //! | --- | --- |
 //! | `queue.send(name, body)` | `Result<Int, Error>`: the message's id |
+//! | `queue.sendAfter(name, body, delaySecs)` | `Result<Int, Error>`: the message's id, delivered no sooner than `delaySecs` from now |
 //! | `queue.depth(name)` | `Result<Int, Error>`: how many are waiting |
 //!
 //! A queue is declared in `app.toml` (`[[queues]]`) before it can be sent
@@ -40,6 +41,12 @@ use crate::queue::Queues;
 /// The capability that opens this module.
 pub const CAPABILITY: &str = "queue";
 
+/// The longest a message may be held back: seven days. A delay is in
+/// seconds, and a caller that passes milliseconds by mistake would park a
+/// message for decades, where nobody would look for it — an `Err` at the
+/// call is kinder than a message that never comes.
+const MAX_DELAY_SECS: i64 = 7 * 24 * 60 * 60;
+
 const fn op(
     name: &'static str,
     params: &'static [HostType],
@@ -67,6 +74,12 @@ pub const QUEUE: ModuleSchema = ModuleSchema {
         op(
             "send",
             &[HostType::String, HostType::String],
+            HostType::Result(&HostType::Int, &HostType::Error),
+            Effect::ReversibleWrite,
+        ),
+        op(
+            "sendAfter",
+            &[HostType::String, HostType::String, HostType::Int],
             HostType::Result(&HostType::Int, &HostType::Error),
             Effect::ReversibleWrite,
         ),
@@ -141,12 +154,26 @@ impl HostApi for QueueHost {
         };
         let store = store.lock().unwrap_or_else(|p| p.into_inner());
         match op {
-            "send" => {
+            "send" | "sendAfter" => {
                 let body = args[1].as_str().unwrap_or_default();
+                let at = now();
+                // A negative delay is no delay: deliver now, as `send` does.
+                let delay = match op {
+                    "sendAfter" => args.get(2).and_then(Value::as_int).unwrap_or(0).max(0),
+                    _ => 0,
+                };
+                if delay > MAX_DELAY_SECS {
+                    self.counters.queue_refused.fetch_add(1, Ordering::Relaxed);
+                    return Ok(Value::err(Value::error(format!(
+                        "queue.sendAfter: a delay of {delay} seconds is above the limit of \
+                         {MAX_DELAY_SECS} seconds (7 days)"
+                    ))));
+                }
                 match store.send(
                     name,
                     body,
-                    now(),
+                    at,
+                    at.saturating_add(delay),
                     policy.max_body_bytes as usize,
                     policy.max_depth,
                 ) {
@@ -156,7 +183,7 @@ impl HostApi for QueueHost {
                     }
                     Err(why) => {
                         self.counters.queue_refused.fetch_add(1, Ordering::Relaxed);
-                        Ok(Value::err(Value::error(format!("queue.send: {why}"))))
+                        Ok(Value::err(Value::error(format!("queue.{op}: {why}"))))
                     }
                 }
             }
@@ -261,7 +288,6 @@ fn start(
             path: &policy.path,
             body: message.body.clone(),
         },
-        "",
         // Which try this is, and how many there will be: a consumer that
         // wants to say something only when the message is about to become
         // a dead letter compares the two. `lease` raised `attempts` to

@@ -17,7 +17,6 @@
 //! | `x-minicloud-trigger` | a `[[triggers]]` schedule, to the path it asked for |
 //! | `x-minicloud-deferred` | `defer.run`, to the path the app asked for |
 //! | `x-minicloud-queue` | a message being delivered, to the queue's name, with `x-minicloud-attempt` and `x-minicloud-attempts` beside it |
-//! | `x-minicloud-alarm` | a due alarm, to the key it is about |
 //!
 //! The answer comes back on a `oneshot`, which the caller may wait on to
 //! count and log the outcome, or drop — dropping it does not cancel the
@@ -51,16 +50,12 @@ pub const QUEUE_HEADER: &str = "x-minicloud-queue";
 pub const ATTEMPT_HEADER: &str = "x-minicloud-attempt";
 pub const ATTEMPTS_HEADER: &str = "x-minicloud-attempts";
 
-/// The header a due alarm's run carries, naming the key it is about.
-pub const ALARM_HEADER: &str = "x-minicloud-alarm";
-
 /// Every header the host sets on a run of its own and never takes from a
 /// client.
-pub const INTERNAL_HEADERS: [&str; 6] = [
+pub const INTERNAL_HEADERS: [&str; 5] = [
     TRIGGER_HEADER,
     DEFERRED_HEADER,
     QUEUE_HEADER,
-    ALARM_HEADER,
     ATTEMPT_HEADER,
     ATTEMPTS_HEADER,
 ];
@@ -85,17 +80,14 @@ pub struct Asked<'a> {
 /// it, so a job that writes a link to itself writes the same one a page
 /// would.
 pub fn admit(engine: &Engine, asked: Asked<'_>) -> Result<oneshot::Receiver<Reply>, Rejection> {
-    admit_with(engine, asked, "", &[])
+    admit_with(engine, asked, &[])
 }
 
-/// [`admit`], with a query the app will see and headers of its own: a due
-/// alarm hands the app its key the way that app's `[keyed] by` says, so
-/// the app reads one key the same way whoever asked, and a queue's
-/// delivery says which try it is.
+/// [`admit`], with headers of its own: a queue's delivery says which try it
+/// is.
 pub fn admit_with(
     engine: &Engine,
     asked: Asked<'_>,
-    query: &str,
     extra: &[(&str, String)],
 ) -> Result<oneshot::Receiver<Reply>, Rejection> {
     let Asked {
@@ -123,16 +115,13 @@ pub fn admit_with(
     );
     // A path may carry its own query — `defer.run("/check?target=a")` is
     // how an app says which thing the work is about — and the app sees the
-    // two apart, as it does for a request off a connection. It matters
-    // beyond tidiness: `[keyed]` reads the key out of the query, so a path
-    // whose query stayed in the path would be a run that took no turn.
+    // two apart, as it does for a request off a connection.
     let (path, own_query) = match path.split_once('?') {
         Some((path, query)) => (path, query),
         None => (path, ""),
     };
     let query: Vec<(String, String)> = form_urlencoded::parse(own_query.as_bytes())
         .into_owned()
-        .chain(form_urlencoded::parse(query.as_bytes()).into_owned())
         .collect();
     let (reply, answer) = oneshot::channel();
     let start = Box::new(Start {

@@ -44,7 +44,6 @@ pub mod highlight;
 pub mod histogram;
 pub mod hosts;
 pub mod internal;
-pub mod keyed;
 pub mod kv;
 pub mod logs;
 pub mod manage;

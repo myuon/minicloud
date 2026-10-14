@@ -66,7 +66,8 @@ fn store(apps: &Apps, app: &str) -> std::sync::Arc<std::sync::Mutex<minicloud::q
 fn put(apps: &Apps, app: &str, queue: &str, body: &str) -> i64 {
     let store = store(apps, app);
     let store = store.lock().unwrap();
-    store.send(queue, body, now(), 64 << 10, 1 << 20).unwrap()
+    let at = now();
+    store.send(queue, body, at, at, 64 << 10, 1 << 20).unwrap()
 }
 
 /// Buries a message with a reason of the test's own, where a reason the

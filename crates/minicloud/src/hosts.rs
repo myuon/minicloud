@@ -66,9 +66,6 @@ pub struct AppContext {
     pub defer: crate::config::DeferLimits,
     /// `[[queues]]`: the queues the app may send to.
     pub queues: Vec<crate::config::QueuePolicy>,
-    /// `[keyed]`: whether the app has one at all, which is whether an
-    /// alarm would have anywhere to run.
-    pub keyed: Option<crate::config::KeyedPolicy>,
     /// The largest one chunk of a streamed answer may be, which is the
     /// largest a whole one may be ([`crate::stream`]).
     pub max_response_bytes: usize,
@@ -106,7 +103,7 @@ pub struct HostModules {
 
 impl HostModules {
     /// `web`, `log`, `timer`, `kv`, `sql`, `defer`, `queue`, `stream`,
-    /// `keyed`, `socket`, `fetch`, `time`, `random`, `auth` and `admin`.
+    /// `socket`, `fetch`, `time`, `random`, `auth` and `admin`.
     pub fn standard() -> HostModules {
         HostModules {
             modules: vec![
@@ -118,7 +115,6 @@ impl HostModules {
                 Arc::new(crate::defer::DeferModule),
                 Arc::new(crate::queue_host::QueueModule),
                 Arc::new(crate::stream::StreamModule),
-                Arc::new(crate::keyed::KeyedModule),
                 Arc::new(crate::socket::SocketModule),
                 Arc::new(crate::fetch::FetchModule),
                 Arc::new(crate::sys::TimeModule),

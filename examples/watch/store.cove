@@ -3,10 +3,11 @@ use time
 
 /// What the watch keeps, and the questions it asks of it.
 ///
-/// Two tables in the app's own SQL store: the targets, and every check ever
-/// made. `kv` could hold the targets and could not answer "how many of the
-/// last day's checks were good, by target", which is the question a watch
-/// exists to answer — so this is `sql`'s.
+/// Three tables in the app's own SQL store: the targets, every check ever
+/// made, and whether each target was last up or down. `kv` could hold the
+/// targets and could not answer "how many of the last day's checks were
+/// good, by target", which is the question a watch exists to answer — so
+/// this is `sql`'s.
 
 /// One target: a name, where it is, and where to say so when it changes.
 struct Target {
@@ -30,7 +31,7 @@ struct Status {
 }
 
 /// Makes the tables if they are not there. Every path calls it first: it is
-/// two statements SQLite answers from its own schema, and an app that made
+/// a few statements SQLite answers from its own schema, and an app that made
 /// its tables in one place would have a place that has to run first.
 fn prepare() -> Result<Unit, Error> {
   sql.exec(
@@ -58,6 +59,10 @@ fn prepare() -> Result<Unit, Error> {
   // first. Without it every page would be a scan of everything ever
   // checked.
   sql.exec("CREATE INDEX IF NOT EXISTS checks_by_target ON checks (target, at DESC)", [])?
+  // What a target was last known to be, and nothing else: one row each, so
+  // that "did it change" is a statement about one row rather than a reading
+  // of the history. `checks` stays the history; this is only the latch.
+  sql.exec("CREATE TABLE IF NOT EXISTS state (target TEXT PRIMARY KEY, ok INTEGER NOT NULL)", [])?
   Ok(())
 }
 
@@ -89,6 +94,7 @@ fn removeTarget(id: String) -> Result<Unit, Error> {
   prepare()?
   sql.exec("DELETE FROM target WHERE id = ?", [id])?
   sql.exec("DELETE FROM checks WHERE target = ?", [id])?
+  sql.exec("DELETE FROM state WHERE target = ?", [id])?
   Ok(())
 }
 
@@ -123,19 +129,29 @@ fn record(target: String, ok: Bool, status: Int, ms: Int, why: String) -> Result
   Ok(())
 }
 
-/// Whether the last check before this one was good, for a target that has
-/// been checked twice. `None` for one that has not: the first check of a
-/// target is not a change.
-fn wasOk(target: String) -> Result<Option<Bool>, Error> {
+/// Whether this check is the one that changed the target — up to down, or
+/// down to up — and so the one that tells somebody.
+///
+/// A compare-and-swap, in the only form this host has: it has no
+/// transactions, so atomicity is one statement being atomic by itself. Read
+/// the last state, decide, and write it would be three statements, and two
+/// runs about one target could both read "up", both see "down", and both
+/// tell — or both read the other's write and neither would. Instead each
+/// statement is its own test, and its row count is the answer.
+///
+/// The first check of a target inserts its row and is not a change. After
+/// that the `UPDATE` only matches while the row still says the other thing,
+/// so of any number of runs that saw the target flip, exactly one makes the
+/// row say so and the rest find nothing to change.
+fn changed(target: String, ok: Bool) -> Result<Bool, Error> {
   prepare()?
-  let answer = sql.query(
-    "SELECT ok FROM checks WHERE target = ? ORDER BY at DESC LIMIT 1 OFFSET 1",
-    [target],
-  )?
-  match answer.rows.get(0) {
-    Some(row) => Ok(Some(number(row, 0) == 1))
-    None => Ok(None)
+  let now = if ok { "1" } else { "0" }
+  let first = sql.exec("INSERT OR IGNORE INTO state (target, ok) VALUES (?1, ?2)", [target, now])?
+  if first.rows > 0 {
+    return Ok(false)
   }
+  let flipped = sql.exec("UPDATE state SET ok = ?1 WHERE target = ?2 AND ok != ?1", [now, target])?
+  Ok(flipped.rows > 0)
 }
 
 /// Every target with the last thing known about it, and how much of the

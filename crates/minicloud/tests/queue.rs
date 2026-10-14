@@ -54,6 +54,47 @@ fn a_message_outlives_the_request_that_sent_it_and_is_delivered() {
 }
 
 #[test]
+fn a_message_sent_after_a_delay_is_not_delivered_before_it() {
+    let apps = post(TWICE);
+    let host = start(&apps, 2);
+    let sent = get(host.addr, "/post/send-after?body=later&secs=3");
+    assert_eq!(sent.status, 202, "{}", sent.body);
+    assert_eq!(count(&host, "post", "queue_sent"), 1);
+    // The loop looks once a second, so by now it has looked and let it be:
+    // the message is waiting, and it counts as waiting.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(count(&host, "post", "queue_delivered"), 0);
+    assert_eq!(taken(&host), "");
+    assert_eq!(get(host.addr, "/post/depth").body.trim(), "1");
+
+    wait_until("the held message to be delivered", || {
+        count(&host, "post", "queue_delivered") == 1
+    });
+    assert_eq!(taken(&host), "later;");
+    assert_eq!(get(host.addr, "/post/depth").body.trim(), "0");
+}
+
+#[test]
+fn a_delay_below_nothing_is_no_delay_and_one_past_a_week_is_the_apps_err() {
+    let apps = post(TWICE);
+    let host = start(&apps, 2);
+    assert_eq!(
+        get(host.addr, "/post/send-after?body=now&secs=-5").status,
+        202
+    );
+    wait_until("the message to be delivered", || {
+        count(&host, "post", "queue_delivered") == 1
+    });
+    assert_eq!(taken(&host), "now;");
+
+    let far = get(host.addr, "/post/send-after?body=far&secs=604801");
+    assert_eq!(far.status, 429, "{}", far.body);
+    assert!(far.body.contains("604800"), "{}", far.body);
+    assert_eq!(count(&host, "post", "queue_refused"), 1);
+    assert_eq!(get(host.addr, "/post/depth").body.trim(), "0");
+}
+
+#[test]
 fn only_the_host_delivers() {
     let apps = post(TWICE);
     let host = start(&apps, 2);

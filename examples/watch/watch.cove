@@ -5,7 +5,6 @@ use queue
 use defer
 use stream
 use socket
-use keyed
 use timer
 use time
 use log
@@ -18,10 +17,11 @@ use text
 /// each target whether it is there and writes the answer down (`sql`). A
 /// target whose answer *changed* is a message on the `notify` queue, which
 /// the host delivers to `/queue/notify` and keeps trying; a target that is
-/// down gets an alarm so it is asked again in half a minute rather than at
-/// the next minute (`keyed`). The dashboard is a page the host serves the
-/// stylesheet of (`assets/`), and it may be watched as it happens over
-/// server-sent events (`stream`) or talked to over a socket (`socket`).
+/// down is asked again in half a minute rather than at the next minute, by
+/// a message the queue holds back until then (`queue.sendAfter`). The
+/// dashboard is a page the host serves the stylesheet of (`assets/`), and
+/// it may be watched as it happens over server-sent events (`stream`) or
+/// talked to over a socket (`socket`).
 ///
 /// | path | what |
 /// | --- | --- |
@@ -33,7 +33,7 @@ use text
 /// | `POST /targets/remove?target=` | drop one (the admin) |
 /// | `POST /check?target=` | check one now (the admin) |
 /// | `POST /cron/check` | the clock's |
-/// | `POST /alarm?target=` | the alarm's: a target that was down |
+/// | `POST /queue/recheck` | the queue's: a target that was down, asked again |
 /// | `POST /queue/notify` | the queue's: tell somebody |
 export fn handle(request: web.Request) -> web.Response {
   // The host's own paths first: a run the host asked for carries a header
@@ -41,8 +41,8 @@ export fn handle(request: web.Request) -> web.Response {
   if request.path == "/cron/check" {
     return checkDue(request)
   }
-  if request.path == "/alarm" {
-    return rang(request)
+  if request.path == "/queue/recheck" {
+    return rechecked(request)
   }
   if request.path == "/queue/notify" {
     return notify(request)
@@ -104,9 +104,6 @@ fn fromHost(request: web.Request) -> Bool {
   if request.headers.get("x-minicloud-trigger").isSome() {
     return true
   }
-  if request.headers.get("x-minicloud-alarm").isSome() {
-    return true
-  }
   if request.headers.get("x-minicloud-deferred").isSome() {
     return true
   }
@@ -116,17 +113,25 @@ fn fromHost(request: web.Request) -> Bool {
 // ----------------------------------------------------------------- checking
 
 /// Asks one target whether it is there, writes the answer down, and does
-/// what the answer calls for: an alarm while it is down, a message when it
-/// changed.
+/// what the answer calls for: a message when it changed, and — while it is
+/// down, if `again` — a re-check in half a minute.
 ///
-/// Every path that checks goes through here, and every one of them carries
-/// `?target=`, so `[keyed]` is what keeps two checks of one target from
-/// writing over each other.
-fn check(target: Target) -> Result<Bool, Error> {
+/// Nothing here holds a target while it is checked. Two runs about one
+/// target may overlap, and what keeps that harmless is `changed`: the one
+/// statement that decides whether this run is the one that flipped the
+/// state. Both runs write their check to the history, which is true — it
+/// was asked twice — and only one of them tells.
+///
+/// `again` is whether this run may schedule the next. Only the clock's does:
+/// a message, unlike a timer that is set again and so moves, stays queued,
+/// so a re-check that scheduled its own successor would start a chain for
+/// every tick and every one of them would go on for as long as the target
+/// is down. With the clock alone scheduling, the checks of a down target
+/// land at 0s, 30s, 60s, 90s and no more often than that.
+fn check(target: Target, again: Bool) -> Result<Bool, Error> {
   let began = time.nowMillis()
   let outcome = fetch.get(target.url)
   let took = time.nowMillis() - began
-  let was = store_wasOk(target.id)
   var ok = false
   var status = 0
   var why = ""
@@ -143,41 +148,20 @@ fn check(target: Target) -> Result<Bool, Error> {
     }
   }
   record(target.id, ok, status, took, why)?
-  if ok {
-    // Back up: no more alarms, and tell whoever is listening if it had
-    // been down.
-    match keyed.clearAlarm(target.id) {
-      Ok(_) => {}
-      Err(error) => log.warn("cannot clear {target.id}'s alarm: {error.message}")
-    }
-  } else {
+  if !ok && again {
     // Down: ask again in half a minute rather than at the next minute.
-    match keyed.alarm(target.id, time.nowMillis() + 30000) {
+    // There is nothing to cancel when it comes back — a target that
+    // recovered just does not schedule another, and at worst the one
+    // already queued runs once more and finds it up.
+    match queue.sendAfter("recheck", target.id, 30) {
       Ok(_) => {}
-      Err(error) => log.warn("cannot set {target.id}'s alarm: {error.message}")
+      Err(error) => log.warn("cannot queue {target.id}'s re-check: {error.message}")
     }
   }
-  match was {
-    Some(before) => {
-      if before != ok {
-        told(target, ok)
-      }
-    }
-    None => {}
+  if changed(target.id, ok)? {
+    told(target, ok)
   }
   Ok(ok)
-}
-
-/// The last check before this one, or nothing for a target that has only
-/// been checked once.
-fn store_wasOk(target: String) -> Option<Bool> {
-  match wasOk(target) {
-    Ok(was) => was
-    Err(error) => {
-      log.error("cannot read {target}'s last check: {error.message}")
-      None
-    }
-  }
 }
 
 /// Puts the change on the queue.
@@ -208,7 +192,7 @@ fn checkDue(request: web.Request) -> web.Response {
   }
   var checked = 0
   for target in watched {
-    match check(target) {
+    match check(target, true) {
       Ok(_) => { checked += 1 }
       Err(error) => log.error("checking {target.id}: {error.message}")
     }
@@ -236,15 +220,18 @@ fn pruned(request: web.Request) -> web.Response {
   }
 }
 
-/// `POST /alarm`: a target that was down, asked again sooner.
-fn rang(request: web.Request) -> web.Response {
+/// `POST /queue/recheck`: a target that was down, asked again sooner.
+///
+/// A 200 for a target that is no longer watched: the host answers a 5xx
+/// with another delivery, and there is nothing to deliver to.
+fn rechecked(request: web.Request) -> web.Response {
   if !fromHost(request) {
-    return answer(403, "the clock asks for this\n")
+    return answer(403, "the queue asks for this\n")
   }
-  let id = request.query.get("target").unwrapOr("")
+  let id = request.body.trim()
   match target(id) {
     Ok(Some(found)) => {
-      match check(found) {
+      match check(found, false) {
         Ok(ok) => answer(200, "{id} is {if ok { "up" } else { "down" }}\n")
         Err(error) => answer(500, "{error.message}\n")
       }
@@ -259,7 +246,7 @@ fn checkOne(request: web.Request) -> web.Response {
   let id = request.query.get("target").unwrapOr("")
   match target(id) {
     Ok(Some(found)) => {
-      match check(found) {
+      match check(found, false) {
         Ok(ok) => answer(200, "{id} is {if ok { "up" } else { "down" }}\n")
         Err(error) => answer(500, "{error.message}\n")
       }
@@ -530,7 +517,7 @@ fn live() -> web.Response {
 fn checked(id: String) -> String {
   match target(id) {
     Ok(Some(found)) => {
-      match check(found) {
+      match check(found, false) {
         Ok(ok) => "{id} is {if ok { "up" } else { "down" }}"
         Err(error) => "{id}: {error.message}"
       }
