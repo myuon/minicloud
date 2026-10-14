@@ -2,8 +2,8 @@ use web
 use auth
 use log
 use time
-use json
-use json.Json
+use std.json
+use std.json.Json
 use text
 
 /// The webhook lab: receive URLs that keep what they are sent, and pages to

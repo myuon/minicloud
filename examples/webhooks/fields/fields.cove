@@ -1,0 +1,86 @@
+use std.json
+use std.json.Json
+
+// Reading one named field of a stored object as a value the webhook lab can
+// use: the text of a field, its number as an `Int`, its flag, the map of text
+// under it — and the way back, a map of text as an object.
+//
+// These five did not go to `std.json` along with the parser and the
+// renderers, because each of them takes a field name and a fallback
+// together, and that pairing is an application deciding that an absent field
+// and a field of the wrong type mean the same thing — a convenience of this
+// program rather than a fact about the format, which is why `std.json`
+// answers an `Option` and leaves the decision here.
+
+/// The text field `name` of an object, or `""`.
+export fn text(value: Json, name: String) -> String {
+  match json.field(value, name) {
+    Some(found) => json.asText(found).unwrapOr("")
+    None => ""
+  }
+}
+
+/// The number field `name` of an object as an `Int`, or `fallback`.
+///
+/// Read through `asNumber` and `toInt`, and not through `std.json`'s
+/// `asWhole`, which answers `None` for a number with a fraction. The
+/// difference is only ever reached by a record this app did not write — every
+/// field read here it wrote as a whole number — and for one of those a `3.5`
+/// truncated to 3 is nearer the stored value than the fallback is. That is
+/// the same reading the hand-written module did, kept deliberately.
+export fn int(value: Json, name: String, fallback: Int) -> Int {
+  match json.field(value, name) {
+    Some(found) => {
+      match json.asNumber(found) {
+        Some(number) => number.toInt().unwrapOr(fallback)
+        None => fallback
+      }
+    }
+    None => fallback
+  }
+}
+
+/// The boolean field `name` of an object, or `fallback`.
+export fn bool(value: Json, name: String, fallback: Bool) -> Bool {
+  match json.field(value, name) {
+    Some(found) => json.asBool(found).unwrapOr(fallback)
+    None => fallback
+  }
+}
+
+/// The object field `name` as a map of its text fields, or an empty map.
+///
+/// A field of that object that is not text is left out rather than written
+/// some other way: the caller asked for text, and a number spelled back as
+/// `"3"` would be a value the record never held.
+export fn textMap(value: Json, name: String) -> Map<String, String> {
+  var out: Map<String, String> = Map.of()
+  match json.field(value, name) {
+    Some(found) => {
+      match json.asFields(found) {
+        Some(named) => {
+          for entry in named {
+            match json.asText(entry.value) {
+              Some(text) => {
+                out = out.inserted(entry.key, text)
+              }
+              None => {}
+            }
+          }
+        }
+        None => {}
+      }
+    }
+    None => {}
+  }
+  out
+}
+
+/// A map of text as a JSON object.
+export fn fromTextMap(entries: Map<String, String>) -> Json {
+  var out: Map<String, Json> = Map.of()
+  for entry in entries {
+    out = out.inserted(entry.key, Json.Text(entry.value))
+  }
+  Json.Fields(out)
+}

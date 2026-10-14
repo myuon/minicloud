@@ -981,14 +981,14 @@ mod tests {
     fn an_app_loads_with_its_modules_and_the_standard_library() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/ledger");
         let (sources, package) = load_package(&dir, "ledger").unwrap();
-        for module in ["ledger", "json", "stats"] {
+        for module in ["ledger", "fields", "stats"] {
             assert!(package.modules.contains_key(module), "{module}");
         }
         assert!(package.modules.keys().any(|name| name.starts_with("std")));
-        let json = &package.modules["json"];
+        let fields = &package.modules["fields"];
         assert_eq!(
-            sources.path(json.units[0].file),
-            Path::new("ledger/json/json.cove")
+            sources.path(fields.units[0].file),
+            Path::new("ledger/fields/fields.cove")
         );
         let Err(missing) = load_package(&dir.join("nope"), "nope") else {
             panic!("a directory that is not there loads");

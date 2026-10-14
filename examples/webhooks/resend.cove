@@ -1,8 +1,9 @@
 use kv
 use fetch
 use time
-use json
-use json.Json
+use std.json
+use std.json.Json
+use fields
 use text
 
 // Resending a stored request to another URL — one the app's `[fetch] allow`
@@ -171,7 +172,7 @@ fn attemptJson(attempt: Attempt) -> Json {
       entry("method", Json.Text(attempt.method)),
       entry("ok", Json.Bool(attempt.ok)),
       entry("status", number(attempt.status)),
-      entry("headers", json.fromTextMap(attempt.headers)),
+      entry("headers", fields.fromTextMap(attempt.headers)),
       entry("body", Json.Text(attempt.body)),
       entry("bytes", number(attempt.bytes)),
       entry("truncated", Json.Bool(attempt.truncated)),
@@ -183,18 +184,18 @@ fn attemptJson(attempt: Attempt) -> Json {
 
 fn attemptOf(value: Json) -> Attempt {
   Attempt(
-    id: json.text(value, "id"),
-    at: json.int(value, "at", 0),
-    url: json.text(value, "url"),
-    method: json.text(value, "method"),
-    ok: json.bool(value, "ok", false),
-    status: json.int(value, "status", 0),
-    headers: json.textMap(value, "headers"),
-    body: json.text(value, "body"),
-    bytes: json.int(value, "bytes", 0),
-    truncated: json.bool(value, "truncated", false),
-    error: json.text(value, "error"),
-    millis: json.int(value, "millis", 0),
+    id: fields.text(value, "id"),
+    at: fields.int(value, "at", 0),
+    url: fields.text(value, "url"),
+    method: fields.text(value, "method"),
+    ok: fields.bool(value, "ok", false),
+    status: fields.int(value, "status", 0),
+    headers: fields.textMap(value, "headers"),
+    body: fields.text(value, "body"),
+    bytes: fields.int(value, "bytes", 0),
+    truncated: fields.bool(value, "truncated", false),
+    error: fields.text(value, "error"),
+    millis: fields.int(value, "millis", 0),
   )
 }
 

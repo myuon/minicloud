@@ -1,0 +1,35 @@
+test fn readsAFieldOfTheTypeItAsksFor() -> Result<Unit, Error> {
+  let value = json.parse("\{\"id\": \"r1\", \"results\": 12, \"stored\": true, \"environment\": \{\"os\": \"linux\", \"cores\": 8\}\}").unwrapOr(Json.Null)
+  assertEqual(text(value, "id"), "r1")?
+  assertEqual(int(value, "results", 0), 12)?
+  assertEqual(bool(value, "stored", false), true)?
+  let environment = textMap(value, "environment")
+  assertEqual(environment.get("os").unwrapOr(""), "linux")?
+  // `cores` is a number, and the caller asked for text, so it is left out.
+  assertEqual(environment.length(), 1)?
+  Ok(())
+}
+
+test fn theFallbackFiresForAMissingFieldAndForTheWrongType() -> Result<Unit, Error> {
+  let value = json.parse("\{\"results\": \"twelve\", \"stored\": 1\}").unwrapOr(Json.Null)
+  assertEqual(text(value, "id"), "")?
+  assertEqual(int(value, "results", -1), -1)?
+  assertEqual(bool(value, "stored", true), true)?
+  assertEqual(textMap(value, "environment").length(), 0)?
+  // A value that is not an object has no fields, so every field is missing.
+  assertEqual(int(Json.Text("r1"), "results", 7), 7)?
+  Ok(())
+}
+
+test fn aMapOfTextSurvivesARoundTrip() -> Result<Unit, Error> {
+  let environment = Map.of(
+    MapEntry(key: "os", value: "linux"),
+    MapEntry(key: "note", value: "quote \" and newline \n"),
+  )
+  let stored = json.render(Json.Fields(Map.of(MapEntry(key: "environment", value: fromTextMap(environment)))))
+  let back = textMap(json.parse(stored).unwrapOr(Json.Null), "environment")
+  assertEqual(back.get("os").unwrapOr(""), "linux")?
+  assertEqual(back.get("note").unwrapOr(""), "quote \" and newline \n")?
+  assertEqual(back.length(), 2)?
+  Ok(())
+}

@@ -1,0 +1,35 @@
+test fn readsAFieldOfTheTypeItAsksFor() -> Result<Unit, Error> {
+  let value = json.parse("\{\"method\": \"POST\", \"bytes\": 412, \"mask\": true, \"headers\": \{\"content-type\": \"application/json\", \"length\": 412\}\}").unwrapOr(Json.Null)
+  assertEqual(text(value, "method"), "POST")?
+  assertEqual(int(value, "bytes", 0), 412)?
+  assertEqual(bool(value, "mask", false), true)?
+  let headers = textMap(value, "headers")
+  assertEqual(headers.get("content-type").unwrapOr(""), "application/json")?
+  // `length` is a number, and the caller asked for text, so it is left out.
+  assertEqual(headers.length(), 1)?
+  Ok(())
+}
+
+test fn theFallbackFiresForAMissingFieldAndForTheWrongType() -> Result<Unit, Error> {
+  let value = json.parse("\{\"bytes\": \"412\", \"mask\": 1\}").unwrapOr(Json.Null)
+  assertEqual(text(value, "method"), "")?
+  assertEqual(int(value, "bytes", -1), -1)?
+  assertEqual(bool(value, "mask", true), true)?
+  assertEqual(textMap(value, "headers").length(), 0)?
+  // A value that is not an object has no fields, so every field is missing.
+  assertEqual(int(Json.Text("412"), "bytes", 7), 7)?
+  Ok(())
+}
+
+test fn aMapOfTextSurvivesARoundTrip() -> Result<Unit, Error> {
+  let headers = Map.of(
+    MapEntry(key: "content-type", value: "application/json"),
+    MapEntry(key: "x-note", value: "quote \" and newline \n"),
+  )
+  let stored = json.render(Json.Fields(Map.of(MapEntry(key: "headers", value: fromTextMap(headers)))))
+  let back = textMap(json.parse(stored).unwrapOr(Json.Null), "headers")
+  assertEqual(back.get("content-type").unwrapOr(""), "application/json")?
+  assertEqual(back.get("x-note").unwrapOr(""), "quote \" and newline \n")?
+  assertEqual(back.length(), 2)?
+  Ok(())
+}

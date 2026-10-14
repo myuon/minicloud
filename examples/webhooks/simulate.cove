@@ -1,7 +1,8 @@
 use kv
 use timer
-use json
-use json.Json
+use std.json
+use std.json.Json
+use fields
 use text
 
 // What an endpoint answers the sender: a status, headers and a body of the
@@ -50,7 +51,7 @@ fn replyJson(reply: Reply) -> Json {
   Json.Fields(
     Map.of(
       MapEntry(key: "status", value: Json.Number(reply.status.toFloat())),
-      MapEntry(key: "headers", value: json.fromTextMap(reply.headers)),
+      MapEntry(key: "headers", value: fields.fromTextMap(reply.headers)),
       MapEntry(key: "body", value: Json.Text(reply.body)),
       MapEntry(key: "delayMs", value: Json.Number(reply.delayMs.toFloat())),
       MapEntry(key: "errorEvery", value: Json.Number(reply.errorEvery.toFloat())),
@@ -62,13 +63,13 @@ fn replyJson(reply: Reply) -> Json {
 
 fn replyOf(value: Json) -> Reply {
   Reply(
-    status: json.int(value, "status", 200),
-    headers: json.textMap(value, "headers"),
-    body: json.text(value, "body"),
-    delayMs: json.int(value, "delayMs", 0),
-    errorEvery: json.int(value, "errorEvery", 0),
-    errorStatus: json.int(value, "errorStatus", 500),
-    errorBody: json.text(value, "errorBody"),
+    status: fields.int(value, "status", 200),
+    headers: fields.textMap(value, "headers"),
+    body: fields.text(value, "body"),
+    delayMs: fields.int(value, "delayMs", 0),
+    errorEvery: fields.int(value, "errorEvery", 0),
+    errorStatus: fields.int(value, "errorStatus", 500),
+    errorBody: fields.text(value, "errorBody"),
   )
 }
 
