@@ -29,6 +29,9 @@ use text
 /// - `GET /apps/<app>/queues` is each queue it declares with what is due,
 ///   held and dead, the messages waiting and the dead letters with why;
 ///   `?message=` is one message, its body whole.
+/// - `GET /apps/<app>/speed` is what it served and how long it took over
+///   the last hour, day or 30 days (`?over=`), drawn from the host's own
+///   once-a-minute samples of its counters. Reading only.
 /// - `GET /logs` is **every app's log in one order**, oldest first, each
 ///   line saying which app it came from, with the way to each app's own
 ///   Logs beside it. `?n=` is how many lines, as it is on an app's.
@@ -125,6 +128,12 @@ export fn handle(request: web.Request) -> web.Response {
   // somebody opened cannot take a message the delivery loop was about to.
   if action == "queues" && get {
     return htmlResponse(200, queuesPage(at, app, request))
+  }
+  // And how fast it is and how much it served, over time. Reading only: the
+  // rows are the host's own history of the app's counters, taken once a
+  // minute, and asking for them counts nothing and starts nothing.
+  if action == "speed" && get {
+    return htmlResponse(200, speedPage(at, app, request))
   }
   if get || parts.length() > 4 {
     return textResponse(404, "no such page\n")

@@ -8,7 +8,7 @@ use host
 /// `/codeFile?app=&file=`, `/codePieces?app=&file=`,
 /// `/sqlTables?app=`, `/sqlQuery?app=&q=`,
 /// `/queues?app=`, `/queueMessages?app=&n=`, `/queueDead?app=&n=`,
-/// `/queueMessage?app=&id=`,
+/// `/queueMessage?app=&id=`, `/series?app=&over=`,
 /// `/enable?app=&on=`,
 /// `/configure?app=&grant=&allow=&hostcalls=&…` and `/reset?app=`; and `/origin`,
 /// what the app is told of how it was reached.
@@ -113,6 +113,13 @@ export fn handle(request: web.Request) -> web.Response {
       }
       Err(error) => answer(404, error.message)
     }
+  }
+  if request.path == "/series" {
+    var lines = Vector.of()
+    for row in host.series(app, query.get("over").unwrapOr("hour")) {
+      lines.push("{row.atUnix} | served={row.served} ok={row.ok} errors={row.errors} rejected={row.rejected} workerMs={row.workerMs} | p50={row.p50Us} p99={row.p99Us}")
+    }
+    return answer(200, "\n".join(lines.freeze()))
   }
   if request.path == "/queues" {
     var lines = Vector.of()

@@ -318,6 +318,8 @@ test fn drawsATabForEachThingTheAppHas() -> Result<Unit, Error> {
   // The log ring is the host's, not the app's: it holds the host's own
   // lines about an app granted nothing at all.
   assert(bare.contains(">Logs</a>"))?
+  // Every app has counters, so every app has Speed.
+  assert(bare.contains(">Speed</a>"))?
   assertEqual(bare.contains(">Data</a>"), false)?
   assertEqual(bare.contains(">SQL</a>"), false)?
   assertEqual(bare.contains(">Queues</a>"), false)?
@@ -331,19 +333,85 @@ test fn drawsATabForEachThingTheAppHas() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// The order is the one every page of the app has: Overview, Logs, the
+/// The order is the one every page of the app has: Overview, Speed, Logs, the
 /// stores, Code, Settings.
 test fn keepsTheTabsInOneOrder() -> Result<Unit, Error> {
   let tabs = appTabs("", anApp("watch", granted: Vector.of("kv", "queue", "sql").freeze()), "Overview")
   var order = Vector.of()
   for part in tabs.split("</a>") {
-    for name in Vector.of("Overview", "Logs", "Data", "SQL", "Queues", "Code", "Settings").freeze() {
+    for name in Vector.of("Overview", "Speed", "Logs", "Data", "SQL", "Queues", "Code", "Settings").freeze() {
       if part.endsWith(">{name}") {
         order.push(name)
       }
     }
   }
-  assertEqual(",".join(order.freeze()), "Overview,Logs,Data,SQL,Queues,Code,Settings")?
+  assertEqual(",".join(order.freeze()), "Overview,Speed,Logs,Data,SQL,Queues,Code,Settings")?
+  Ok(())
+}
+
+/// A page of an app with no rows is a page and not a failure: the host
+/// answers an empty array both for one that keeps no history and for one that
+/// has not sampled yet, and `minicloud test` is the first of those. What it
+/// says must be true of both, and it must not draw a frame round nothing.
+test fn saysSoWhenThereIsNothingToDrawASpeedFrom() -> Result<Unit, Error> {
+  let page = speedPage("", anApp("hello"), asking(Map.of()))
+  assert(page.contains("Nothing to show for the last hour"))?
+  assert(page.contains("cannot tell which"))?
+  assert(!page.contains("<svg class=chart"))?
+  assert(!page.contains("is not recording"))?
+  // and the tab is the one marked
+  assert(page.contains("<a href=\"/apps/hello/speed\" aria-current=page>Speed</a>"))?
+  Ok(())
+}
+
+test fn fallsBackToTheHourForAWindowItDoesNotKnow() -> Result<Unit, Error> {
+  assertEqual(speedWindow(asking(Map.of())), "hour")?
+  assertEqual(speedWindow(asking(Map.of(MapEntry(key: "over", value: "day")))), "day")?
+  assertEqual(speedWindow(asking(Map.of(MapEntry(key: "over", value: " month ")))), "month")?
+  assertEqual(speedWindow(asking(Map.of(MapEntry(key: "over", value: "year")))), "hour")?
+  assertEqual(speedWindow(asking(Map.of(MapEntry(key: "over", value: "<script>")))), "hour")?
+  let page = speedPage("", anApp("hello"), asking(Map.of(MapEntry(key: "over", value: "<script>"))))
+  assert(!page.contains("<script>"))?
+  assert(page.contains("<b>the last hour</b>"))?
+  Ok(())
+}
+
+test fn marksTheWindowItShowsAndLinksTheOthers() -> Result<Unit, Error> {
+  let steps = speedSteps("/apps/hello", "day")
+  assert(steps.contains("<b>the last day</b>"))?
+  assert(steps.contains("<a href=\"/apps/hello/speed?over=hour\">the last hour</a>"))?
+  assert(steps.contains("<a href=\"/apps/hello/speed?over=month\">the last 30 days</a>"))?
+  Ok(())
+}
+
+test fn writesMicrosecondsAsMilliseconds() -> Result<Unit, Error> {
+  assertEqual(speedMs(0), "0.0")?
+  assertEqual(speedMs(340), "0.3")?
+  assertEqual(speedMs(12500), "12.5")?
+  assertEqual(speedMs(2500000), "2500.0")?
+  Ok(())
+}
+
+test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
+  let a = Vector.of(0, 5, 10).freeze()
+  let b = Vector.of(0, 0, 5).freeze()
+  assertEqual(speedLargest(a, b), 10)?
+  let times = Vector.of(0, 60, 120).freeze()
+  // 4 of margin on every side, so the stroke of the first, last, highest
+  // and lowest value is not cut in half by the edge of the box
+  assertEqual(speedPoints(times, a, 10), "4,116 320,60 636,4")?
+  // a minute with no row is a gap, not a closer neighbour
+  assertEqual(speedPoints(Vector.of(0, 60, 180).freeze(), a, 10), "4,116 214,60 636,4")?
+  let chart = speedChart("two things", "10 a sample", 10, times, a, "ln-served", "served", b, "ln-errors", "errors")
+  assert(chart.contains("role=img aria-label=\"two things\""))?
+  assert(chart.contains("<title>up to 10 a sample, over 3 rows</title>"))?
+  assert(chart.contains("polyline class=\"ln ln-served\""))?
+  assert(chart.contains("polyline class=\"ln ln-errors\""))?
+  // a legend, so the lines are not told apart by colour alone
+  assert(chart.contains("class=legend"))?
+  // and no line from one sample, or from nothing but zeros
+  assert(!speedChart("x", "0", 0, Vector.of(0).freeze(), Vector.of(1).freeze(), "a", "a", Vector.of(1).freeze(), "b", "b").contains("<svg class=chart"))?
+  assert(!speedChart("x", "0", 0, times, a, "a", "a", b, "b", "b").contains("<svg class=chart"))?
   Ok(())
 }
 

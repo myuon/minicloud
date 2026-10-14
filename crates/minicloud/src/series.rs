@@ -55,6 +55,24 @@ pub struct Sample {
     pub p99_us: u64,
 }
 
+/// How far back `over` reaches, in seconds, and whether the hour table is the
+/// one to read it from: `"day"` is a day of minutes, `"month"` thirty days of
+/// hours, and anything else an hour of minutes.
+///
+/// A window and not a row count, because the two tables differ in what a row
+/// is. The HTTP read ([`crate::ops::series`]) and the admin module's
+/// `host.series` both ask here, so "a day" cannot come to mean one thing on
+/// the operations page and another on the admin app's graph; and an `over`
+/// nobody knows falls back to the hour in both, rather than being an error
+/// in one and a guess in the other.
+pub fn window(over: &str) -> (i64, bool) {
+    match over {
+        "day" => (24 * HOUR, false),
+        "month" => (30 * 24 * HOUR, true),
+        _ => (HOUR, false),
+    }
+}
+
 /// The time series store.
 pub struct Series {
     conn: Connection,
