@@ -95,11 +95,7 @@ pub fn series(context: &OpsContext, app: Option<&str>, over: &str) -> Json {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64);
-    let (secs, hourly) = match over {
-        "day" => (24 * 3600, false),
-        "month" => (30 * 24 * 3600, true),
-        _ => (3600, false),
-    };
+    let (secs, hourly) = crate::series::window(over);
     let Some(series) = context.series else {
         return json!({"over": over, "kept": false, "rows": []});
     };

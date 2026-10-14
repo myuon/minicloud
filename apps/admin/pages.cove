@@ -182,7 +182,7 @@ struct Tab {
 /// answer for an app without the grant — a URL somebody kept is not a 404 —
 /// and say what is missing; they are simply not offered.
 ///
-/// Overview, Code and Settings are on every app: each has a version, a
+/// Overview, Speed, Code and Settings are on every app: each has a version, a
 /// configuration, and something to say about how it is running.
 ///
 /// **So is Logs, `log` grant or not.** The ring that page reads is the
@@ -194,6 +194,7 @@ fn appTabs(base: String, app: host.App, here: String) -> String {
   let at = appAt(base, app)
   var tabs = Vector.of()
   tabs.push(Tab(label: "Overview", path: at))
+  tabs.push(Tab(label: "Speed", path: "{at}/speed"))
   tabs.push(Tab(label: "Logs", path: "{at}/logs"))
   if app.granted.contains("kv") {
     tabs.push(Tab(label: "Data", path: "{at}/kv"))
@@ -1872,6 +1873,228 @@ fn logPage(base: String, app: host.App, request: web.Request) -> String {
     "apps",
     "{app.name} log",
     "{appHead(base, app, "Logs")}{about("What the app logged and what the host said of it, oldest first.", "{lines.length()} lines, of the last {logKept()} the host keeps in memory, which a restart empties. Every line is also appended to <code>&lt;data&gt;/{h(app.name)}/log.txt</code>, which this page does not read.")}{how}{logTable(lines)}{how}",
+  )
+}
+
+// ------------------------------------------------------------ speed
+//
+// How fast an app is and how much it served, over time. The numbers are the
+// ones the host samples each minute (`host.series`), drawn the way the
+// operations page draws its sparkline — scaled to the largest value in the
+// window, the number in a `<title>` and no axis — only bigger, because here
+// the picture is the subject and not a cell in a table.
+
+/// Which window `?over=` asks for. One of the three the host knows, and
+/// `hour` for anything else: the host would fall back to an hour as well,
+/// but the page names the window in what it says and in the link it marks,
+/// so it has to know which one it is showing rather than pass a stranger
+/// through and be wrong about it.
+fn speedWindow(request: web.Request) -> String {
+  let asked = request.query.get("over").unwrapOr("").trim()
+  if asked == "day" || asked == "month" {
+    return asked
+  }
+  "hour"
+}
+
+/// What a window is called in a sentence. The month is thirty days, which is
+/// what the host reads (`crate::series::window`), so it says thirty.
+fn speedSpan(over: String) -> String {
+  if over == "day" {
+    "the last day"
+  } else if over == "month" {
+    "the last 30 days"
+  } else {
+    "the last hour"
+  }
+}
+
+/// The three windows as the same page with `?over=`, the one being shown
+/// marked and not a link, as the lines of a log page are.
+fn speedSteps(at: String, over: String) -> String {
+  var steps = Vector.of()
+  for name in Vector.of("hour", "day", "month").freeze() {
+    let label = speedSpan(name)
+    if name == over {
+      steps.push("<b>{label}</b>")
+    } else {
+      steps.push("<a href=\"{h("{at}/speed?over={name}")}\">{label}</a>")
+    }
+  }
+  "<p class=actions><span class=muted>window:</span> {" ".join(steps.freeze())}</p>"
+}
+
+/// Microseconds as milliseconds with one decimal, which is what the speed
+/// chart and its figure are written in: a request is rarely under a tenth of
+/// a millisecond and rarely over a few seconds, so milliseconds are the unit
+/// both ends of that fit without a string of digits — and the histogram the
+/// host estimates from is not finer than a tenth of one at the sizes where
+/// it matters, so a decimal is all the precision there is to show.
+fn speedMs(us: Int) -> String {
+  let tenths = (us + 50) / 100
+  "{tenths / 10}.{tenths % 10}"
+}
+
+/// The larger of two lists' largest values.
+fn speedLargest(a: Array<Int>, b: Array<Int>) -> Int {
+  var largest = 0
+  for value in a {
+    if value > largest {
+      largest = value
+    }
+  }
+  for value in b {
+    if value > largest {
+      largest = value
+    }
+  }
+  largest
+}
+
+/// One line's `points`, in a box 640 by 120 with 4 of margin on every side,
+/// so that the stroke of the first, last, highest and lowest value is not
+/// cut in half by the edge. Whole numbers: nothing a screen draws is finer
+/// than a pixel at this size.
+///
+/// A row is put where its *time* is, not where it comes in the list: the
+/// host writes no row for a minute it was down, or a minute an app did
+/// nothing in the first sample after a start, and evenly spaced rows would
+/// draw that gap as if the two sides of it were a minute apart.
+fn speedPoints(times: Array<Int>, values: Array<Int>, largest: Int) -> String {
+  let first = times.get(0).unwrapOr(0)
+  let apart = times.get(times.length() - 1).unwrapOr(0) - first
+  // A row is one app's one minute (`PRIMARY KEY (app, at)`), so two rows
+  // are never the same moment and the span is never nothing. One rather
+  // than a division by it anyway: a page anybody may open should not be one
+  // surprising row away from a trap.
+  let span = if apart > 0 { apart } else { 1 }
+  var out = Vector.of()
+  var at = 0
+  for value in values {
+    let when = times.get(at).unwrapOr(first) - first
+    out.push("{4 + when * 632 / span},{116 - value * 112 / largest}")
+    at = at + 1
+  }
+  " ".join(out.freeze())
+}
+
+/// What tells a line from the other in the legend: the same stroke the
+/// chart draws it with, so the dashes are what one reads the key by and not
+/// the colour alone.
+fn speedKey(class: String, name: String) -> String {
+  "<span class=key><svg width=32 height=8 viewBox=\"0 0 32 8\" aria-hidden=true><line class=\"ln {class}\" x1=0 y1=4 x2=32 y2=4 /></svg>{h(name)}</span>"
+}
+
+/// Two lines on one chart, scaled together to the larger of them: the
+/// question is how the two compare, and two scales would make a p99 that is
+/// ten times its p50 look like it is touching it.
+///
+/// `peak` is what the largest value is, in the words of the chart, and it
+/// is **written beside the key** and not only in the `<title>`: a line with
+/// no number anywhere on the page is a shape nobody can size, and a title
+/// is a hover, which a phone does not have.
+///
+/// A line needs two points, and a chart of nothing but zeros is a line along
+/// the floor, so each says what is true instead of drawing that.
+fn speedChart(label: String, peak: String, largest: Int, times: Array<Int>, a: Array<Int>, aClass: String, aName: String, b: Array<Int>, bClass: String, bName: String) -> String {
+  if a.length() < 2 {
+    return "<p class=muted>One row so far — a line wants two. Come back in a minute.</p>"
+  }
+  if largest == 0 {
+    return "<p class=muted>{h(label)}: nothing but zero in this window, which is not worth a line along the bottom.</p>"
+  }
+  let legend = "<p class=legend>{speedKey(aClass, aName)}{speedKey(bClass, bName)}<span class=peak>up to {h(peak)}</span></p>"
+  "{legend}<svg class=chart viewBox=\"0 0 640 120\" role=img aria-label=\"{h(label)}\"><title>up to {h(peak)}, over {a.length()} rows</title><polyline class=\"ln {aClass}\" fill=none points=\"{speedPoints(times, a, largest)}\"/><polyline class=\"ln {bClass}\" fill=none points=\"{speedPoints(times, b, largest)}\"/></svg>"
+}
+
+/// One app's speed: what it served and how long it took, over the window
+/// asked for — the totals, then the two charts.
+///
+/// An empty answer is two different nothings that this page cannot tell
+/// apart (a host that keeps no history, and one that has not sampled this
+/// app yet), so what it says when there are no rows is true of both, and
+/// there is no frame drawn round nothing.
+fn speedPage(base: String, app: host.App, request: web.Request) -> String {
+  let at = appAt(base, app)
+  let over = speedWindow(request)
+  let span = speedSpan(over)
+  let points = host.series(app.name, over)
+  let head = appHead(base, app, "Speed")
+  let lead = "<p class=lead>How fast <code>{h(app.name)}</code> answers and how much of it it served. The host takes a sample of every app's counters once a minute and keeps the minutes for about two days and the hours for about three months, so these are what the app did in each minute — or, for the last 30 days, each hour — and not a running total. The <b>p50</b> and <b>p99</b> are <b>estimates</b>: the host does not keep the time of every request, it counts them into a histogram of time ranges and reads the quantile off that, so a figure here is the right range and not an exact time.</p>"
+  let steps = speedSteps(at, over)
+  let title = "{app.name} speed"
+  if points.length() == 0 {
+    return layout(base, "apps", title, "{head}{lead}{steps}<p class=muted>Nothing to show for {span}: either the host has not sampled <code>{h(app.name)}</code> yet — it takes a sample a minute, so a minute after it has served something — or it keeps no history at all, which it does not when it is started without a data directory. This page cannot tell which, and a chart of nothing would say neither.</p>")
+  }
+  var times = Vector.of()
+  var served = Vector.of()
+  var errors = Vector.of()
+  var p50 = Vector.of()
+  var p99 = Vector.of()
+  var requests = 0
+  var failed = 0
+  var worst = 0
+  for point in points {
+    times.push(point.atUnix)
+    served.push(point.served)
+    errors.push(point.errors)
+    p50.push(point.p50Us)
+    p99.push(point.p99Us)
+    requests = requests + point.served
+    failed = failed + point.errors
+    if point.p99Us > worst {
+      worst = point.p99Us
+    }
+  }
+  let timeRows = times.freeze()
+  let servedRows = served.freeze()
+  let errorRows = errors.freeze()
+  let p50Rows = p50.freeze()
+  let p99Rows = p99.freeze()
+  let level = if failed == 0 { " is-ok" } else { " is-bad" }
+  let said = if failed == 0 { "none in {span}" } else { "of {requests} in {span}" }
+  let figures = "<div class=strip><div class=fig><span class=lbl>requests</span><span class=big>{requests}</span><span class=note>in {span}</span></div><div class=\"fig{level}\"><span class=lbl>errors</span><span class=big>{failed}</span><span class=note>{said}</span></div><div class=fig><span class=lbl>worst p99</span><span class=big>{speedMs(worst)} ms</span><span class=note>the slowest minute's estimate</span></div></div>"
+  let first = match points.get(0) {
+    Some(point) => point.atUnix
+    None => 0
+  }
+  let last = match points.get(points.length() - 1) {
+    Some(point) => point.atUnix
+    None => 0
+  }
+  let each = if over == "month" { "hour" } else { "minute" }
+  let rows = if points.length() == 1 { "1 row" } else { "{points.length()} rows" }
+  let covers = "<p class=muted>{rows}, one for each {each} the host sampled, from {text.isoTime(first * 1000)} to {text.isoTime(last * 1000)}. Each chart is scaled to its own largest value, which is written beside its key; there is no axis to read, because the shape is the question.</p>"
+  let traffic = speedChart(
+    "requests served and errors, {span}",
+    "{speedLargest(servedRows, errorRows)} a {each}",
+    speedLargest(servedRows, errorRows),
+    timeRows,
+    servedRows,
+    "ln-served",
+    "served",
+    errorRows,
+    "ln-errors",
+    "errors",
+  )
+  let slowest = speedLargest(p50Rows, p99Rows)
+  let speed = speedChart(
+    "request time, p50 and p99 in milliseconds, {span}",
+    "{speedMs(slowest)} ms",
+    slowest,
+    timeRows,
+    p50Rows,
+    "ln-p50",
+    "p50, the middle request",
+    p99Rows,
+    "ln-p99",
+    "p99, the slow one in a hundred",
+  )
+  layout(
+    base,
+    "apps",
+    title,
+    "{head}{lead}{steps}{figures}{covers}<h2>Traffic</h2>{traffic}<h2>Speed, in milliseconds</h2>{speed}",
   )
 }
 

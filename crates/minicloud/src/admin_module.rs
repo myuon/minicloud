@@ -23,6 +23,7 @@
 //! | `host.queueMessages(app, limit)` | `Array<host.QueueMessage>`: the messages still on those queues, what is due first, at most `limit` (0–[`crate::queue::PEEK_MESSAGES`]) — a read that leases nothing |
 //! | `host.queueDead(app, limit)` | `Array<host.QueueMessage>`: the dead letters, newest buried first, each with `why`; at most `limit` as above |
 //! | `host.queueMessage(app, id)` | `Result<host.QueueMessage, Error>`: one of them whole, its body cut past [`crate::queue::READ_BODY_CHARS`]; an `Err` for an id no queue of the app holds |
+//! | `host.series(app, over)` | `Array<host.Point>`: what the app did over `over` — `"hour"`, `"day"` or `"month"` — as the host's history keeps it ([`crate::series`]), oldest first: a row a minute for the first two and a row an hour for the last, because the store keeps the two at those granularities and [`crate::series::window`] is the one place that says which. The same rows `GET /_host/series` answers, as values; an `over` that is none of the three is an hour, as there. Empty — not an `Err` — for a host that keeps no history (no `--data`, or `minicloud test`), so a page that draws a graph shows "nothing yet" before there is one; never more than [`SERIES_ROWS`] rows, the newest if there would be |
 //! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
 //! | `host.allLogs(limit)` | `host.AllLogs`: every app's log as one sequence — the last `limit` lines of it, oldest first, each saying which app it came from — and `apps`, every app whose ring holds a line. The host merges the rings, and "the last `limit`" is the last `limit` of its whole log, so one app that is talking fills it ([`crate::manage`]) |
 //! | `host.setEnabled(app, enabled, who)` | `Result<String, Error>`: routes to the app again, or stops; nothing is reloaded |
@@ -60,11 +61,19 @@ use crate::logs::Line;
 use crate::manage::{AllLogs, AppInfo, AppLine, KvRow, QueueInfo, SecretInfo, Settings, Via};
 use crate::overrides::{Change, Control};
 use crate::queue::Peeked;
+use crate::series::Sample;
 use crate::sql::{Answer as SqlAnswer, Table as SqlTable};
 
 const STR: HostType = HostType::String;
 const INT: HostType = HostType::Int;
 const STRINGS: HostType = HostType::Array(&HostType::String);
+/// The most rows one `host.series` answers. The windows hold 1440 minutes
+/// and 720 hours at most, but that is what the store *should* hold: a sweep
+/// that has not run, or a retention set longer, would otherwise make one call
+/// as large as the table. Past it the newest rows are kept, because a graph
+/// that loses a stretch loses the end it is looking at.
+pub const SERIES_ROWS: usize = 2000;
+
 const CHANGED: HostType = HostType::Result(&HostType::String, &HostType::Error);
 
 const fn op(
@@ -208,6 +217,12 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             "sqlQuery",
             &[STR, STR],
             HostType::Result(&HostType::Named("host.SqlAnswer"), &HostType::Error),
+            Effect::Read,
+        ),
+        op(
+            "series",
+            &[STR, STR],
+            HostType::Array(&HostType::Named("host.Point")),
             Effect::Read,
         ),
         op(
@@ -469,6 +484,30 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 "values",
                 HostType::Array(&HostType::Option(&HostType::String)),
             )],
+        },
+        // One row of an app's history ([`crate::series`]): what it did over
+        // one minute or one hour, as the increase over it and not a running
+        // total. There is no `app` — the caller named it — and the columns
+        // are the store's, so a graph can draw any of them.
+        TypeSchema {
+            name: "Point",
+            cases: &[],
+            fields: &[
+                // The start of the minute or hour the row covers, in seconds
+                // since the epoch. Seconds, unlike the `atMs` of a log line:
+                // it is the store's own key and always a multiple of 60.
+                field("atUnix", INT),
+                field("served", INT),
+                field("ok", INT),
+                field("errors", INT),
+                field("rejected", INT),
+                field("workerMs", INT),
+                // Microseconds, estimated from the request-time histogram
+                // over the row's own span, so a quantile of a minute and not
+                // of all time.
+                field("p50Us", INT),
+                field("p99Us", INT),
+            ],
         },
         // One queue of an app ([`crate::queue`]), with its counts whole:
         // what the listing below shows is at most
@@ -794,6 +833,22 @@ fn sql_answer_value(answer: SqlAnswer) -> Value {
     )
 }
 
+fn point_value(row: Sample) -> Value {
+    Value::structure(
+        "host.Point",
+        vec![
+            ("atUnix", Value::int(row.at_unix)),
+            ("served", int(row.served)),
+            ("ok", int(row.ok)),
+            ("errors", int(row.errors)),
+            ("rejected", int(row.rejected)),
+            ("workerMs", int(row.worker_ms)),
+            ("p50Us", int(row.p50_us)),
+            ("p99Us", int(row.p99_us)),
+        ],
+    )
+}
+
 fn queue_value(queue: QueueInfo) -> Value {
     Value::structure(
         "host.Queue",
@@ -1063,6 +1118,35 @@ impl HostApi for AdminHost {
                     .map(|front| front.self_version())
                     .unwrap_or_default(),
             ));
+        }
+        // Like `selfVersion`, an absence is an answer: no host attached (`minicloud
+        // test`) or no series store (a host started without `--data`) is
+        // "nothing yet", an empty array, and not a failure — a page that asks
+        // for a graph before there is one should draw an empty one.
+        if op == "series" {
+            let app = args.first().and_then(Value::as_str).unwrap_or_default();
+            let over = args.get(1).and_then(Value::as_str).unwrap_or_default();
+            let store = self
+                .control
+                .as_ref()
+                .and_then(|control| control.front())
+                .and_then(|front| front.series.clone());
+            let Some(store) = store else {
+                return Ok(Value::array(std::iter::empty::<Value>()));
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs() as i64);
+            let (secs, hourly) = crate::series::window(over);
+            let store = store.lock().unwrap_or_else(|p| p.into_inner());
+            let rows = if hourly {
+                store.hours(Some(app), now - secs)
+            } else {
+                store.minutes(Some(app), now - secs)
+            }
+            .map_err(|why| RuntimeError::new(format!("admin: series: {why}")))?;
+            let skip = rows.len().saturating_sub(SERIES_ROWS);
+            return Ok(Value::array(rows.into_iter().skip(skip).map(point_value)));
         }
         let control = self.control()?;
         match op {

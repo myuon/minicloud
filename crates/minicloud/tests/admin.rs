@@ -183,6 +183,62 @@ fn the_admin_app_reads_another_apps_store_and_log_and_makes_no_store() {
 }
 
 #[test]
+fn the_admin_app_reads_an_apps_history_and_a_host_with_none_answers_nothing() {
+    let apps = apps(&[control(), sample("hello")]);
+    let host = start(&apps, 2);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // Minutes are taken for the minute that ended, at a time of the test's
+    // own; the first call has nothing to take a difference from.
+    let minute = now - now % 60;
+    host.sample_now(minute - 180);
+    for (n, requests) in [(1, 3), (2, 0)] {
+        for _ in 0..requests {
+            assert_eq!(get_at(host.addr, "localhost", "/hello/").status, 200);
+        }
+        host.sample_now(minute - 180 + n * 60);
+    }
+
+    let rows = op(&host, "/series?app=hello&over=day");
+    assert_eq!(rows.status, 200, "{}", rows.body);
+    let rows: Vec<&str> = rows.body.lines().collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    // Oldest first, each the increase over its minute.
+    assert!(
+        rows[0].starts_with(&format!(
+            "{} | served=3 ok=3 errors=0 rejected=0",
+            minute - 180
+        )),
+        "{}",
+        rows[0]
+    );
+    assert!(
+        rows[1].starts_with(&format!("{} | served=0 ", minute - 120)),
+        "{}",
+        rows[1]
+    );
+    // An `over` nobody knows is the hour; the month reads the hour table,
+    // which nothing has rolled into yet; and an app with no history is
+    // nothing.
+    assert_eq!(
+        op(&host, "/series?app=hello&over=eon").body.lines().count(),
+        2
+    );
+    assert_eq!(op(&host, "/series?app=hello&over=month").body.trim(), "");
+    assert_eq!(op(&host, "/series?app=nobody&over=day").body.trim(), "");
+
+    // A host that keeps no history has no rows to give, and says so.
+    let mut options = options(&apps, 2);
+    options.data = None;
+    let host = Host::start(options).expect("the host starts");
+    let none = op(&host, "/series?app=hello&over=day");
+    assert_eq!(none.status, 200, "{}", none.body);
+    assert_eq!(none.body.trim(), "");
+}
+
+#[test]
 fn a_disabled_app_answers_503_finishes_what_it_had_and_keeps_its_data() {
     let apps = apps(&[control(), sample("notes"), sample("slow"), sample("hello")]);
     let host = start(&apps, 2);

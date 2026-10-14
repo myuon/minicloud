@@ -337,7 +337,18 @@ li.app{grid-template-columns:1fr;gap:.25em;padding:.65em .8em}
 li.app .flags{justify-content:flex-start;margin-top:.15em}
 li.app .count{font-size:13px}
 }
-/* the app's tabs on a narrow screen: six tabs do not fit a phone in one row, and a row that scrolls sideways hides the ones that matter behind a gesture. A folder tab cannot wrap, because the line it sits on is at the bottom of the row and the tabs above it would hang in the air. So they are pills: the same words, the same order, the chosen one filled. */
+/* the speed page: the chart is the width of the page and as tall as its own box makes it — no max-height, which would letterbox it: the viewBox would be fitted to the shorter side and the line would stop short of both edges. two lines on one chart, told apart by their dashes as well as their colour — someone may not see colour — and drawn at the width of the page, which is what the viewBox is for. non-scaling-stroke keeps a line as thick on a phone as on a desk, where scaling the box down would thin it to a hair */
+svg.chart{display:block;width:100%;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.ln{fill:none;stroke-width:2;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.ln-served,.ln-p50{stroke:var(--link)}
+.ln-errors{stroke:var(--bad);stroke-dasharray:7 4}
+.ln-p99{stroke:var(--warn);stroke-dasharray:2 3}
+p.legend{display:flex;flex-wrap:wrap;gap:.3em 1.4em;margin:.4em 0;font-size:13px}
+p.legend .key{display:inline-flex;align-items:center;gap:.5em}
+p.legend .ln{vector-effect:none}
+/* the largest value the chart is scaled to, at the far end of the key: a line with no number anywhere is a shape nobody can size, and the <title> is a hover a phone does not have */
+p.legend .peak{margin-left:auto;color:var(--muted)}
+/* the app's tabs on a narrow screen: seven tabs do not fit a phone in one row, and a row that scrolls sideways hides the ones that matter behind a gesture. A folder tab cannot wrap, because the line it sits on is at the bottom of the row and the tabs above it would hang in the air. So they are pills: the same words, the same order, the chosen one filled. */
 @media (max-width:560px){
 /* four figures are two rows of two, not three and an orphan */
 .strip{grid-template-columns:1fr 1fr}
