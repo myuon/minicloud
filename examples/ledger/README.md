@@ -288,9 +288,10 @@ with the secret as the password), the `post` secret of `app.toml`'s
 on another page cannot use a browser's stored login.
 
 Every value a poster controls — the run ID, repository, commit, note,
-source, environment, toolchain, conditions, case, input and backend — goes
-through `text.escapeHtml` before it is part of a page, and every page is sent
-with a `Content-Security-Policy` that allows no script.
+source, environment, toolchain, conditions, case, input and backend — is a
+`String` in a hole of an `html"…"` literal, where it is escaped because it is
+not `Html`; every page and the trend chart's SVG are such literals, and every
+page is sent with a `Content-Security-Policy` that allows no script.
 
 ## Layout
 
@@ -306,7 +307,7 @@ with a `Content-Security-Policy` that allows no script.
 | `stats/` | medians and spreads; numbers written for people |
 | `compare/` | matching two sides' measurements, the comparability verdict, differences, the largest ones |
 | `chart/` | the trend chart as SVG: scale, ticks, series, gaps, whiskers, legend |
-| `fields/`, `text/` | reading a named field of a stored object with a fallback, over `std.json`'s accessors; the webhook lab's text helpers, plus reading ISO 8601 times |
+| `fields/`, `text/` | reading a named field of a stored object with a fallback, over `std.json`'s accessors; the webhook lab's text helpers less HTML escaping, plus reading ISO 8601 times |
 | `importer/ledger_import.py` | converts the existing results, and posts runs |
 | `samples/` | the converted runs |
 

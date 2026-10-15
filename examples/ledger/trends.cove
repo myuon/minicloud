@@ -9,6 +9,8 @@ use chart.Tick
 use fields
 use stats
 use text
+use std.html
+use std.html.Html
 
 // `GET /cases` lists every case measured; `GET /cases/trend?case=…&input=…`
 // draws its trend over runs: one chart per metric, one series per backend,
@@ -156,7 +158,7 @@ fn trendHref(at: String, case: String, input: String) -> String {
   "{at}/cases/trend?case={text.urlEncode(case)}&input={text.urlEncode(input)}"
 }
 
-fn casesPage(at: String) -> String {
+fn casesPage(at: String) -> Html {
   let cases = allCases().sorted(by: fn(x, y) { x.case < y.case || (x.case == y.case && x.input < y.input) })
   var rows = Vector.of()
   var index = 0
@@ -166,17 +168,22 @@ fn casesPage(at: String) -> String {
     while index < cases.length() && cases.get(index).unwrapOr(first).case == first.case {
       let one = cases.get(index).unwrapOr(first)
       let label = if one.input == "" { "(no input)" } else { one.input }
-      links.push("<a href=\"{h(trendHref(at, one.case, one.input))}\">{h(label)}</a>")
+      links.push(html"""<a href="{trendHref(at, one.case, one.input)}">{label}</a>""")
       index += 1
     }
-    rows.push("<tr><td>{h(first.case)}</td><td>{" · ".join(links.freeze())}</td></tr>")
+    rows.push(html"""<tr><td>{first.case}</td><td>{html.join(links.freeze(), html" · ")}</td></tr>""")
   }
   let table = if rows.length() == 0 {
-    "<p class=muted>No runs yet.</p>"
+    html"<p class=muted>No runs yet.</p>"
   } else {
-    "<table><tr><th>case</th><th>inputs (each a trend over runs)</th></tr>{"".join(rows.freeze())}</table>"
+    html"""
+      <table>
+        <tr><th>case</th><th>inputs (each a trend over runs)</th></tr>
+        {rows.freeze()}
+      </table>
+      """
   }
-  layout(at, "cases", "<h1>Cases</h1>{table}")
+  layout(at, "cases", html"<h1>Cases</h1>{table}")
 }
 
 /// The metrics `points` measured, the usual ones first.
@@ -292,10 +299,10 @@ fn seriesOf(at: String, points: Array<Stored>, axes: Axes, metric: String) -> Ar
 
 /// The same numbers as the chart, as a table: a row per run, a column per
 /// backend.
-fn tableOf(axes: Axes, series: Array<Series>, unit: String) -> String {
+fn tableOf(axes: Axes, series: Array<Series>, unit: String) -> Html {
   var head = Vector.of()
   for one in series {
-    head.push("<th class=num>{h(one.name)} <span class=unit>{h(unit)}</span></th>")
+    head.push(html"<th class=num>{one.name} <span class=unit>{unit}</span></th>")
   }
   var rows = Vector.of()
   var index = 0
@@ -304,16 +311,27 @@ fn tableOf(axes: Axes, series: Array<Series>, unit: String) -> String {
     for one in series {
       match one.points.get(index).unwrapOr(None) {
         Some(point) => {
-          let range = if point.count > 1 { "<br><span class=range>{stats.show(point.least)}–{stats.show(point.most)} ×{point.count}</span>" } else { "" }
-          cells.push("<td class=num>{stats.show(point.median)}{range}</td>")
+          let range = html.only(
+            point.count > 1,
+            html"<br><span class=range>{stats.show(point.least)}–{stats.show(point.most)} ×{point.count}</span>",
+          )
+          cells.push(html"<td class=num>{stats.show(point.median)}{range}</td>")
         }
-        None => cells.push("<td class=\"num absent\" title=\"not measured\">–</td>")
+        None => cells.push(html"""<td class="num absent" title="not measured">–</td>""")
       }
     }
-    rows.push("<tr><td><code>{h(tick.label)}</code></td><td>{h(tick.id)}</td>{"".join(cells.freeze())}</tr>")
+    rows.push(html"<tr><td><code>{tick.label}</code></td><td>{tick.id}</td>{cells.freeze()}</tr>")
     index += 1
   }
-  "<details class=table><summary>table</summary><table><tr><th>commit</th><th>run</th>{"".join(head.freeze())}</tr>{"".join(rows.freeze())}</table></details>"
+  html"""
+    <details class=table>
+      <summary>table</summary>
+      <table>
+        <tr><th>commit</th><th>run</th>{head.freeze()}</tr>
+        {rows.freeze()}
+      </table>
+    </details>
+    """
 }
 
 fn trendPage(request: web.Request) -> web.Response {
@@ -338,20 +356,32 @@ fn trendPage(request: web.Request) -> web.Response {
     let unit = unitIn(points, metric)
     let series = seriesOf(at, points, axes, metric)
     charts.push(
-      "<section class=trend id=\"m-{h(metric)}\"><h2>{h(metric)} <span class=unit>{h(unit)}</span></h2><p class=note>Median of each run's repetitions, with whiskers from the least to the most; a gap is a run that did not measure it. Hover a point for its numbers; click it for the run.</p>{chart.trend(metric, unit, axes.ticks, series)}{tableOf(axes, series, unit)}</section>",
+      html"""
+        <section class=trend id="m-{metric}">
+          <h2>{metric} <span class=unit>{unit}</span></h2>
+          <p class=note>Median of each run's repetitions, with whiskers from the least to the most; a gap is a run that did not measure it.
+          Hover a point for its numbers; click it for the run.</p>
+          {chart.trend(metric, unit, axes.ticks, series)}
+          {tableOf(axes, series, unit)}
+        </section>
+        """,
     )
   }
   var jump = Vector.of()
   for metric in metrics {
-    jump.push("<a href=\"#m-{h(metric)}\">{h(metric)}</a>")
+    jump.push(html"""<a href="#m-{metric}">{metric}</a>""")
   }
-  let label = if input == "" { h(case) } else { "{h(case)} <span class=muted>{h(input)}</span>" }
+  let label = if input == "" { html"{case}" } else { html"{case} <span class=muted>{input}</span>" }
   htmlResponse(
     200,
     layout(
       at,
       "{case} {input}",
-      "<h1>{label}</h1><p class=note>{axes.ticks.length()} runs · series {h(" / ".join(axes.backends))} · {" · ".join(jump.freeze())}</p>{"".join(charts.freeze())}",
+      html"""
+        <h1>{label}</h1>
+        <p class=note>{axes.ticks.length()} runs · series {" / ".join(axes.backends)} · {html.join(jump.freeze(), html" · ")}</p>
+        {charts.freeze()}
+        """,
     ),
   )
 }

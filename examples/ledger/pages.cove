@@ -5,15 +5,15 @@ use schema.Measurement
 use schema.Metric
 use stats
 use text
+use std.html
+use std.html.Html
 
-// The HTML. Every value that came from a poster — a run ID, a repository, a
-// case, a backend, an environment — goes through `h` before it is part of a
-// page; the page's own markup is the only markup in it.
-
-/// `value`, escaped for HTML.
-fn h(value: String) -> String {
-  text.escapeHtml(value)
-}
+// The HTML. Every page is an `html"…"` literal, and a hole in one is escaped
+// unless its type is `Html`: a run ID, a repository, a case, a backend, an
+// environment — every value that came from a poster — is a `String`, so it is
+// text on the page whatever it holds, and the page's own markup is the only
+// markup in it. A part of a page built in one function and put in another is
+// an `Html`, which is how the second knows to take it whole.
 
 /// The response headers every page carries: no script, no framing, no
 /// sniffing, no referrer to another site.
@@ -30,8 +30,10 @@ fn pageHeaders(contentType: String) -> Map<String, String> {
   )
 }
 
-fn htmlResponse(status: Int, page: String) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: page)
+/// A page as the answer. This is the one place a page stops being `Html`
+/// and becomes the text of a body.
+fn htmlResponse(status: Int, page: Html) -> web.Response {
+  web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: page.render())
 }
 
 fn jsonResponse(status: Int, body: String) -> web.Response {
@@ -42,13 +44,36 @@ fn textResponse(status: Int, body: String) -> web.Response {
   web.Response(status: status, headers: pageHeaders("text/plain; charset=utf-8"), body: body)
 }
 
+/// The stylesheet. It is CSS rather than markup, and goes into `<style>`
+/// through a hole of [`layout`], which escapes it like any `String`: so it
+/// holds none of `&`, `<`, `>`, `"` and `'` (a `>` combinator would arrive
+/// as `&gt;`).
 fn css() -> String {
   "body\{font:14px/1.45 system-ui,sans-serif;margin:0;color:#0b0b0b;background:#fafafa\}header\{background:#24292f;padding:.6em 1.2em\}header a\{color:#fff;text-decoration:none;margin-right:1.2em\}header a.home\{font-weight:600\}main\{padding:1em 1.2em\}h1\{font-size:1.4em;margin:.2em 0 .6em\}h2\{font-size:1.1em;margin:1.4em 0 .4em\}table\{border-collapse:collapse;margin:.4em 0 1.2em;background:#fff\}td,th\{border:1px solid #d0d7de;padding:.25em .6em;text-align:left;vertical-align:top\}th\{background:#f3f4f6;font-weight:600\}td.num,th.num\{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums\}.range\{color:#52514e;font-size:.85em\}.absent\{color:#8c8b87\}.unit\{color:#52514e;font-weight:400;font-size:.85em\}code\{font:12px/1.4 ui-monospace,monospace\}.muted\{color:#52514e\}dl.meta\{display:grid;grid-template-columns:max-content auto;gap:.15em 1em;margin:.4em 0 1em\}dl.meta dt\{color:#52514e\}dl.meta dd\{margin:0\}.pair\{display:flex;gap:1.5em;flex-wrap:wrap\}.better\{color:#1a7f37\}.worse\{color:#b42318\}.warn\{background:#fff8c5\}.bad\{background:#ffebe9\}.note\{color:#52514e;font-size:.9em\}form.pick\{display:flex;flex-wrap:wrap;gap:.6em 1.2em;align-items:center;margin:.4em 0 1em\}form.pick select\{font:inherit;max-width:32em\}details.note ul\{margin:.3em 0\}ul.only\{columns:3;margin:.3em 0\}svg.chart\{max-width:100%;height:auto;display:block;border:1px solid #e1e0d9;border-radius:4px\}section.trend\{margin-bottom:1.6em\}details.table\{margin:.4em 0\}"
 }
 
 /// The page around `content`.
-fn layout(base: String, title: String, content: String) -> String {
-  "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>{h(title)} · bench ledger</title><style>{css()}</style></head><body><header><a class=home href=\"{h(base)}/\">bench ledger</a><a href=\"{h(base)}/\">Runs</a><a href=\"{h(base)}/compare\">Compare</a><a href=\"{h(base)}/cases\">Cases</a></header><main>{content}</main></body></html>"
+fn layout(base: String, title: String, content: Html) -> Html {
+  html"""
+    <!doctype html>
+    <html lang=en>
+    <head>
+      <meta charset=utf-8>
+      <meta name=viewport content="width=device-width">
+      <title>{title} · bench ledger</title>
+      <style>{css()}</style>
+    </head>
+    <body>
+      <header>
+        <a class=home href="{base}/">bench ledger</a>
+        <a href="{base}/">Runs</a>
+        <a href="{base}/compare">Compare</a>
+        <a href="{base}/cases">Cases</a>
+      </header>
+      <main>{content}</main>
+    </body>
+    </html>
+    """
 }
 
 /// `millis` as the pages show a time: `2026-10-05 03:13 UTC`.
@@ -58,31 +83,59 @@ fn when(millis: Int) -> String {
 }
 
 /// A load-average range, or `–` when none was taken.
-fn loadRange(least: Option<Float>, most: Option<Float>) -> String {
+fn loadRange(least: Option<Float>, most: Option<Float>) -> Html {
   match least {
     Some(low) => {
       let high = most.unwrapOr(low)
-      if low == high { low.format(1) } else { "{low.format(1)}–{high.format(1)}" }
+      if low == high { html"{low.format(1)}" } else { html"{low.format(1)}–{high.format(1)}" }
     }
-    None => "<span class=absent title=\"not recorded\">–</span>"
+    None => html"""<span class=absent title="not recorded">–</span>"""
   }
 }
 
 /// The run list.
-fn runsPage(base: String, runs: Array<Summary>, older: String) -> String {
+fn runsPage(base: String, runs: Array<Summary>, older: String) -> Html {
   var rows = Vector.of()
   for run in runs {
     rows.push(
-      "<tr><td class=num>{when(run.measuredAt)}</td><td><a href=\"{h(base)}/runs/{h(run.id)}\">{h(run.id)}</a></td><td>{h(run.repository)}</td><td><code>{h(run.commit)}</code></td><td class=num>{run.results}</td><td>{h(", ".join(run.backends))}</td><td class=num>{loadRange(run.loadLeast, run.loadMost)}</td><td>{h(machine(run.environment))}</td></tr>",
+      html"""
+        <tr>
+          <td class=num>{when(run.measuredAt)}</td>
+          <td><a href="{base}/runs/{run.id}">{run.id}</a></td>
+          <td>{run.repository}</td>
+          <td><code>{run.commit}</code></td>
+          <td class=num>{run.results}</td>
+          <td>{", ".join(run.backends)}</td>
+          <td class=num>{loadRange(run.loadLeast, run.loadMost)}</td>
+          <td>{machine(run.environment)}</td>
+        </tr>
+        """,
     )
   }
   let table = if rows.length() == 0 {
-    "<p class=muted>No runs yet. Post one: <code>curl -H 'authorization: Bearer $LEDGER_TOKEN' -H 'content-type: application/json' --data @run.json {h(base)}/api/runs</code></p>"
+    html"""
+      <p class=muted>No runs yet. Post one:
+      <code>curl -H 'authorization: Bearer $LEDGER_TOKEN' -H 'content-type: application/json' --data @run.json {base}/api/runs</code></p>
+      """
   } else {
-    "<table><tr><th>measured (UTC)</th><th>run</th><th>repository</th><th>commit</th><th class=num>results</th><th>backends</th><th class=num>load avg</th><th>machine</th></tr>{"".join(rows.freeze())}</table>"
+    html"""
+      <table>
+        <tr>
+          <th>measured (UTC)</th>
+          <th>run</th>
+          <th>repository</th>
+          <th>commit</th>
+          <th class=num>results</th>
+          <th>backends</th>
+          <th class=num>load avg</th>
+          <th>machine</th>
+        </tr>
+        {rows.freeze()}
+      </table>
+      """
   }
-  let more = if older == "" { "" } else { "<p><a href=\"{h(base)}/?before={h(text.urlEncode(older))}\">older →</a></p>" }
-  layout(base, "runs", "<h1>Runs</h1>{table}{more}")
+  let more = html.only(older != "", html"""<p><a href="{base}/?before={text.urlEncode(older)}">older →</a></p>""")
+  layout(base, "runs", html"<h1>Runs</h1>{table}{more}")
 }
 
 /// What a run's environment says about the machine, in one line.
@@ -105,15 +158,15 @@ fn machine(environment: Map<String, String>) -> String {
 }
 
 /// A map as a two-column table, or a muted `none`.
-fn pairs(title: String, entries: Map<String, String>) -> String {
+fn pairs(title: String, entries: Map<String, String>) -> Html {
   if entries.isEmpty() {
-    return "<div><h2>{h(title)}</h2><p class=muted>none recorded</p></div>"
+    return html"<div><h2>{title}</h2><p class=muted>none recorded</p></div>"
   }
   var rows = Vector.of()
   for entry in entries {
-    rows.push("<tr><th>{h(entry.key)}</th><td>{h(entry.value)}</td></tr>")
+    rows.push(html"<tr><th>{entry.key}</th><td>{entry.value}</td></tr>")
   }
-  "<div><h2>{h(title)}</h2><table>{"".join(rows.freeze())}</table></div>"
+  html"<div><h2>{title}</h2><table>{rows.freeze()}</table></div>"
 }
 
 /// The metrics measured anywhere in `results`, the usual ones first:
@@ -156,7 +209,7 @@ fn unitOf(results: Array<Measurement>, name: String) -> String {
 
 /// A metric's cell: the median, the range under it, and what was sent in
 /// the tooltip. An unmeasured metric is a dash, never a zero.
-fn metricCell(metric: Option<Metric>) -> String {
+fn metricCell(metric: Option<Metric>) -> Html {
   match metric {
     Some(one) => match stats.spread(one.canonical) {
       Some(spread) => {
@@ -164,8 +217,8 @@ fn metricCell(metric: Option<Metric>) -> String {
         for value in one.values {
           sent.push(plain(value))
         }
-        let range = if spread.count > 1 { "<br><span class=range>{stats.show(spread.least)}–{stats.show(spread.most)}</span>" } else { "" }
-        "<td class=num title=\"median of {spread.count}; sent in {h(one.unit)}: {h(", ".join(sent.freeze()))}\">{stats.show(spread.median)}{range}</td>"
+        let range = html.only(spread.count > 1, html"<br><span class=range>{stats.show(spread.least)}–{stats.show(spread.most)}</span>")
+        html"""<td class=num title="median of {spread.count}; sent in {one.unit}: {", ".join(sent.freeze())}">{stats.show(spread.median)}{range}</td>"""
       }
       None => absentCell()
     }
@@ -173,16 +226,16 @@ fn metricCell(metric: Option<Metric>) -> String {
   }
 }
 
-fn absentCell() -> String {
-  "<td class=\"num absent\" title=\"not measured\">–</td>"
+fn absentCell() -> Html {
+  html"""<td class="num absent" title="not measured">–</td>"""
 }
 
 /// One run: what it is, where and how it was measured, and its results.
-fn runPage(base: String, run: Run) -> String {
+fn runPage(base: String, run: Run) -> Html {
   let names = metricNames(run.results)
   var head = Vector.of()
   for name in names {
-    head.push("<th class=num>{h(name)}<br><span class=unit>{h(unitOf(run.results, name))}</span></th>")
+    head.push(html"<th class=num>{name}<br><span class=unit>{unitOf(run.results, name)}</span></th>")
   }
   var rows = Vector.of()
   for result in run.results {
@@ -197,14 +250,54 @@ fn runPage(base: String, run: Run) -> String {
       most = Some(most.unwrapOr(load).max(load))
     }
     rows.push(
-      "<tr><td><a href=\"{h(trendHref(base, result.case, result.input))}\" title=\"the trend over runs\">{h(result.case)}</a></td><td>{h(result.input)}</td><td>{h(result.backend)}</td><td class=num>{repetitions(result)}</td><td class=num>{loadRange(least, most)}</td>{"".join(cells.freeze())}</tr>",
+      html"""
+        <tr>
+          <td><a href="{trendHref(base, result.case, result.input)}" title="the trend over runs">{result.case}</a></td>
+          <td>{result.input}</td>
+          <td>{result.backend}</td>
+          <td class=num>{repetitions(result)}</td>
+          <td class=num>{loadRange(least, most)}</td>
+          {cells.freeze()}
+        </tr>
+        """,
     )
   }
-  let note = if run.note == "" { "" } else { "<p class=note>{h(run.note)}</p>" }
-  let meta = "<dl class=meta><dt>repository</dt><dd>{h(run.repository)}</dd><dt>commit</dt><dd><code>{h(run.commit)}</code></dd><dt>measured</dt><dd>{text.isoTime(run.measuredAt)}</dd><dt>source</dt><dd>{if run.source == "" { "–" } else { "<code>{h(run.source)}</code>" }}</dd><dt>results</dt><dd>{run.results.length()} · <a href=\"{h(base)}/runs/{h(run.id)}?format=json\">JSON</a> · <a href=\"{h(base)}/compare?a={h(text.urlEncode(run.id))}\">compare with…</a></dd></dl>"
-  let context = "<div class=pair>{pairs("environment", run.environment)}{pairs("toolchain", run.toolchain)}{pairs("conditions", run.conditions)}</div>"
-  let table = "<h2>Results</h2><p class=note>Medians over the repetitions, in each metric's canonical unit, with the least and the most under them; hover a value for what was sent. A dash is a metric that was not measured.</p><table><tr><th>case</th><th>input</th><th>backend</th><th class=num>reps</th><th class=num>load avg</th>{"".join(head.freeze())}</tr>{"".join(rows.freeze())}</table>"
-  layout(base, run.id, "<h1>Run <code>{h(run.id)}</code></h1>{note}{meta}{context}{table}")
+  let note = html.only(run.note != "", html"<p class=note>{run.note}</p>")
+  let source = if run.source == "" { html"–" } else { html"<code>{run.source}</code>" }
+  let meta = html"""
+    <dl class=meta>
+      <dt>repository</dt><dd>{run.repository}</dd>
+      <dt>commit</dt><dd><code>{run.commit}</code></dd>
+      <dt>measured</dt><dd>{text.isoTime(run.measuredAt)}</dd>
+      <dt>source</dt><dd>{source}</dd>
+      <dt>results</dt>
+      <dd>{run.results.length()} · <a href="{base}/runs/{run.id}?format=json">JSON</a> · <a href="{base}/compare?a={text.urlEncode(run.id)}">compare with…</a></dd>
+    </dl>
+    """
+  let context = html"""
+    <div class=pair>
+      {pairs("environment", run.environment)}
+      {pairs("toolchain", run.toolchain)}
+      {pairs("conditions", run.conditions)}
+    </div>
+    """
+  let table = html"""
+    <h2>Results</h2>
+    <p class=note>Medians over the repetitions, in each metric's canonical unit, with the least and the most under them;
+    hover a value for what was sent. A dash is a metric that was not measured.</p>
+    <table>
+      <tr>
+        <th>case</th>
+        <th>input</th>
+        <th>backend</th>
+        <th class=num>reps</th>
+        <th class=num>load avg</th>
+        {head.freeze()}
+      </tr>
+      {rows.freeze()}
+    </table>
+    """
+  layout(base, run.id, html"<h1>Run <code>{run.id}</code></h1>{note}{meta}{context}{table}")
 }
 
 /// How many times `result` was measured: the most repetitions any of its
