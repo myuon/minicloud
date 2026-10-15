@@ -240,9 +240,10 @@ accepted 202 0.302223s
 
 ## Display and escaping
 
-Every value a sender controls goes through `text.escapeHtml` before it becomes
-part of a page: the endpoint name, the path, the query, the header names and
-values, and the body. The page's own markup is the only markup on it. The raw
+Every page is an `html"…"` literal (Cove's `std.html`), and every value a
+sender controls is a `String` in a hole of one, so it is escaped where it
+goes: the endpoint name, the path, the query, the header names and values,
+and the body. The page's own markup is the only markup on it. The raw
 view is `text/plain` with `nosniff`, so a body that is HTML is shown as text,
 not rendered. The tests send `<script>` and `<img onerror>` in every one of
 those places.
@@ -257,7 +258,7 @@ those places.
 | `simulate.cove` | what an endpoint answers (`reply:<id>`), its delay, and its error schedule (`count:<id>`, by `kv.increment`) |
 | `pages.cove` | the HTML |
 | `fields/` | reading a named field of a stored object as text, an `Int`, a flag or a map of text, with a fallback, over `std.json`'s accessors. The parser and the renderers themselves are `std.json`'s |
-| `text/` | HTML escaping, form decoding (`+`, `%XX`, UTF-8), ISO 8601 times, byte sizes, truncation at a character boundary |
+| `text/` | form decoding (`+`, `%XX`, UTF-8), ISO 8601 times, byte sizes, truncation at a character boundary |
 
 `minicloud test --apps examples webhooks` runs the Cove tests in `fields/` and `text/`. The Rust
 tests in `crates/minicloud/tests/webhooks.rs` drive the app over HTTP.
