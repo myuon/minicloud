@@ -350,12 +350,12 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 [[package]]
 name = "cove-diag"
 version = "0.1.0"
-source = "git+https://github.com/myuon/cove?rev=a51ed214095926bf408250dcbdde85220659b376#a51ed214095926bf408250dcbdde85220659b376"
+source = "git+https://github.com/myuon/cove?rev=782c5cc649b0e5cc1330ca63c98532cf0544fbfb#782c5cc649b0e5cc1330ca63c98532cf0544fbfb"
 
 [[package]]
 name = "cove-ir"
 version = "0.1.0"
-source = "git+https://github.com/myuon/cove?rev=a51ed214095926bf408250dcbdde85220659b376#a51ed214095926bf408250dcbdde85220659b376"
+source = "git+https://github.com/myuon/cove?rev=782c5cc649b0e5cc1330ca63c98532cf0544fbfb#782c5cc649b0e5cc1330ca63c98532cf0544fbfb"
 dependencies = [
  "cove-diag",
  "cove-schema",
@@ -366,7 +366,7 @@ dependencies = [
 [[package]]
 name = "cove-native"
 version = "0.1.0"
-source = "git+https://github.com/myuon/cove?rev=a51ed214095926bf408250dcbdde85220659b376#a51ed214095926bf408250dcbdde85220659b376"
+source = "git+https://github.com/myuon/cove?rev=782c5cc649b0e5cc1330ca63c98532cf0544fbfb#782c5cc649b0e5cc1330ca63c98532cf0544fbfb"
 dependencies = [
  "cove-ir",
  "cove-schema",
@@ -376,7 +376,7 @@ dependencies = [
 [[package]]
 name = "cove-runtime"
 version = "0.1.0"
-source = "git+https://github.com/myuon/cove?rev=a51ed214095926bf408250dcbdde85220659b376#a51ed214095926bf408250dcbdde85220659b376"
+source = "git+https://github.com/myuon/cove?rev=782c5cc649b0e5cc1330ca63c98532cf0544fbfb#782c5cc649b0e5cc1330ca63c98532cf0544fbfb"
 dependencies = [
  "cove-diag",
  "cove-ir",
@@ -389,12 +389,12 @@ dependencies = [
 [[package]]
 name = "cove-schema"
 version = "0.1.0"
-source = "git+https://github.com/myuon/cove?rev=a51ed214095926bf408250dcbdde85220659b376#a51ed214095926bf408250dcbdde85220659b376"
+source = "git+https://github.com/myuon/cove?rev=782c5cc649b0e5cc1330ca63c98532cf0544fbfb#782c5cc649b0e5cc1330ca63c98532cf0544fbfb"
 
 [[package]]
 name = "cove-sema"
 version = "0.1.0"
-source = "git+https://github.com/myuon/cove?rev=a51ed214095926bf408250dcbdde85220659b376#a51ed214095926bf408250dcbdde85220659b376"
+source = "git+https://github.com/myuon/cove?rev=782c5cc649b0e5cc1330ca63c98532cf0544fbfb#782c5cc649b0e5cc1330ca63c98532cf0544fbfb"
 dependencies = [
  "cove-diag",
  "cove-schema",
@@ -405,7 +405,7 @@ dependencies = [
 [[package]]
 name = "cove-syntax"
 version = "0.1.0"
-source = "git+https://github.com/myuon/cove?rev=a51ed214095926bf408250dcbdde85220659b376#a51ed214095926bf408250dcbdde85220659b376"
+source = "git+https://github.com/myuon/cove?rev=782c5cc649b0e5cc1330ca63c98532cf0544fbfb#782c5cc649b0e5cc1330ca63c98532cf0544fbfb"
 dependencies = [
  "cove-diag",
 ]
