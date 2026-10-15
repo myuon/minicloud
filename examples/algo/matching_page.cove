@@ -4,6 +4,8 @@ use matching.Matching
 use matching.Certificate
 use draw
 use time
+use std.html
+use std.html.Html
 
 // The matching page: the form, the examples, and the result — the summary,
 // the graph drawn with the matching over it, and the table view.
@@ -109,22 +111,51 @@ fn matchingPage(base: String, fields: Map<String, String>, post: Bool) -> web.Re
     }
     return htmlResponse(200, page(base, "matching", "Maximum bipartite matching", matchingForm(base, input, algorithm), resultSection(result)))
   }
-  let result = if chosen { pendingSection() } else { resultSection("<p class=muted>Pick an example, or write a graph and run it.</p>") }
+  let result = if chosen { pendingSection() } else { resultSection(html"<p class=muted>Pick an example, or write a graph and run it.</p>") }
   htmlResponse(200, page(base, "matching", "Maximum bipartite matching", matchingForm(base, input, algorithm), result))
 }
 
-fn matchingForm(base: String, input: String, algorithm: String) -> String {
+fn matchingForm(base: String, input: String, algorithm: String) -> Html {
   var examples = Vector.of()
   for example in matchingExamples() {
-    let pick = if example.algorithm == "" { "" } else { "&amp;algorithm={example.algorithm}" }
-    examples.push("<li><a href=\"{h(base)}/matching?example={example.name}{pick}\">{h(example.name)}</a> — {h(example.title)}</li>")
+    let pick = if example.algorithm == "" { html"" } else { html"&amp;algorithm={example.algorithm}" }
+    examples.push(html"""
+      <li><a href="{base}/matching?example={example.name}{pick}">{example.name}</a> —
+        {example.title}</li>
+      """)
   }
   var choices = Vector.of()
   for key in ["hopcroft-karp", "augmenting", "both"] {
-    let checked = if key == algorithm { " checked" } else { "" }
-    choices.push("<label><input type=radio name=algorithm value={key}{checked}> {h(algorithmName(key))}</label>")
+    let checked = html.only(key == algorithm, html" checked")
+    choices.push(html"<label><input type=radio name=algorithm value={key}{checked}> {algorithmName(key)}</label>")
   }
-  "<form class=run method=post action=\"{h(base)}/matching\"><div><label for=graph>Graph</label><textarea id=graph name=graph spellcheck=false>{h(input)}</textarea><div class=buttons><button type=submit>Run</button><button type=button class=cancel hidden>Cancel</button></div></div><div><fieldset><legend>Algorithm</legend>{"".join(choices.freeze())}</fieldset><fieldset><legend>Examples</legend><ul class=examples>{"".join(examples.freeze())}</ul></fieldset><details class=note><summary>Input format</summary><pre>a x              an edge from left a to right x\nb: x y z         edges from b\nleft: a b c      left vertices, in order (optional)\nright: x y z     right vertices, in order (optional)\nrandom 40 40 120 7\n                 a generated graph: left, right,\n                 edges, seed (the only line)\n# a comment</pre><p>At most {matchingBounds().vertices} vertices a side and {matchingBounds().edges} edges; a graph is drawn up to {drawLimit()} vertices a side.</p></details></div></form>"
+  html"""
+    <form class=run method=post action="{base}/matching">
+      <div>
+        <label for=graph>Graph</label>
+        <textarea id=graph name=graph spellcheck=false>{input}</textarea>
+        <div class=buttons>
+          <button type=submit>Run</button>
+          <button type=button class=cancel hidden>Cancel</button>
+        </div>
+      </div>
+      <div>
+        <fieldset><legend>Algorithm</legend>{choices.freeze()}</fieldset>
+        <fieldset><legend>Examples</legend><ul class=examples>{examples.freeze()}</ul></fieldset>
+        <details class=note>
+          <summary>Input format</summary>
+          <pre>a x              an edge from left a to right x\n\
+            b: x y z         edges from b\n\
+            left: a b c      left vertices, in order (optional)\n\
+            right: x y z     right vertices, in order (optional)\n\
+            random 40 40 120 7\n                 a generated graph: left, right,\n                 edges, seed (the only line)\n\
+            # a comment</pre>
+          <p>At most {matchingBounds().vertices} vertices a side and {matchingBounds().edges} edges;
+            a graph is drawn up to {drawLimit()} vertices a side.</p>
+        </details>
+      </div>
+    </form>
+    """
 }
 
 /// One algorithm's run: its answer and its time on the app's clock.
@@ -140,7 +171,7 @@ fn timed(key: String, graph: Graph) -> Timed {
   Timed(key: key, found: found, micros: time.nowMicros() - started)
 }
 
-fn matchingResult(input: String, algorithm: String) -> String {
+fn matchingResult(input: String, algorithm: String) -> Html {
   let started = time.nowMicros()
   let parsed = matching.parse(input, matchingBounds())
   let graph = match parsed {
@@ -162,33 +193,61 @@ fn matchingResult(input: String, algorithm: String) -> String {
   let n = graph.left.length()
   let m = graph.right.length()
   let verdict = if proof.proved {
-    "<div class=ok data-proved=true><strong>Maximum: {found.size} pairs.</strong> König's vertex cover has {proof.coverSize} vertices and every one of the {grouped(graph.edges())} edges has an end in it, so no matching is larger.</div>"
+    html"""
+      <div class=ok data-proved=true><strong>Maximum: {found.size} pairs.</strong> König's vertex
+        cover has {proof.coverSize} vertices and every one of the {grouped(graph.edges())} edges
+        has an end in it, so no matching is larger.</div>
+      """
   } else {
-    "<div class=stop data-proved=false><strong>Not proved maximum.</strong> {h(", ".join(proof.problems.slice(0, 5)))}</div>"
+    html"""<div class=stop data-proved=false><strong>Not proved maximum.</strong> {", ".join(proof.problems.slice(0, 5))}</div>"""
   }
-  var rows = Vector.of()
-  rows.push(["graph", "{grouped(n)} left · {grouped(m)} right · {grouped(graph.edges())} edges (read in {showMicros(readMicros)})"])
-  rows.push(["matching", "<strong>{grouped(found.size)}</strong> pairs · {grouped(n - found.size)} left and {grouped(m - found.size)} right vertices unmatched"])
+  var facts = Vector.of()
+  facts.push(Fact(
+    name: "graph",
+    value: html"""
+      {grouped(n)} left · {grouped(m)} right · {grouped(graph.edges())} edges
+        (read in {showMicros(readMicros)})
+      """,
+  ))
+  facts.push(Fact(
+    name: "matching",
+    value: html"""
+      <strong>{grouped(found.size)}</strong> pairs · {grouped(n - found.size)} left and
+        {grouped(m - found.size)} right vertices unmatched
+      """,
+  ))
   for one in all {
     let rounds = plural(one.found.rounds, if one.key == "augmenting" { "search" } else { "phase" })
-    rows.push([algorithmName(one.key), "{grouped(one.found.size)} pairs in {showMicros(one.micros)} · {grouped(one.found.scans)} edge scans · {rounds}"])
+    facts.push(Fact(
+      name: algorithmName(one.key),
+      value: html"""
+        {grouped(one.found.size)} pairs in {showMicros(one.micros)} ·
+          {grouped(one.found.scans)} edge scans · {rounds}
+        """,
+    ))
   }
   let agree = if all.length() > 1 {
     let second = all.get(1).unwrapOr(first)
     if second.found.size == found.size {
-      "<p class=note>The two agree on the size; the faster examined {ratio(first.found.scans, second.found.scans)} the edges.</p>"
+      html"""
+        <p class=note>The two agree on the size; the faster examined
+          {ratio(first.found.scans, second.found.scans)} the edges.</p>
+        """
     } else {
-      "<div class=stop><strong>The algorithms disagree:</strong> {second.found.size} against {found.size}.</div>"
+      html"<div class=stop><strong>The algorithms disagree:</strong> {second.found.size} against {found.size}.</div>"
     }
   } else {
-    ""
+    html""
   }
   let picture = if n <= drawLimit() && m <= drawLimit() {
     drawMatching(graph, found, proof)
   } else {
-    "<p class=muted>The graph has more than {drawLimit()} vertices on a side, so it is not drawn; the table lists the matching.</p>"
+    html"""
+      <p class=muted>The graph has more than {drawLimit()} vertices on a side, so it is not drawn;
+        the table lists the matching.</p>
+      """
   }
-  "{verdict}{summary(rows.freeze())}{agree}{picture}{matchingTable(graph, found, proof)}"
+  html"{verdict}{summary(facts.freeze())}{agree}{picture}{matchingTable(graph, found, proof)}"
 }
 
 /// `small` as a share of `large`, in words.
@@ -202,7 +261,7 @@ fn ratio(small: Int, large: Int) -> String {
 }
 
 /// The graph as two columns, the matching over its edges, the cover marked.
-fn drawMatching(graph: Graph, found: Matching, proof: Certificate) -> String {
+fn drawMatching(graph: Graph, found: Matching, proof: Certificate) -> Html {
   let n = graph.left.length()
   let m = graph.right.length()
   let rows = n.max(m)
@@ -216,15 +275,32 @@ fn drawMatching(graph: Graph, found: Matching, proof: Certificate) -> String {
   let leftY = fn(u: Int) { top + (u.toFloat() + 0.5) * step + (rows - n).toFloat() * step / 2.0 }
   let rightY = fn(v: Int) { top + (v.toFloat() + 0.5) * step + (rows - m).toFloat() * step / 2.0 }
   var out = Vector.of()
-  out.push(draw.open(width, height, "the graph: {n} left and {m} right vertices, {graph.edges()} edges, {found.size} matched"))
   // The legend: each role's mark and name.
-  let edgeSwatch = "<line x1=\"10\" y1=\"16\" x2=\"32\" y2=\"16\" stroke=\"{draw.muted()}\" stroke-width=\"1.25\"/>"
-  let matchedSwatch = "<line x1=\"10\" y1=\"16\" x2=\"32\" y2=\"16\" stroke=\"{draw.colour(0)}\" stroke-width=\"3.5\" stroke-linecap=\"round\"/>"
+  let edgeSwatch = html"""<line x1="10" y1="16" x2="32" y2="16" stroke="{draw.muted()}" stroke-width="1.25"/>"""
+  let matchedSwatch = html"""
+    <line x1="10" y1="16" x2="32" y2="16" stroke="{draw.colour(0)}" stroke-width="3.5"
+      stroke-linecap="round"/>
+    """
   out.push(draw.legendEntry(10.0, 16.0, edgeSwatch, "edge"))
-  out.push("<g transform=\"translate(80 0)\">{draw.legendEntry(10.0, 16.0, matchedSwatch, "matched edge")}</g>")
-  out.push("<g transform=\"translate(200 0)\">{vertexMark(21.0, 16.0, true, false)}{draw.label(38.0, 20.0, "start", "matched vertex")}</g>")
-  out.push("<g transform=\"translate(330 0)\">{vertexMark(21.0, 16.0, false, false)}{draw.label(38.0, 20.0, "start", "unmatched")}</g>")
-  out.push("<g transform=\"translate(430 0)\">{vertexMark(21.0, 16.0, true, true)}{draw.label(38.0, 20.0, "start", "in König's cover")}</g>")
+  out.push(html"""<g transform="translate(80 0)">{draw.legendEntry(10.0, 16.0, matchedSwatch, "matched edge")}</g>""")
+  out.push(html"""
+    <g transform="translate(200 0)">
+      {vertexMark(21.0, 16.0, true, false)}
+      {draw.label(38.0, 20.0, "start", "matched vertex")}
+    </g>
+    """)
+  out.push(html"""
+    <g transform="translate(330 0)">
+      {vertexMark(21.0, 16.0, false, false)}
+      {draw.label(38.0, 20.0, "start", "unmatched")}
+    </g>
+    """)
+  out.push(html"""
+    <g transform="translate(430 0)">
+      {vertexMark(21.0, 16.0, true, true)}
+      {draw.label(38.0, 20.0, "start", "in König's cover")}
+    </g>
+    """)
   out.push(draw.note(leftX, top - 6.0, "middle", "left"))
   out.push(draw.note(rightX, top - 6.0, "middle", "right"))
   // Edges first, the matched ones over the rest.
@@ -235,12 +311,15 @@ fn drawMatching(graph: Graph, found: Matching, proof: Certificate) -> String {
     let end = graph.start.get(u + 1).unwrapOr(0)
     while e < end {
       let v = graph.adjacent.get(e).unwrapOr(0)
-      let line = "x1=\"{draw.px(leftX)}\" y1=\"{draw.px(leftY(u))}\" x2=\"{draw.px(rightX)}\" y2=\"{draw.px(rightY(v))}\""
-      let tip = "<title>{draw.h(name(graph.left, u))} – {draw.h(name(graph.right, v))}</title>"
+      let line = html"""x1="{draw.px(leftX)}" y1="{draw.px(leftY(u))}" x2="{draw.px(rightX)}" y2="{draw.px(rightY(v))}""""
+      let tip = html"<title>{name(graph.left, u)} – {name(graph.right, v)}</title>"
       if found.partnerOfLeft.get(u).unwrapOr(-1) == v {
-        matched.push("<line class=matched {line} stroke=\"{draw.colour(0)}\" stroke-width=\"3.5\" stroke-linecap=\"round\">{tip}</line>")
+        matched.push(html"""
+          <line class=matched {line} stroke="{draw.colour(0)}" stroke-width="3.5"
+            stroke-linecap="round">{tip}</line>
+          """)
       } else {
-        out.push("<line class=edge {line} stroke=\"{draw.muted()}\" stroke-width=\"1.25\">{tip}</line>")
+        out.push(html"""<line class=edge {line} stroke="{draw.muted()}" stroke-width="1.25">{tip}</line>""")
       }
       e += 1
     }
@@ -253,7 +332,12 @@ fn drawMatching(graph: Graph, found: Matching, proof: Certificate) -> String {
   while u < n {
     let y = leftY(u)
     let isMatched = found.partnerOfLeft.get(u).unwrapOr(-1) != -1
-    out.push("<g class=vertex data-side=left data-matched={isMatched}><title>{draw.h(name(graph.left, u))}</title>{vertexMark(leftX, y, isMatched, proof.coverLeft.get(u).unwrapOr(false))}</g>")
+    out.push(html"""
+      <g class=vertex data-side=left data-matched={isMatched}>
+        <title>{name(graph.left, u)}</title>
+        {vertexMark(leftX, y, isMatched, proof.coverLeft.get(u).unwrapOr(false))}
+      </g>
+      """)
     out.push(draw.label(leftX - 12.0, y + 4.0, "end", name(graph.left, u)))
     u += 1
   }
@@ -261,23 +345,34 @@ fn drawMatching(graph: Graph, found: Matching, proof: Certificate) -> String {
   while v < m {
     let y = rightY(v)
     let isMatched = found.partnerOfRight.get(v).unwrapOr(-1) != -1
-    out.push("<g class=vertex data-side=right data-matched={isMatched}><title>{draw.h(name(graph.right, v))}</title>{vertexMark(rightX, y, isMatched, proof.coverRight.get(v).unwrapOr(false))}</g>")
+    out.push(html"""
+      <g class=vertex data-side=right data-matched={isMatched}>
+        <title>{name(graph.right, v)}</title>
+        {vertexMark(rightX, y, isMatched, proof.coverRight.get(v).unwrapOr(false))}
+      </g>
+      """)
     out.push(draw.label(rightX + 12.0, y + 4.0, "start", name(graph.right, v)))
     v += 1
   }
-  out.push("</svg>")
-  "".join(out.freeze())
+  let label = "the graph: {n} left and {m} right vertices, {graph.edges()} edges, {found.size} matched"
+  draw.chart(width, height, label, html"{out.freeze()}")
 }
 
 /// A vertex: filled when matched, hollow when not; a square when it is in
 /// the cover, a circle otherwise — so neither is said by colour alone.
-fn vertexMark(x: Float, y: Float, isMatched: Bool, inCover: Bool) -> String {
+fn vertexMark(x: Float, y: Float, isMatched: Bool, inCover: Bool) -> Html {
   let fill = if isMatched { draw.colour(0) } else { draw.surface() }
   let stroke = if isMatched { draw.colour(0) } else { draw.secondary() }
   if inCover {
-    "<rect x=\"{draw.px(x - 6.0)}\" y=\"{draw.px(y - 6.0)}\" width=\"12\" height=\"12\" fill=\"{fill}\" stroke=\"{draw.colour(1)}\" stroke-width=\"2.5\"/>"
+    html"""
+      <rect x="{draw.px(x - 6.0)}" y="{draw.px(y - 6.0)}" width="12" height="12" fill="{fill}"
+        stroke="{draw.colour(1)}" stroke-width="2.5"/>
+      """
   } else {
-    "<circle cx=\"{draw.px(x)}\" cy=\"{draw.px(y)}\" r=\"5.5\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"1.5\"/>"
+    html"""
+      <circle cx="{draw.px(x)}" cy="{draw.px(y)}" r="5.5" fill="{fill}" stroke="{stroke}"
+        stroke-width="1.5"/>
+      """
   }
 }
 
@@ -286,7 +381,7 @@ fn name(names: Array<String>, at: Int) -> String {
 }
 
 /// The table view: the matched pairs, then who is left over and the cover.
-fn matchingTable(graph: Graph, found: Matching, proof: Certificate) -> String {
+fn matchingTable(graph: Graph, found: Matching, proof: Certificate) -> Html {
   let shown = 500
   var pairs = Vector.of()
   var freeLeft = Vector.of()
@@ -297,7 +392,7 @@ fn matchingTable(graph: Graph, found: Matching, proof: Certificate) -> String {
     if v == -1 {
       freeLeft.push(name(graph.left, u))
     } else if pairs.length() < shown {
-      pairs.push("<tr><td>{draw.h(name(graph.left, u))}</td><td>{draw.h(name(graph.right, v))}</td></tr>")
+      pairs.push(html"<tr><td>{name(graph.left, u)}</td><td>{name(graph.right, v)}</td></tr>")
     }
     if proof.coverLeft.get(u).unwrapOr(false) {
       cover.push(name(graph.left, u))
@@ -315,17 +410,34 @@ fn matchingTable(graph: Graph, found: Matching, proof: Certificate) -> String {
     }
     v += 1
   }
-  let more = if found.size > shown { "<p class=note>The first {shown} of {grouped(found.size)} pairs.</p>" } else { "" }
+  let more = html.only(found.size > shown, html"<p class=note>The first {shown} of {grouped(found.size)} pairs.</p>")
   let listed = fn(names: Array<String>) {
     if names.length() == 0 {
       "none"
     } else if names.length() > 60 {
-      "{draw.h(" ".join(names.slice(0, 60)))} … ({names.length()} in all)"
+      "{" ".join(names.slice(0, 60))} … ({names.length()} in all)"
     } else {
-      draw.h(" ".join(names))
+      " ".join(names)
     }
   }
-  "<details class=table><summary>Table view: the {grouped(found.size)} matched pairs</summary><table><tr><th>left</th><th>right</th></tr>{"".join(pairs.freeze())}</table>{more}<dl class=meta><dt>unmatched left</dt><dd>{listed(freeLeft.freeze())}</dd><dt>unmatched right</dt><dd>{listed(freeRight.freeze())}</dd><dt>König's cover</dt><dd>{listed(cover.freeze())}</dd></dl></details>"
+  html"""
+    <details class=table>
+      <summary>Table view: the {grouped(found.size)} matched pairs</summary>
+      <table>
+        <tr><th>left</th><th>right</th></tr>
+        {pairs.freeze()}
+      </table>
+      {more}
+      <dl class=meta>
+        <dt>unmatched left</dt>
+        <dd>{listed(freeLeft.freeze())}</dd>
+        <dt>unmatched right</dt>
+        <dd>{listed(freeRight.freeze())}</dd>
+        <dt>König's cover</dt>
+        <dd>{listed(cover.freeze())}</dd>
+      </dl>
+    </details>
+    """
 }
 
 /// `count` and `noun`, plural when it is not one: `1 phase`, `3 phases`.

@@ -7,6 +7,8 @@ use anneal.Sample
 use anneal.Schedule
 use draw
 use time
+use std.html
+use std.html.Html
 
 // The annealing page: one problem, two runs of it with their own settings,
 // side by side — the trajectory of both on one chart, both tours, and the
@@ -116,7 +118,7 @@ fn annealPage(base: String, given: Map<String, String>, post: Bool) -> web.Respo
     }
     return htmlResponse(200, page(base, "anneal", title, annealForm(base, fields), resultSection(result)))
   }
-  let result = if chosen { pendingSection() } else { resultSection("<p class=muted>Pick an example, or set two runs and compare them.</p>") }
+  let result = if chosen { pendingSection() } else { resultSection(html"<p class=muted>Pick an example, or set two runs and compare them.</p>") }
   htmlResponse(200, page(base, "anneal", title, annealForm(base, fields), result))
 }
 
@@ -124,26 +126,70 @@ fn value(fields: Map<String, String>, key: String) -> String {
   fields.get(key).unwrapOr("")
 }
 
-fn annealForm(base: String, fields: Map<String, String>) -> String {
+fn annealForm(base: String, fields: Map<String, String>) -> Html {
   var examples = Vector.of()
   for example in annealExamples() {
-    examples.push("<li><a href=\"{h(base)}/anneal?example={example.name}\">{h(example.name)}</a> — {h(example.title)}</li>")
+    examples.push(html"""<li><a href="{base}/anneal?example={example.name}">{example.name}</a> — {example.title}</li>""")
   }
-  let problem = value(fields, "problem")
-  let circleChecked = if problem == "circle" { " checked" } else { "" }
-  let randomChecked = if problem == "circle" { "" } else { " checked" }
+  let onCircle = value(fields, "problem") == "circle"
   let runFields = fn(prefix: String, name: String, colour: Int) {
-    let geometric = if value(fields, "{prefix}_schedule") == "linear" { "" } else { " selected" }
-    let linear = if value(fields, "{prefix}_schedule") == "linear" { " selected" } else { "" }
-    "<fieldset><legend><svg width=\"26\" height=\"10\" aria-hidden=true><line x1=\"1\" y1=\"5\" x2=\"25\" y2=\"5\" stroke=\"{draw.colour(colour)}\" stroke-width=\"2.5\"{dashOf(colour)}/></svg> Run {name}</legend><label>seed <input type=number name={prefix}_seed value=\"{h(value(fields, "{prefix}_seed"))}\"></label><label>iterations <input type=number name={prefix}_iterations min=1 max={maxIterations()} value=\"{h(value(fields, "{prefix}_iterations"))}\"></label><label>temperature from <input type=text inputmode=decimal size=7 name={prefix}_start value=\"{h(value(fields, "{prefix}_start"))}\"> to <input type=text inputmode=decimal size=7 name={prefix}_end value=\"{h(value(fields, "{prefix}_end"))}\"></label><label>schedule <select name={prefix}_schedule><option value=geometric{geometric}>geometric</option><option value=linear{linear}>linear</option></select></label></fieldset>"
+    let linear = value(fields, "{prefix}_schedule") == "linear"
+    html"""
+      <fieldset>
+        <legend><svg width="26" height="10" aria-hidden=true><line x1="1" y1="5" x2="25" y2="5"
+          stroke="{draw.colour(colour)}" stroke-width="2.5"{dashOf(colour)}/></svg> Run {name}</legend>
+        <label>seed <input type=number name={prefix}_seed value="{value(fields, "{prefix}_seed")}"></label>
+        <label>iterations <input type=number name={prefix}_iterations min=1 max={maxIterations()}
+          value="{value(fields, "{prefix}_iterations")}"></label>
+        <label>temperature from <input type=text inputmode=decimal size=7 name={prefix}_start
+          value="{value(fields, "{prefix}_start")}"> to <input type=text inputmode=decimal size=7
+          name={prefix}_end value="{value(fields, "{prefix}_end")}"></label>
+        <label>schedule <select name={prefix}_schedule>
+          <option value=geometric{html.only(!linear, html" selected")}>geometric</option>
+          <option value=linear{html.only(linear, html" selected")}>linear</option>
+        </select></label>
+      </fieldset>
+      """
   }
-  "<form class=run method=post action=\"{h(base)}/anneal\"><div><fieldset><legend>Problem: a tour through every point</legend><label><input type=radio name=problem value=random{randomChecked}> random points in the unit square</label><label><input type=radio name=problem value=circle{circleChecked}> points on a circle, shuffled (the optimum is known)</label><label>points <input type=number name=n min=4 max={maxPoints()} value=\"{h(value(fields, "n"))}\"></label><label>problem seed <input type=number name=pseed value=\"{h(value(fields, "pseed"))}\"></label></fieldset><div class=pair>{runFields("a", "A", 0)}{runFields("b", "B", 1)}</div><div class=buttons><button type=submit>Run both</button><button type=button class=cancel hidden>Cancel</button></div></div><div><fieldset><legend>Examples</legend><ul class=examples>{"".join(examples.freeze())}</ul></fieldset><details class=note><summary>What runs</summary><p>Both runs start from the tour 0, 1, …, n−1. Each iteration proposes a 2-opt move — reverse the tour between two random positions — and takes it if it is shorter, or with probability e<sup>−Δ/T</sup> if it is longer by Δ. T falls from the first temperature to the second over the run, by the same factor each step (geometric) or the same amount (linear). Every random choice comes from the run's seed, so a seed and its settings are always the same run.</p><p>At most {maxPoints()} points and {grouped(maxIterations())} iterations a run.</p></details></div></form>"
+  html"""
+    <form class=run method=post action="{base}/anneal">
+      <div>
+        <fieldset>
+          <legend>Problem: a tour through every point</legend>
+          <label><input type=radio name=problem value=random{html.only(!onCircle, html" checked")}> random
+            points in the unit square</label>
+          <label><input type=radio name=problem value=circle{html.only(onCircle, html" checked")}> points
+            on a circle, shuffled (the optimum is known)</label>
+          <label>points <input type=number name=n min=4 max={maxPoints()} value="{value(fields, "n")}"></label>
+          <label>problem seed <input type=number name=pseed value="{value(fields, "pseed")}"></label>
+        </fieldset>
+        <div class=pair>{runFields("a", "A", 0)}{runFields("b", "B", 1)}</div>
+        <div class=buttons>
+          <button type=submit>Run both</button>
+          <button type=button class=cancel hidden>Cancel</button>
+        </div>
+      </div>
+      <div>
+        <fieldset><legend>Examples</legend><ul class=examples>{examples.freeze()}</ul></fieldset>
+        <details class=note>
+          <summary>What runs</summary>
+          <p>Both runs start from the tour 0, 1, …, n−1. Each iteration proposes a 2-opt move —
+            reverse the tour between two random positions — and takes it if it is shorter, or with
+            probability e<sup>−Δ/T</sup> if it is longer by Δ. T falls from the first temperature
+            to the second over the run, by the same factor each step (geometric) or the same
+            amount (linear). Every random choice comes from the run's seed, so a seed and its
+            settings are always the same run.</p>
+          <p>At most {maxPoints()} points and {grouped(maxIterations())} iterations a run.</p>
+        </details>
+      </div>
+    </form>
+    """
 }
 
 /// The dash pattern of run `index`: A solid, B dashed, so the two differ by
 /// more than colour.
-fn dashOf(index: Int) -> String {
-  if index == 0 { "" } else { " stroke-dasharray=\"6 4\"" }
+fn dashOf(index: Int) -> Html {
+  html.only(index != 0, html""" stroke-dasharray="6 4"""")
 }
 
 /// What a form says, read, or why it cannot be.
@@ -184,7 +230,7 @@ fn timedRun(problem: Problem, name: String, settings: Settings) -> TimedRun {
   TimedRun(name: name, settings: settings, done: done, micros: time.nowMicros() - started)
 }
 
-fn annealResult(fields: Map<String, String>) -> String {
+fn annealResult(fields: Map<String, String>) -> Html {
   let n = Int.parse(value(fields, "n")).unwrapOr(-1)
   let pseed = Int.parse(value(fields, "pseed")).unwrapOr(-1)
   if n < 4 || n > maxPoints() {
@@ -215,20 +261,39 @@ fn annealResult(fields: Map<String, String>) -> String {
     }
   }
   let checked = if problems.length() == 0 {
-    "<div class=ok data-checked=true><strong>{h(winner(runA, runB))}</strong> Both answers are tours through all {n} points, and their lengths are recomputed from the tours. {h(reference(greedy, optimum, runA, runB))}</div>"
+    html"""
+      <div class=ok data-checked=true><strong>{winner(runA, runB)}</strong> Both answers are tours
+        through all {n} points, and their lengths are recomputed from the tours.
+        {reference(greedy, optimum, runA, runB)}</div>
+      """
   } else {
-    "<div class=stop data-checked=false><strong>{h(", ".join(problems.freeze()))}</strong></div>"
+    html"""<div class=stop data-checked=false><strong>{", ".join(problems.freeze())}</strong></div>"""
   }
-  var rows = Vector.of()
-  rows.push(["problem", "{h(problem.origin)} · greedy nearest-neighbour tour {length(greedy)}{optimumText(optimum)}"])
+  var facts = Vector.of()
+  facts.push(Fact(
+    name: "problem",
+    value: html"{problem.origin} · greedy nearest-neighbour tour {length(greedy)}{optimumText(optimum)}",
+  ))
   for one in runs {
     let done = one.done
-    rows.push([
-      "run {one.name}",
-      "best <strong>{length(done.length)}</strong> (from {length(done.startLength)}; ended on {length(done.finalLength)}) · {grouped(one.settings.iterations)} iterations, {grouped(done.accepted)} moves taken ({grouped(done.improving)} shorter) · T {one.settings.start} → {one.settings.end} {scheduleName(one.settings.schedule)}, seed {one.settings.seed} · {showMicros(one.micros)}",
-    ])
+    facts.push(Fact(
+      name: "run {one.name}",
+      value: html"""
+        best <strong>{length(done.length)}</strong> (from {length(done.startLength)}; ended on
+          {length(done.finalLength)}) · {grouped(one.settings.iterations)} iterations,
+          {grouped(done.accepted)} moves taken ({grouped(done.improving)} shorter) ·
+          T {one.settings.start} → {one.settings.end} {scheduleName(one.settings.schedule)},
+          seed {one.settings.seed} · {showMicros(one.micros)}
+        """,
+    ))
   }
-  "{checked}{summary(rows.freeze())}{trajectoryChart(runs, greedy, optimum)}<div class=pair>{tourPicture(problem, runA, 0)}{tourPicture(problem, runB, 1)}</div>{trajectoryTable(runs)}"
+  html"""
+    {checked}
+    {summary(facts.freeze())}
+    {trajectoryChart(runs, greedy, optimum)}
+    <div class=pair>{tourPicture(problem, runA, 0)}{tourPicture(problem, runB, 1)}</div>
+    {trajectoryTable(runs)}
+    """
 }
 
 fn scheduleName(schedule: Schedule) -> String {
@@ -279,7 +344,7 @@ fn reference(greedy: Float, optimum: Option<Float>, a: TimedRun, b: TimedRun) ->
 /// on at each recorded iteration (and, thinner, the best so far), against
 /// the iteration as a share of the run; the greedy tour and a known optimum
 /// as reference lines.
-fn trajectoryChart(runs: Array<TimedRun>, greedy: Float, optimum: Option<Float>) -> String {
+fn trajectoryChart(runs: Array<TimedRun>, greedy: Float, optimum: Option<Float>) -> Html {
   let width = 760.0
   let height = 320.0
   let left = 70.0
@@ -310,31 +375,39 @@ fn trajectoryChart(runs: Array<TimedRun>, greedy: Float, optimum: Option<Float>)
     left + share * plotWidth
   }
   var out = Vector.of()
-  out.push(draw.open(width, height, "tour length against the share of each run done, runs A and B"))
   // The legend: each run's line, the best-so-far line, the references.
   var x = left
   var index = 0
   for one in runs {
     let colour = draw.colour(index)
-    out.push("<line x1=\"{draw.px(x)}\" y1=\"16\" x2=\"{draw.px(x + 22.0)}\" y2=\"16\" stroke=\"{colour}\" stroke-width=\"2\"{dashOf(index)}/>")
+    out.push(html"""<line x1="{draw.px(x)}" y1="16" x2="{draw.px(x + 22.0)}" y2="16" stroke="{colour}" stroke-width="2"{dashOf(index)}/>""")
     out.push(draw.label(x + 28.0, 20.0, "start", "run {one.name}"))
     x = x + 90.0
     index += 1
   }
-  out.push("<line x1=\"{draw.px(x)}\" y1=\"16\" x2=\"{draw.px(x + 22.0)}\" y2=\"16\" stroke=\"{draw.secondary()}\" stroke-width=\"1\"/>")
+  out.push(html"""<line x1="{draw.px(x)}" y1="16" x2="{draw.px(x + 22.0)}" y2="16" stroke="{draw.secondary()}" stroke-width="1"/>""")
   out.push(draw.label(x + 28.0, 20.0, "start", "best so far (thin)"))
   // The grid and the y-axis.
   var tick = axis.low
   var guard = 0
   while tick <= axis.high + axis.step / 1000.0 && guard < 40 {
     let y = yAt(tick)
-    out.push("<line x1=\"{draw.px(left)}\" y1=\"{draw.px(y)}\" x2=\"{draw.px(left + plotWidth)}\" y2=\"{draw.px(y)}\" stroke=\"{draw.grid()}\" stroke-width=\"1\"/>")
-    out.push("<text x=\"{draw.px(left - 8.0)}\" y=\"{draw.px(y + 4.0)}\" text-anchor=end fill=\"{draw.secondary()}\">{tick.format(1)}</text>")
+    out.push(html"""
+      <line x1="{draw.px(left)}" y1="{draw.px(y)}" x2="{draw.px(left + plotWidth)}" y2="{draw.px(y)}"
+        stroke="{draw.grid()}" stroke-width="1"/>
+      """)
+    out.push(html"""<text x="{draw.px(left - 8.0)}" y="{draw.px(y + 4.0)}" text-anchor=end fill="{draw.secondary()}">{tick.format(1)}</text>""")
     tick = tick + axis.step
     guard += 1
   }
-  out.push("<line x1=\"{draw.px(left)}\" y1=\"{draw.px(top + plotHeight)}\" x2=\"{draw.px(left + plotWidth)}\" y2=\"{draw.px(top + plotHeight)}\" stroke=\"{draw.muted()}\" stroke-width=\"1\"/>")
-  out.push("<text transform=\"translate(16 {draw.px(top + plotHeight / 2.0)}) rotate(-90)\" text-anchor=middle fill=\"{draw.ink()}\">tour length</text>")
+  out.push(html"""
+    <line x1="{draw.px(left)}" y1="{draw.px(top + plotHeight)}" x2="{draw.px(left + plotWidth)}" y2="{draw.px(top + plotHeight)}"
+      stroke="{draw.muted()}" stroke-width="1"/>
+    """)
+  out.push(html"""
+    <text transform="translate(16 {draw.px(top + plotHeight / 2.0)}) rotate(-90)" text-anchor=middle
+      fill="{draw.ink()}">tour length</text>
+    """)
   for share in [0.0, 0.25, 0.5, 0.75, 1.0] {
     out.push(draw.note(xAt(share), top + plotHeight + 16.0, "middle", "{(share * 100.0).format(0)}%"))
   }
@@ -342,7 +415,13 @@ fn trajectoryChart(runs: Array<TimedRun>, greedy: Float, optimum: Option<Float>)
   // The references, labelled at the right end in ink.
   let referenceLine = fn(value: Float, name: String, lift: Float) {
     let y = yAt(value)
-    "<g class=reference><line x1=\"{draw.px(left)}\" y1=\"{draw.px(y)}\" x2=\"{draw.px(left + plotWidth)}\" y2=\"{draw.px(y)}\" stroke=\"{draw.secondary()}\" stroke-width=\"1\" stroke-dasharray=\"2 3\"/>{draw.label(left + plotWidth + 6.0, y + 4.0 - lift, "start", "{name} {value.format(3)}")}</g>"
+    html"""
+      <g class=reference>
+        <line x1="{draw.px(left)}" y1="{draw.px(y)}" x2="{draw.px(left + plotWidth)}" y2="{draw.px(y)}"
+          stroke="{draw.secondary()}" stroke-width="1" stroke-dasharray="2 3"/>
+        {draw.label(left + plotWidth + 6.0, y + 4.0 - lift, "start", "{name} {value.format(3)}")}
+      </g>
+      """
   }
   out.push(referenceLine(greedy, "greedy", 0.0))
   match optimum {
@@ -365,14 +444,21 @@ fn trajectoryChart(runs: Array<TimedRun>, greedy: Float, optimum: Option<Float>)
       current.push("{draw.px(xAt(share))} {draw.px(yAt(sample.current))}")
       best.push("{draw.px(xAt(share))} {draw.px(yAt(sample.best))}")
     }
-    out.push("<path class=best data-run={one.name} d=\"M{"L".join(best.freeze())}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"1\" stroke-opacity=\"0.7\"{dashOf(index)}/>")
-    out.push("<path class=current data-run={one.name} d=\"M{"L".join(current.freeze())}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"2\" stroke-linejoin=\"round\"{dashOf(index)}><title>run {one.name}: from {length(one.done.startLength)} to a best of {length(one.done.length)}</title></path>")
+    out.push(html"""
+      <path class=best data-run={one.name} d="M{"L".join(best.freeze())}" fill="none" stroke="{colour}"
+        stroke-width="1" stroke-opacity="0.7"{dashOf(index)}/>
+      """)
+    out.push(html"""
+      <path class=current data-run={one.name} d="M{"L".join(current.freeze())}" fill="none" stroke="{colour}"
+        stroke-width="2" stroke-linejoin="round"{dashOf(index)}>
+        <title>run {one.name}: from {length(one.done.startLength)} to a best of {length(one.done.length)}</title>
+      </path>
+      """)
     let last = one.done.trajectory.get(one.done.trajectory.length() - 1).unwrapOr(Sample(iteration: 0, current: 0.0, best: 0.0, temperature: 0.0))
     out.push(draw.marker(index, xAt(1.0), yAt(last.best), colour))
     index += 1
   }
-  out.push("</svg>")
-  "".join(out.freeze())
+  draw.chart(width, height, "tour length against the share of each run done, runs A and B", html"{out.freeze()}")
 }
 
 /// A value axis of round ticks, about five of them.
@@ -411,29 +497,34 @@ fn scaleOf(least: Float, most: Float) -> Axis {
 }
 
 /// A run's best tour over the points.
-fn tourPicture(problem: Problem, one: TimedRun, index: Int) -> String {
+fn tourPicture(problem: Problem, one: TimedRun, index: Int) -> Html {
   let size = 300.0
   let pad = 14.0
   let at = fn(v: Float) { pad + v * (size - 2.0 * pad) }
   var out = Vector.of()
-  out.push(draw.open(size, size + 20.0, "run {one.name}'s best tour, length {length(one.done.length)}"))
   out.push(draw.label(pad, 16.0, "start", "run {one.name}: {length(one.done.length)}"))
   var points = Vector.of()
   for city in one.done.tour {
     points.push("{draw.px(at(problem.xs.get(city).unwrapOr(0.0)))} {draw.px(20.0 + at(problem.ys.get(city).unwrapOr(0.0)))}")
   }
-  out.push("<path d=\"M{"L".join(points.freeze())}Z\" fill=\"none\" stroke=\"{draw.colour(index)}\" stroke-width=\"1.5\" stroke-linejoin=\"round\"{dashOf(index)}/>")
+  out.push(html"""
+    <path d="M{"L".join(points.freeze())}Z" fill="none" stroke="{draw.colour(index)}" stroke-width="1.5"
+      stroke-linejoin="round"{dashOf(index)}/>
+    """)
   var i = 0
   while i < problem.xs.length() {
-    out.push("<circle cx=\"{draw.px(at(problem.xs.get(i).unwrapOr(0.0)))}\" cy=\"{draw.px(20.0 + at(problem.ys.get(i).unwrapOr(0.0)))}\" r=\"2.5\" fill=\"{draw.ink()}\"><title>point {i}</title></circle>")
+    out.push(html"""
+      <circle cx="{draw.px(at(problem.xs.get(i).unwrapOr(0.0)))}" cy="{draw.px(20.0 + at(problem.ys.get(i).unwrapOr(0.0)))}"
+        r="2.5" fill="{draw.ink()}"><title>point {i}</title></circle>
+      """)
     i += 1
   }
-  out.push("</svg>")
-  "".join(out.freeze())
+  let label = "run {one.name}'s best tour, length {length(one.done.length)}"
+  draw.chart(size, size + 20.0, label, html"{out.freeze()}")
 }
 
 /// The table view: both trajectories, every tenth recorded point.
-fn trajectoryTable(runs: Array<TimedRun>) -> String {
+fn trajectoryTable(runs: Array<TimedRun>) -> Html {
   let a = runs.get(0).unwrapOr(runs.get(1).unwrapOr(TimedRun(name: "", settings: Settings(seed: 0, iterations: 1, start: 1.0, end: 1.0, schedule: Schedule.Linear, samples: 1), done: Annealed(tour: [], length: 0.0, finalLength: 0.0, startLength: 0.0, accepted: 0, improving: 0, trajectory: []), micros: 0)))
   let b = runs.get(1).unwrapOr(a)
   var rows = Vector.of()
@@ -441,16 +532,39 @@ fn trajectoryTable(runs: Array<TimedRun>) -> String {
   let count = a.done.trajectory.length().max(b.done.trajectory.length())
   while k < count {
     if k % 10 == 0 || k == count - 1 {
-      rows.push("<tr><td class=num>{(k * 100 / (count - 1).max(1))}%</td>{sampleCells(a.done.trajectory, k)}{sampleCells(b.done.trajectory, k)}</tr>")
+      rows.push(html"""
+        <tr>
+          <td class=num>{(k * 100 / (count - 1).max(1))}%</td>
+          {sampleCells(a.done.trajectory, k)}
+          {sampleCells(b.done.trajectory, k)}
+        </tr>
+        """)
     }
     k += 1
   }
-  "<details class=table><summary>Table view: the trajectories</summary><table><tr><th class=num>done</th><th class=num>A iteration</th><th class=num>A T</th><th class=num>A current</th><th class=num>A best</th><th class=num>B iteration</th><th class=num>B T</th><th class=num>B current</th><th class=num>B best</th></tr>{"".join(rows.freeze())}</table></details>"
+  html"""
+    <details class=table>
+      <summary>Table view: the trajectories</summary>
+      <table>
+        <tr>
+          <th class=num>done</th>
+          <th class=num>A iteration</th><th class=num>A T</th><th class=num>A current</th><th class=num>A best</th>
+          <th class=num>B iteration</th><th class=num>B T</th><th class=num>B current</th><th class=num>B best</th>
+        </tr>
+        {rows.freeze()}
+      </table>
+    </details>
+    """
 }
 
-fn sampleCells(trajectory: Array<Sample>, at: Int) -> String {
+fn sampleCells(trajectory: Array<Sample>, at: Int) -> Html {
   match trajectory.get(at) {
-    Some(sample) => "<td class=num>{grouped(sample.iteration)}</td><td class=num>{sample.temperature.format(4)}</td><td class=num>{length(sample.current)}</td><td class=num>{length(sample.best)}</td>"
-    None => "<td></td><td></td><td></td><td></td>"
+    Some(sample) => html"""
+      <td class=num>{grouped(sample.iteration)}</td>
+      <td class=num>{sample.temperature.format(4)}</td>
+      <td class=num>{length(sample.current)}</td>
+      <td class=num>{length(sample.best)}</td>
+      """
+    None => html"<td></td><td></td><td></td><td></td>"
   }
 }

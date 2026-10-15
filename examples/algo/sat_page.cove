@@ -5,6 +5,8 @@ use sat.Outcome
 use sat.Verdict
 use draw
 use time
+use std.html
+use std.html.Html
 
 // The SAT page: the form, the examples, and the result — the verdict and
 // its check, the search's cost, the assignment drawn (a sudoku as its grid)
@@ -119,20 +121,53 @@ fn satPage(base: String, fields: Map<String, String>, post: Bool) -> web.Respons
     }
     return htmlResponse(200, page(base, "sat", title, satForm(base, input, budget), resultSection(result)))
   }
-  let result = if chosen { pendingSection() } else { resultSection("<p class=muted>Pick an example, or write a formula and run it.</p>") }
+  let result = if chosen { pendingSection() } else { resultSection(html"<p class=muted>Pick an example, or write a formula and run it.</p>") }
   htmlResponse(200, page(base, "sat", title, satForm(base, input, budget), result))
 }
 
-fn satForm(base: String, input: String, budget: Int) -> String {
+fn satForm(base: String, input: String, budget: Int) -> Html {
   var examples = Vector.of()
   for example in satExamples() {
-    examples.push("<li><a href=\"{h(base)}/sat?example={example.name}\">{h(example.name)}</a> — {h(example.title)}</li>")
+    examples.push(html"""<li><a href="{base}/sat?example={example.name}">{example.name}</a> — {example.title}</li>""")
   }
   let shown = if budget < 0 { "" } else { "{budget}" }
-  "<form class=run method=post action=\"{h(base)}/sat\"><div><label for=formula>Formula (DIMACS CNF, or a generator)</label><textarea id=formula name=formula spellcheck=false>{h(input)}</textarea><div class=buttons><button type=submit>Run</button><button type=button class=cancel hidden>Cancel</button></div></div><div><fieldset><legend>Solver</legend><p class=note>DPLL: unit propagation over two watched literals, pure literals at the root, the variable in the most clauses first, chronological backtracking, no clause learning.</p><label>Decision budget <input type=number name=budget min=1 max=100000000 value=\"{shown}\"></label></fieldset><fieldset><legend>Examples</legend><ul class=examples>{"".join(examples.freeze())}</ul></fieldset><details class=note><summary>Input format</summary><pre>c a comment\np cnf 3 2           variables, clauses (optional)\n1 -3 0              a clause, ended by 0\n2 3 -1 0\nrandom 3 60 256 7   random 3-SAT: k, variables,\n                    clauses, seed\npigeonhole 6 5      pigeons, holes\nsudoku 53..7....6.. 81 cells, row by row</pre><p>At most {satBounds().variables} variables, {satBounds().clauses} clauses and {satBounds().literals} literals.</p></details></div></form>"
+  html"""
+    <form class=run method=post action="{base}/sat">
+      <div>
+        <label for=formula>Formula (DIMACS CNF, or a generator)</label>
+        <textarea id=formula name=formula spellcheck=false>{input}</textarea>
+        <div class=buttons>
+          <button type=submit>Run</button>
+          <button type=button class=cancel hidden>Cancel</button>
+        </div>
+      </div>
+      <div>
+        <fieldset>
+          <legend>Solver</legend>
+          <p class=note>DPLL: unit propagation over two watched literals, pure literals at the root,
+            the variable in the most clauses first, chronological backtracking, no clause
+            learning.</p>
+          <label>Decision budget <input type=number name=budget min=1 max=100000000 value="{shown}"></label>
+        </fieldset>
+        <fieldset><legend>Examples</legend><ul class=examples>{examples.freeze()}</ul></fieldset>
+        <details class=note>
+          <summary>Input format</summary>
+          <pre>c a comment\n\
+            p cnf 3 2           variables, clauses (optional)\n\
+            1 -3 0              a clause, ended by 0\n\
+            2 3 -1 0\n\
+            random 3 60 256 7   random 3-SAT: k, variables,\n                    clauses, seed\n\
+            pigeonhole 6 5      pigeons, holes\n\
+            sudoku 53..7....6.. 81 cells, row by row</pre>
+          <p>At most {satBounds().variables} variables, {satBounds().clauses} clauses and
+            {satBounds().literals} literals.</p>
+        </details>
+      </div>
+    </form>
+    """
 }
 
-fn satResult(input: String, budget: Int, known: String) -> String {
+fn satResult(input: String, budget: Int, known: String) -> Html {
   if budget < 1 || budget > 100000000 {
     return stopNote("Not run:", "the decision budget is a whole number from 1 to 100,000,000")
   }
@@ -150,20 +185,54 @@ fn satResult(input: String, budget: Int, known: String) -> String {
     Verdict.Satisfiable(values) => {
       let left = sat.unsatisfied(formula, values)
       if left == 0 {
-        "<div class=ok data-verdict=sat data-checked=true><strong>Satisfiable.</strong> The assignment below satisfies every one of the {grouped(formula.clauses())} clauses, checked clause by clause.{h(knownNote)}</div>"
+        html"""
+          <div class=ok data-verdict=sat data-checked=true><strong>Satisfiable.</strong> The
+            assignment below satisfies every one of the {grouped(formula.clauses())} clauses,
+            checked clause by clause.{knownNote}</div>
+          """
       } else {
-        "<div class=stop data-verdict=sat data-checked=false><strong>The solver's assignment leaves {left} clause(s) unsatisfied.</strong></div>"
+        html"""
+          <div class=stop data-verdict=sat data-checked=false><strong>The solver's assignment
+            leaves {left} clause(s) unsatisfied.</strong></div>
+          """
       }
     }
-    Verdict.Unsatisfiable => "<div class=ok data-verdict=unsat><strong>Unsatisfiable.</strong> The search tried both values of every decision and each ended in a conflict ({grouped(outcome.conflicts)} conflicts).{h(knownNote)}</div>"
-    Verdict.GaveUp => "<div class=\"stop limit\" data-verdict=unknown data-stop=app><strong>Unknown: the search gave up</strong> after its budget of {grouped(budget)} decisions, before an answer. Raise the budget, up to what the run's deadline allows.{h(knownNote)}</div>"
+    Verdict.Unsatisfiable => html"""
+      <div class=ok data-verdict=unsat><strong>Unsatisfiable.</strong> The search tried both
+        values of every decision and each ended in a conflict ({grouped(outcome.conflicts)}
+        conflicts).{knownNote}</div>
+      """
+    Verdict.GaveUp => html"""
+      <div class="stop limit" data-verdict=unknown data-stop=app><strong>Unknown: the search gave
+        up</strong> after its budget of {grouped(budget)} decisions, before an answer. Raise the
+        budget, up to what the run's deadline allows.{knownNote}</div>
+      """
   }
-  var rows = Vector.of()
-  rows.push(["formula", "{h(formula.origin)} · {grouped(formula.variables)} variables · {grouped(formula.clauses())} clauses · {grouped(formula.literals.length())} literals (read in {showMicros(readMicros)})"])
+  var facts = Vector.of()
+  facts.push(Fact(
+    name: "formula",
+    value: html"""
+      {formula.origin} · {grouped(formula.variables)} variables · {grouped(formula.clauses())}
+        clauses · {grouped(formula.literals.length())} literals (read in {showMicros(readMicros)})
+      """,
+  ))
   if formula.declaredClauses >= 0 && formula.declaredClauses != formula.clauses() {
-    rows.push(["note", "the problem line says {grouped(formula.declaredClauses)} clauses; {grouped(formula.clauses())} were read (tautologies are dropped)"])
+    facts.push(Fact(
+      name: "note",
+      value: html"""
+        the problem line says {grouped(formula.declaredClauses)} clauses;
+          {grouped(formula.clauses())} were read (tautologies are dropped)
+        """,
+    ))
   }
-  rows.push(["search", "{showMicros(solveMicros)} · {plural(outcome.decisions, "decision")} · {plural(outcome.conflicts, "conflict")} · {plural(outcome.propagations, "propagation")} · deepest {grouped(outcome.depth)} · {plural(outcome.pure, "pure literal")} at the root"])
+  facts.push(Fact(
+    name: "search",
+    value: html"""
+      {showMicros(solveMicros)} · {plural(outcome.decisions, "decision")} ·
+        {plural(outcome.conflicts, "conflict")} · {plural(outcome.propagations, "propagation")} ·
+        deepest {grouped(outcome.depth)} · {plural(outcome.pure, "pure literal")} at the root
+      """,
+  ))
   let picture = match outcome.verdict {
     Verdict.Satisfiable(values) => {
       if formula.givens.length() == 81 {
@@ -172,17 +241,17 @@ fn satResult(input: String, budget: Int, known: String) -> String {
         drawAssignment(values)
       }
     }
-    _ => ""
+    _ => html""
   }
-  "{verdict}{summary(rows.freeze())}{picture}{satTable(formula, outcome)}"
+  html"{verdict}{summary(facts.freeze())}{picture}{satTable(formula, outcome)}"
 }
 
 /// The assignment as a grid of squares, variable 1 first: filled for true,
 /// hollow for false.
-fn drawAssignment(values: Array<Bool>) -> String {
+fn drawAssignment(values: Array<Bool>) -> Html {
   let n = values.length()
   if n > 1000 {
-    return "<p class=muted>More than 1,000 variables, so the assignment is not drawn; the table view has it.</p>"
+    return html"<p class=muted>More than 1,000 variables, so the assignment is not drawn; the table view has it.</p>"
   }
   let columns = 40
   let size = 14.0
@@ -192,9 +261,18 @@ fn drawAssignment(values: Array<Bool>) -> String {
   let width = left + columns.toFloat() * size + 16.0
   let height = top + rows.toFloat() * size + 12.0
   var out = Vector.of()
-  out.push(draw.open(width, height, "the assignment of {n} variables"))
-  out.push("<g transform=\"translate(0 0)\"><rect x=\"14\" y=\"10\" width=\"11\" height=\"11\" fill=\"{draw.colour(0)}\"/>{draw.label(32.0, 20.0, "start", "true")}</g>")
-  out.push("<g transform=\"translate(80 0)\"><rect x=\"14.5\" y=\"10.5\" width=\"10\" height=\"10\" fill=\"{draw.surface()}\" stroke=\"{draw.secondary()}\"/>{draw.label(32.0, 20.0, "start", "false")}</g>")
+  out.push(html"""
+    <g transform="translate(0 0)">
+      <rect x="14" y="10" width="11" height="11" fill="{draw.colour(0)}"/>
+      {draw.label(32.0, 20.0, "start", "true")}
+    </g>
+    """)
+  out.push(html"""
+    <g transform="translate(80 0)">
+      <rect x="14.5" y="10.5" width="10" height="10" fill="{draw.surface()}" stroke="{draw.secondary()}"/>
+      {draw.label(32.0, 20.0, "start", "false")}
+    </g>
+    """)
   out.push(draw.note(220.0, 20.0, "start", "variable 1 top left, {columns} a row"))
   var v = 0
   while v < n {
@@ -205,29 +283,30 @@ fn drawAssignment(values: Array<Bool>) -> String {
     }
     let truth = values.get(v).unwrapOr(false)
     let mark = if truth {
-      "<rect x=\"{draw.px(x + 1.0)}\" y=\"{draw.px(y + 1.0)}\" width=\"12\" height=\"12\" fill=\"{draw.colour(0)}\">"
+      html"""<rect x="{draw.px(x + 1.0)}" y="{draw.px(y + 1.0)}" width="12" height="12" fill="{draw.colour(0)}">"""
     } else {
-      "<rect x=\"{draw.px(x + 1.5)}\" y=\"{draw.px(y + 1.5)}\" width=\"11\" height=\"11\" fill=\"{draw.surface()}\" stroke=\"{draw.secondary()}\">"
+      html"""
+        <rect x="{draw.px(x + 1.5)}" y="{draw.px(y + 1.5)}" width="11" height="11" fill="{draw.surface()}"
+          stroke="{draw.secondary()}">
+        """
     }
-    out.push("{mark}<title>x{v + 1} = {truth}</title></rect>")
+    out.push(html"{mark}<title>x{v + 1} = {truth}</title></rect>")
     v += 1
   }
-  out.push("</svg>")
-  "".join(out.freeze())
+  draw.chart(width, height, "the assignment of {n} variables", html"{out.freeze()}")
 }
 
 /// A solved sudoku: the givens in bold ink, the digits the solver found in
 /// regular weight, the boxes ruled heavier.
-fn drawSudoku(givens: Array<Int>, values: Array<Bool>) -> String {
+fn drawSudoku(givens: Array<Int>, values: Array<Bool>) -> Html {
   let size = 36.0
   let left = 20.0
   let top = 44.0
   let width = left * 2.0 + 9.0 * size
   let height = top + 9.0 * size + 20.0
   var out = Vector.of()
-  out.push(draw.open(width, height, "the solved sudoku"))
-  out.push("<text x=\"20\" y=\"24\" fill=\"{draw.ink()}\" font-weight=\"700\">5</text>{draw.label(34.0, 24.0, "start", "given")}")
-  out.push("<text x=\"100\" y=\"24\" fill=\"{draw.secondary()}\">5</text>{draw.label(114.0, 24.0, "start", "found by the solver")}")
+  out.push(html"""<text x="20" y="24" fill="{draw.ink()}" font-weight="700">5</text>{draw.label(34.0, 24.0, "start", "given")}""")
+  out.push(html"""<text x="100" y="24" fill="{draw.secondary()}">5</text>{draw.label(114.0, 24.0, "start", "found by the solver")}""")
   var cell = 0
   while cell < 81 {
     let r = cell / 9
@@ -243,25 +322,36 @@ fn drawSudoku(givens: Array<Int>, values: Array<Bool>) -> String {
     let x = left + c.toFloat() * size
     let y = top + r.toFloat() * size
     let given = givens.get(cell).unwrapOr(0) > 0
-    let style = if given { "fill=\"{draw.ink()}\" font-weight=\"700\"" } else { "fill=\"{draw.secondary()}\"" }
-    out.push("<rect x=\"{draw.px(x)}\" y=\"{draw.px(y)}\" width=\"{draw.px(size)}\" height=\"{draw.px(size)}\" fill=\"{draw.surface()}\" stroke=\"{draw.muted()}\"/>")
-    out.push("<text class=cell data-given={given} x=\"{draw.px(x + size / 2.0)}\" y=\"{draw.px(y + size / 2.0 + 6.0)}\" text-anchor=middle font-size=\"18\" {style}>{digit}</text>")
+    let style = if given { html"""fill="{draw.ink()}" font-weight="700"""" } else { html"""fill="{draw.secondary()}"""" }
+    out.push(html"""
+      <rect x="{draw.px(x)}" y="{draw.px(y)}" width="{draw.px(size)}" height="{draw.px(size)}"
+        fill="{draw.surface()}" stroke="{draw.muted()}"/>
+      """)
+    out.push(html"""
+      <text class=cell data-given={given} x="{draw.px(x + size / 2.0)}" y="{draw.px(y + size / 2.0 + 6.0)}"
+        text-anchor=middle font-size="18" {style}>{digit}</text>
+      """)
     cell += 1
   }
   var k = 0
   while k <= 3 {
     let at = k.toFloat() * 3.0 * size
-    out.push("<line x1=\"{draw.px(left + at)}\" y1=\"{draw.px(top)}\" x2=\"{draw.px(left + at)}\" y2=\"{draw.px(top + 9.0 * size)}\" stroke=\"{draw.ink()}\" stroke-width=\"2\"/>")
-    out.push("<line x1=\"{draw.px(left)}\" y1=\"{draw.px(top + at)}\" x2=\"{draw.px(left + 9.0 * size)}\" y2=\"{draw.px(top + at)}\" stroke=\"{draw.ink()}\" stroke-width=\"2\"/>")
+    out.push(html"""
+      <line x1="{draw.px(left + at)}" y1="{draw.px(top)}" x2="{draw.px(left + at)}" y2="{draw.px(top + 9.0 * size)}"
+        stroke="{draw.ink()}" stroke-width="2"/>
+      """)
+    out.push(html"""
+      <line x1="{draw.px(left)}" y1="{draw.px(top + at)}" x2="{draw.px(left + 9.0 * size)}" y2="{draw.px(top + at)}"
+        stroke="{draw.ink()}" stroke-width="2"/>
+      """)
     k += 1
   }
-  out.push("</svg>")
-  "".join(out.freeze())
+  draw.chart(width, height, "the solved sudoku", html"{out.freeze()}")
 }
 
 /// The table view: the assignment as DIMACS's `v` line, and the formula as
 /// it was read.
-fn satTable(formula: Formula, outcome: Outcome) -> String {
+fn satTable(formula: Formula, outcome: Outcome) -> Html {
   let assignment = match outcome.verdict {
     Verdict.Satisfiable(values) => {
       var parts = Vector.of()
@@ -270,10 +360,21 @@ fn satTable(formula: Formula, outcome: Outcome) -> String {
         v += 1
         parts.push(if truth { "{v}" } else { "-{v}" })
       }
-      "<details class=table open><summary>Table view: the assignment</summary><pre class=diag>v {" ".join(parts.freeze())} 0</pre></details>"
+      html"""
+        <details class=table open>
+          <summary>Table view: the assignment</summary>
+          <pre class=diag>v {" ".join(parts.freeze())} 0</pre>
+        </details>
+        """
     }
-    Verdict.Unsatisfiable => "<p class=note>s UNSATISFIABLE</p>"
-    Verdict.GaveUp => "<p class=note>s UNKNOWN</p>"
+    Verdict.Unsatisfiable => html"<p class=note>s UNSATISFIABLE</p>"
+    Verdict.GaveUp => html"<p class=note>s UNKNOWN</p>"
   }
-  "{assignment}<details class=table><summary>The formula as read (DIMACS, first 200 clauses)</summary><pre class=diag>{h(sat.dimacs(formula, 200))}</pre></details>"
+  html"""
+    {assignment}
+    <details class=table>
+      <summary>The formula as read (DIMACS, first 200 clauses)</summary>
+      <pre class=diag>{sat.dimacs(formula, 200)}</pre>
+    </details>
+    """
 }
