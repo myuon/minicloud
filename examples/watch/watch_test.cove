@@ -1,4 +1,5 @@
 use web
+use std.html
 
 /// `minicloud test` runs these with the app's grant and limits, so they
 /// are the parts that need no clock and no network: what a name may be,
@@ -24,7 +25,7 @@ test fn uptimeIsTheGoodChecksOverTheWindow() -> Result<Unit, Error> {
 }
 
 test fn aPageIsHtmlAndSaysSo() -> Result<Unit, Error> {
-  let answered = page(200, "watch", "<p>hi</p>")
+  let answered = page(200, "watch", html"<p>hi</p>")
   assertEqual(answered.status, 200)?
   assert(answered.body.contains("<link rel=stylesheet href=\"style.css\">"))?
   assert(answered.headers.get("content-type").unwrapOr("").contains("text/html"))?
