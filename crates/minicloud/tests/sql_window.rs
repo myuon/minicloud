@@ -406,8 +406,8 @@ fn the_page_lands_on_the_tables_and_answers_a_statement() {
 
 /// A window on somebody's data shows whatever is in it, and the statement
 /// that asked for it goes back into the form's `value=`, inside quotes. Every
-/// one of those goes through `escapeHtml`, or this page would be the way
-/// into the admin app.
+/// one of those is escaped by the `html"…"` hole it goes in, or this page
+/// would be the way into the admin app.
 #[test]
 fn the_page_escapes_the_statement_the_values_and_the_error() {
     let apps = ui_apps();

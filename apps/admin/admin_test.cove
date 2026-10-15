@@ -1,6 +1,7 @@
 use host
 use text
 use web
+use std.html
 
 fn capabilities() -> Array<String> {
   Vector.of("admin", "auth", "kv", "log").freeze()
@@ -47,9 +48,12 @@ test fn refusesTheRemovedFuelLimitByName() -> Result<Unit, Error> {
 }
 
 test fn escapesWhatItShows() -> Result<Unit, Error> {
-  assertEqual(h("<script>alert('x')</script>"), "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;")?
-  assert(badge("<b>").contains("&lt;b&gt;"))?
-  assert(!problemsNotice(Vector.of("<img src=x>").freeze()).contains("<img"))?
+  // What a hole does with a `String`, which is what every value of the
+  // host's is when it reaches a page.
+  let said = "<script>alert('x')</script>"
+  assertEqual(html.render(html"{said}"), "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;")?
+  assert(html.render(badge("<b>")).contains("&lt;b&gt;"))?
+  assert(!html.render(problemsNotice(Vector.of("<img src=x>").freeze())).contains("<img"))?
   Ok(())
 }
 
@@ -59,7 +63,8 @@ test fn stampsAnAssetUrlWithTheVersionItWasBuiltFrom() -> Result<Unit, Error> {
   // cache holding the old `style.css` has nothing the new pages ask for.
   assert(assetQuery("v1-3def5fe8") != assetQuery("v2-9ab0c1d2"))?
   // The version is the host's word and goes through the same two escapes as
-  // every other: once for the query, once for the attribute.
+  // every other: once for the query, here, and once for the attribute, by
+  // the hole in `layout` it goes in.
   assertEqual(assetQuery("a b&\"x\""), "?v=a%20b%26%22x%22")?
   Ok(())
 }
@@ -68,7 +73,7 @@ test fn leavesTheAssetUrlsAloneWhenTheVersionIsNotKnown() -> Result<Unit, Error>
   assertEqual(assetQuery(""), "")?
   // `minicloud test` runs the app with no host behind it, so
   // `host.selfVersion` says "" here: the page is the page it always was.
-  let page = layout("", "apps", "apps", "<h1>Apps</h1>")
+  let page = html.render(layout("", "apps", "apps", html"<h1>Apps</h1>"))
   assert(page.contains("<link rel=stylesheet href=\"/style.css\">"))?
   assert(page.contains("href=\"/favicon.svg\""))?
   assert(page.contains("href=\"/favicon.ico\""))?
@@ -82,7 +87,7 @@ fn aLine(app: String, atMs: Int, level: String, text: String) -> host.LogLine {
 }
 
 test fn showsALogLineAsItCame() -> Result<Unit, Error> {
-  let said = logTable(Vector.of(aLine("notes", 1791170989566, "warn", "<img src=x> & on")).freeze())
+  let said = html.render(logTable(Vector.of(aLine("notes", 1791170989566, "warn", "<img src=x> & on")).freeze()))
   assert(said.contains("lvl-warn"))?
   assert(said.contains("&lt;img src=x&gt; &amp; on"))?
   assert(!said.contains("<img"))?
@@ -104,16 +109,16 @@ test fn showsALogLineAsItCame() -> Result<Unit, Error> {
 }
 
 test fn saysWhichAppEveryLineCameFrom() -> Result<Unit, Error> {
-  let said = logTable(
+  let said = html.render(logTable(
     Vector.of(
       aLine("jobs", 1791170989000, "host", "work: delivering 1 to /do"),
       aLine("<img src=y>&\"'", 1791170989566, "info", "GET /ledger/ 200"),
     )
       .freeze(),
     true,
-  )
+  ))
   assert(said.contains("<td class=app><code>jobs</code></td>"))?
-  // The name is the host's and goes through `h` like anything else: an app
+  // The name is the host's and is escaped like anything else: an app
   // cannot be named this, and the page does not rely on that.
   assert(said.contains("&lt;img src=y&gt;&amp;&quot;&#39;"))?
   assert(!said.contains("<img"))?
@@ -123,7 +128,7 @@ test fn saysWhichAppEveryLineCameFrom() -> Result<Unit, Error> {
 }
 
 test fn offersEveryAppThatHasALog() -> Result<Unit, Error> {
-  let said = logChips("/admin", Vector.of("jobs", "ledger").freeze())
+  let said = html.render(logChips("/admin", Vector.of("jobs", "ledger").freeze()))
   // Where the page is, said so.
   assert(said.contains("<a href=\"/admin/logs\" aria-current=page>all apps</a>"))?
   // An app's chip is the way to that app's own window, not a filter here.
@@ -133,7 +138,7 @@ test fn offersEveryAppThatHasALog() -> Result<Unit, Error> {
   // an empty page.
   assert(!said.contains("watch"))?
   // Nothing logged at all is `all apps` alone, with no rule beside it.
-  let alone = logChips("", Vector.of().freeze())
+  let alone = html.render(logChips("", Vector.of().freeze()))
   assert(alone.contains("aria-current=page>all apps</a>"))?
   assert(!alone.contains("class=sep"))?
   Ok(())
@@ -142,11 +147,11 @@ test fn offersEveryAppThatHasALog() -> Result<Unit, Error> {
 test fn asksForTheSameLinesOnEveryLogPage() -> Result<Unit, Error> {
   // The choice is the one thing the link changes, so the path it is on is
   // the page's own: an app's, or every app's.
-  let one = logSteps("/apps/jobs/logs", 200)
+  let one = html.render(logSteps("/apps/jobs/logs", 200))
   assert(one.contains("<a href=\"/apps/jobs/logs?n=50\">50</a>"))?
   assert(one.contains("<b>200</b>"))?
   assert(!one.contains("?n=200"))?
-  assert(logSteps("/logs", 50).contains("<a href=\"/logs?n=1000\">1000</a>"))?
+  assert(html.render(logSteps("/logs", 50)).contains("<a href=\"/logs?n=1000\">1000</a>"))?
   Ok(())
 }
 
@@ -311,7 +316,7 @@ fn noQueues() -> Array<host.Queue> {
 /// A tab is there when the app has the thing: the grant is the shape of the
 /// app's pages, which is what the capability model already says.
 test fn drawsATabForEachThingTheAppHas() -> Result<Unit, Error> {
-  let bare = appTabs("", anApp("hello"), "Overview")
+  let bare = html.render(appTabs("", anApp("hello"), "Overview"))
   assert(bare.contains(">Overview</a>"))?
   assert(bare.contains(">Code</a>"))?
   assert(bare.contains(">Settings</a>"))?
@@ -323,7 +328,7 @@ test fn drawsATabForEachThingTheAppHas() -> Result<Unit, Error> {
   assertEqual(bare.contains(">Data</a>"), false)?
   assertEqual(bare.contains(">SQL</a>"), false)?
   assertEqual(bare.contains(">Queues</a>"), false)?
-  let full = appTabs("", anApp("watch", granted: Vector.of("kv", "queue", "sql").freeze()), "SQL")
+  let full = html.render(appTabs("", anApp("watch", granted: Vector.of("kv", "queue", "sql").freeze()), "SQL"))
   assert(full.contains(">Data</a>"))?
   assert(full.contains(">SQL</a>"))?
   assert(full.contains(">Queues</a>"))?
@@ -336,7 +341,7 @@ test fn drawsATabForEachThingTheAppHas() -> Result<Unit, Error> {
 /// The order is the one every page of the app has: Overview, Metrics, Logs, the
 /// stores, Code, Settings.
 test fn keepsTheTabsInOneOrder() -> Result<Unit, Error> {
-  let tabs = appTabs("", anApp("watch", granted: Vector.of("kv", "queue", "sql").freeze()), "Overview")
+  let tabs = html.render(appTabs("", anApp("watch", granted: Vector.of("kv", "queue", "sql").freeze()), "Overview"))
   var order = Vector.of()
   for part in tabs.split("</a>") {
     for name in Vector.of("Overview", "Metrics", "Logs", "Data", "SQL", "Queues", "Code", "Settings").freeze() {
@@ -354,7 +359,7 @@ test fn keepsTheTabsInOneOrder() -> Result<Unit, Error> {
 /// has not sampled yet, and `minicloud test` is the first of those. What it
 /// says must be true of both, and it must not draw a frame round nothing.
 test fn saysSoWhenThereIsNothingToDrawAMetricFrom() -> Result<Unit, Error> {
-  let page = metricsPage("", anApp("hello"), asking(Map.of()))
+  let page = html.render(metricsPage("", anApp("hello"), asking(Map.of())))
   assert(page.contains("Nothing to show for the last hour"))?
   assert(page.contains("cannot tell which"))?
   assert(!page.contains("<svg class=chart"))?
@@ -370,14 +375,14 @@ test fn fallsBackToTheHourForAWindowItDoesNotKnow() -> Result<Unit, Error> {
   assertEqual(metricsWindow(asking(Map.of(MapEntry(key: "over", value: " month ")))), "month")?
   assertEqual(metricsWindow(asking(Map.of(MapEntry(key: "over", value: "year")))), "hour")?
   assertEqual(metricsWindow(asking(Map.of(MapEntry(key: "over", value: "<script>")))), "hour")?
-  let page = metricsPage("", anApp("hello"), asking(Map.of(MapEntry(key: "over", value: "<script>"))))
+  let page = html.render(metricsPage("", anApp("hello"), asking(Map.of(MapEntry(key: "over", value: "<script>")))))
   assert(!page.contains("<script>"))?
   assert(page.contains("<b>the last hour</b>"))?
   Ok(())
 }
 
 test fn marksTheWindowItShowsAndLinksTheOthers() -> Result<Unit, Error> {
-  let steps = metricsSteps("/apps/hello", "day")
+  let steps = html.render(metricsSteps("/apps/hello", "day"))
   assert(steps.contains("<b>the last day</b>"))?
   assert(steps.contains("<a href=\"/apps/hello/metrics?over=hour\">the last hour</a>"))?
   assert(steps.contains("<a href=\"/apps/hello/metrics?over=month\">the last 30 days</a>"))?
@@ -402,7 +407,7 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
   assertEqual(metricsPoints(times, a, 10), "4,116 320,60 636,4")?
   // a minute with no row is a gap, not a closer neighbour
   assertEqual(metricsPoints(Vector.of(0, 60, 180).freeze(), a, 10), "4,116 214,60 636,4")?
-  let chart = metricsChart("two things", "10 a sample", 10, times, a, "ln-served", "served", b, "ln-errors", "errors")
+  let chart = html.render(metricsChart("two things", "10 a sample", 10, times, a, "ln-served", "served", b, "ln-errors", "errors"))
   assert(chart.contains("role=img aria-label=\"two things\""))?
   assert(chart.contains("<title>up to 10 a sample, over 3 rows</title>"))?
   assert(chart.contains("polyline class=\"ln ln-served\""))?
@@ -410,8 +415,8 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
   // a legend, so the lines are not told apart by colour alone
   assert(chart.contains("class=legend"))?
   // and no line from one sample, or from nothing but zeros
-  assert(!metricsChart("x", "0", 0, Vector.of(0).freeze(), Vector.of(1).freeze(), "a", "a", Vector.of(1).freeze(), "b", "b").contains("<svg class=chart"))?
-  assert(!metricsChart("x", "0", 0, times, a, "a", "a", b, "b", "b").contains("<svg class=chart"))?
+  assert(!html.render(metricsChart("x", "0", 0, Vector.of(0).freeze(), Vector.of(1).freeze(), "a", "a", Vector.of(1).freeze(), "b", "b")).contains("<svg class=chart"))?
+  assert(!html.render(metricsChart("x", "0", 0, times, a, "a", "a", b, "b", "b")).contains("<svg class=chart"))?
   Ok(())
 }
 
@@ -419,7 +424,7 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
 /// anything wrong" is the question somebody opened the page to answer, and
 /// a page that answers it by being empty has not answered it.
 test fn saysSoWhenNothingIsWorthALook() -> Result<Unit, Error> {
-  let said = worthALook("", anApp("hello"), noQueues(), aDisk())
+  let said = html.render(worthALook("", anApp("hello"), noQueues(), aDisk()))
   assert(said.contains("class=\"is-ok\""))?
   assert(said.contains("Nothing: no request failed"))?
   assert(said.contains("every file of the deploy is the same as the one in the app's directory"))?
@@ -432,7 +437,7 @@ test fn saysSoWhenNothingIsWorthALook() -> Result<Unit, Error> {
 /// here before anybody goes to that page.
 test fn saysWhatIsOnTheQueuesWorstFirst() -> Result<Unit, Error> {
   let queues = Vector.of(aQueue("work", held: 3, dead: 2)).freeze()
-  let said = worthALook("", anApp("jobs", granted: Vector.of("queue").freeze()), queues, aDisk())
+  let said = html.render(worthALook("", anApp("jobs", granted: Vector.of("queue").freeze()), queues, aDisk()))
   assert(said.contains("2 dead letters wait on <code>work</code>"))?
   assert(said.contains("3 held on <code>work</code>"))?
   assert(said.contains("/apps/jobs/queues"))?
@@ -447,10 +452,10 @@ test fn saysWhatIsOnTheQueuesWorstFirst() -> Result<Unit, Error> {
 /// A store near what it may hold, before the write that is refused.
 test fn saysWhenAStoreIsNearItsLimit() -> Result<Unit, Error> {
   let full = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 900, kvMaxKeys: 1000, kvMaxBytes: 1000)
-  assert(worthALook("", full, noQueues(), aDisk()).contains("holds 900 B of the 1000 B it may"))?
+  assert(html.render(worthALook("", full, noQueues(), aDisk())).contains("holds 900 B of the 1000 B it may"))?
   // Eighty hundredths is where it starts, so 799 of 1000 is not it.
   let room = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 799, kvMaxKeys: 1000, kvMaxBytes: 1000)
-  assert(worthALook("", room, noQueues(), aDisk()).contains("no store is near its limit"))?
+  assert(html.render(worthALook("", room, noQueues(), aDisk())).contains("no store is near its limit"))?
   // A store the host has not opened, and a limit of 0, are not "near".
   assertEqual(nearLimit(-1, 100), false)?
   assertEqual(nearLimit(100, 0), false)?
@@ -464,17 +469,18 @@ test fn saysWhenAStoreIsNearItsLimit() -> Result<Unit, Error> {
 /// every file of every deploy and a wrong "the same" is the one answer
 /// that would matter.
 test fn saysWhenItDidNotCompareTheDeployWithTheDirectory() -> Result<Unit, Error> {
-  let said = worthALook("", anApp("big"), noQueues(), aDisk(looked: false))
+  let said = html.render(worthALook("", anApp("big"), noQueues(), aDisk(looked: false)))
   assert(said.contains("The deploy was not compared with the app's directory here"))?
   assert(said.contains("The Code tab reads every file of it."))?
   assertEqual(said.contains("every file of the deploy is the same"), false)?
-  let differs = worthALook("", anApp("big"), noQueues(), aDisk(differing: 2))
+  let differs = html.render(worthALook("", anApp("big"), noQueues(), aDisk(differing: 2)))
   assert(differs.contains("2 files in the app's directory are not the ones that are running"))?
   Ok(())
 }
 
 /// A refusal and a failure are the host's words, and the host's words are
-/// an app's: every one of them goes through `h` before it is in a page.
+/// an app's: every one of them is a `String` in a hole, escaped before it is
+/// in a page.
 test fn escapesWhatTheHostSaidAboutAnApp() -> Result<Unit, Error> {
   let app = anApp(
     "notes",
@@ -484,14 +490,14 @@ test fn escapesWhatTheHostSaidAboutAnApp() -> Result<Unit, Error> {
     errors: 1,
     recentErrors: Vector.of(aFailure("runtime", 500, "<script>alert(1)</script>")).freeze(),
   )
-  let said = worthALook("", app, noQueues(), aDisk())
+  let said = html.render(worthALook("", app, noQueues(), aDisk()))
   assertEqual(said.contains("<img src=x>"), false)?
   assertEqual(said.contains("<script>"), false)?
   assert(said.contains("&lt;img src=x&gt;"))?
   assert(said.contains("&lt;script&gt;alert(1)&lt;/script&gt;"))?
   // A queue's name is the app's too.
   let queues = Vector.of(aQueue("<b>q</b>", dead: 1)).freeze()
-  let onQueues = worthALook("", anApp("jobs", granted: Vector.of("queue").freeze()), queues, aDisk())
+  let onQueues = html.render(worthALook("", anApp("jobs", granted: Vector.of("queue").freeze()), queues, aDisk()))
   assertEqual(onQueues.contains("<b>q</b>"), false)?
   assert(onQueues.contains("&lt;b&gt;q&lt;/b&gt;"))?
   Ok(())
@@ -502,10 +508,10 @@ test fn escapesWhatTheHostSaidAboutAnApp() -> Result<Unit, Error> {
 test fn putsWhatAnAppHasToSayAtTheEndOfItsCard() -> Result<Unit, Error> {
   let quiet = appFlags("", anApp("ledger"), noQueues())
   assertEqual(quiet.length(), 0)?
-  assert(appCard("", anApp("ledger"), quiet).contains("<span class=quiet>quiet</span>"))?
+  assert(html.render(appCard("", anApp("ledger"), quiet)).contains("<span class=quiet>quiet</span>"))?
   let loud = anApp("notes", state: "refused", reason: "requires `kv`", served: 4, errors: 2, accessOff: "no team")
   let flags = appFlags("", loud, noQueues())
-  let card = appCard("", loud, flags)
+  let card = html.render(appCard("", loud, flags))
   assert(card.contains("<li class=\"app is-bad\">"))?
   assert(card.contains("href=\"/apps/notes/settings\">refused →</a>"))?
   assert(card.contains("href=\"/apps/notes\">2 failed →</a>"))?
@@ -518,35 +524,38 @@ test fn putsWhatAnAppHasToSayAtTheEndOfItsCard() -> Result<Unit, Error> {
 
 /// The sentence the green line is made of.
 test fn writesAListAsASentence() -> Result<Unit, Error> {
-  assertEqual(sentence(Vector.of().freeze()), "")?
-  assertEqual(sentence(Vector.of("a").freeze()), "a")?
-  assertEqual(sentence(Vector.of("a", "b").freeze()), "a and b")?
-  assertEqual(sentence(Vector.of("a", "b", "c").freeze()), "a, b and c")?
+  assertEqual(html.render(sentence(Vector.of().freeze())), "")?
+  assertEqual(html.render(sentence(Vector.of(html"a").freeze())), "a")?
+  assertEqual(html.render(sentence(Vector.of(html"a", html"b").freeze())), "a and b")?
+  assertEqual(html.render(sentence(Vector.of(html"a", html"b", html"c").freeze())), "a, b and c")?
+  // The words are the page's own, so an apostrophe in one is written as it
+  // is: the green line says "the app's directory".
+  assertEqual(html.render(sentence(Vector.of(html"x", html"the app's").freeze())), "x and the app's")?
   Ok(())
 }
 
 test fn saysWhichPartOfADeployAFileIs() -> Result<Unit, Error> {
-  assert(codeKind(aFile("app.toml", "config", true, "same")).contains("configuration"))?
-  assert(codeKind(aFile("admin.cove", "cove", true, "same")).contains(">code<"))?
-  assert(codeKind(aFile("assets/style.css", "asset", true, "same")).contains(">asset<"))?
+  assert(html.render(codeKind(aFile("app.toml", "config", true, "same"))).contains("configuration"))?
+  assert(html.render(codeKind(aFile("admin.cove", "cove", true, "same"))).contains(">code<"))?
+  assert(html.render(codeKind(aFile("assets/style.css", "asset", true, "same"))).contains(">asset<"))?
   // Not text, so there is no body of it to show: the listing says so where
   // it says what the file is.
-  assert(codeKind(aFile("assets/logo.png", "asset", false, "same")).contains("asset, not text"))?
+  assert(html.render(codeKind(aFile("assets/logo.png", "asset", false, "same"))).contains("asset, not text"))?
   Ok(())
 }
 
 test fn saysWhenTheFileOnDiskIsNotTheOneRunning() -> Result<Unit, Error> {
   // app.toml is read from the app's directory, so there is nothing for it
   // to disagree with.
-  assert(onDisk(aFile("app.toml", "config", true, "same")).contains("read from there"))?
-  assert(onDisk(aFile("a.cove", "cove", true, "same")).contains(">same<"))?
-  assert(onDisk(aFile("a.cove", "cove", true, "differs")).contains(">differs<"))?
-  assert(onDisk(aFile("a.cove", "cove", true, "missing")).contains(">missing<"))?
-  assert(onDisk(aFile("a.cove", "cove", true, "unread")).contains(">unread<"))?
+  assert(html.render(onDisk(aFile("app.toml", "config", true, "same"))).contains("read from there"))?
+  assert(html.render(onDisk(aFile("a.cove", "cove", true, "same"))).contains(">same<"))?
+  assert(html.render(onDisk(aFile("a.cove", "cove", true, "differs"))).contains(">differs<"))?
+  assert(html.render(onDisk(aFile("a.cove", "cove", true, "missing"))).contains(">missing<"))?
+  assert(html.render(onDisk(aFile("a.cove", "cove", true, "unread"))).contains(">unread<"))?
   // A word the host grows later still reads, as a log level does.
-  assert(onDisk(aFile("a.cove", "cove", true, "elsewhere")).contains(">unread<"))?
+  assert(html.render(onDisk(aFile("a.cove", "cove", true, "elsewhere"))).contains(">unread<"))?
   // A directory has no file of it on disk to differ from.
-  assert(onDisk(aRow("assets", "assets", 0, "dir")).contains("–"))?
+  assert(html.render(onDisk(aRow("assets", "assets", 0, "dir"))).contains("–"))?
   Ok(())
 }
 
@@ -555,7 +564,7 @@ test fn saysWhenTheFileOnDiskIsNotTheOneRunning() -> Result<Unit, Error> {
 /// what the file is and what it comes to are beside the name, each in a
 /// column the stylesheet can line up with the rows above and below.
 test fn opensAnItemForEachRowOfTheTree() -> Result<Unit, Error> {
-  let top = codeRow("/apps/notes", aRow("app.toml", "app.toml", 0, "config"))
+  let top = html.render(codeRow("/apps/notes", aRow("app.toml", "app.toml", 0, "config")))
   // The name and what is beside it are one row inside the item, because the
   // item also holds the list of what is under a directory.
   assert(top.startsWith("<li><span class=row>"))?
@@ -569,7 +578,7 @@ test fn opensAnItemForEachRowOfTheTree() -> Result<Unit, Error> {
   assert(top.contains("<span class=disk>"))?
   // The row closes and the item does not: the row is the name's line.
   assert(top.endsWith("</span>"))?
-  let under = codeRow("/apps/notes", aRow("text/text.cove", "text.cove", 1, "cove"))
+  let under = html.render(codeRow("/apps/notes", aRow("text/text.cove", "text.cove", 1, "cove")))
   assert(under.contains("title=\"text/text.cove\""))?
   assert(under.contains("code?file=text%2Ftext.cove"))?
   // The row says the last part; the parts above it are the rows above it.
@@ -577,7 +586,7 @@ test fn opensAnItemForEachRowOfTheTree() -> Result<Unit, Error> {
   assert(!under.contains("<code>text/text.cove</code>"))?
   // A directory is not a link — there is no file of it to show — and it
   // says so where a file says what it is.
-  let dir = codeRow("/apps/notes", aRow("assets", "assets", 0, "dir"))
+  let dir = html.render(codeRow("/apps/notes", aRow("assets", "assets", 0, "dir")))
   assert(dir.startsWith("<li class=dir><span class=row>"))?
   assert(dir.contains("<code>assets/</code>"))?
   assert(!dir.contains("href"))?
@@ -604,22 +613,22 @@ test fn closesEveryListTheTreeOpens() -> Result<Unit, Error> {
   let deep = aRow("assets/img/icons/a.svg", "a.svg", 3, "asset")
   let last = aRow("assets/style.css", "style.css", 1, "asset")
   assertEqual(
-    codeTree(at, Vector.of(top, dir, img, deep, last).freeze()),
-    "<ul class=tree>{codeRow(at, top)}</li>{codeRow(at, dir)}<ul>{codeRow(at, img)}<ul>{codeRow(at, deep)}</li></ul></li>{codeRow(at, last)}</li></ul></li></ul>",
+    html.render(codeTree(at, Vector.of(top, dir, img, deep, last).freeze())),
+    "<ul class=tree>{html.render(codeRow(at, top))}</li>{html.render(codeRow(at, dir))}<ul>{html.render(codeRow(at, img))}<ul>{html.render(codeRow(at, deep))}</li></ul></li>{html.render(codeRow(at, last))}</li></ul></li></ul>",
   )?
   // As many closes as opens, which is the whole of what must hold.
-  let shown = codeTree(at, Vector.of(top, dir, img, deep, last).freeze())
+  let shown = html.render(codeTree(at, Vector.of(top, dir, img, deep, last).freeze()))
   assertEqual(shown.split("<ul").length(), shown.split("</ul").length())?
   assertEqual(shown.split("<li").length(), shown.split("</li").length())?
   // A row deeper than nothing opens the one list, and no rows open none.
-  let alone = codeTree(at, Vector.of(aRow("a.cove", "a.cove", 4, "cove")).freeze())
-  assertEqual(alone, "<ul class=tree>{codeRow(at, aRow("a.cove", "a.cove", 4, "cove"))}</li></ul>")?
-  assertEqual(codeTree(at, Vector.of().freeze()), "")?
+  let alone = html.render(codeTree(at, Vector.of(aRow("a.cove", "a.cove", 4, "cove")).freeze()))
+  assertEqual(alone, "<ul class=tree>{html.render(codeRow(at, aRow("a.cove", "a.cove", 4, "cove")))}</li></ul>")?
+  assertEqual(html.render(codeTree(at, Vector.of().freeze())), "")?
   Ok(())
 }
 
-/// A piece's text is the file's own bytes, so `h` is the whole of what
-/// keeps a file holding `<img src=y>` a file.
+/// A piece's text is the file's own bytes, so the hole it goes in is the
+/// whole of what keeps a file holding `<img src=y>` a file.
 test fn escapesEveryPieceOfAColouredFile() -> Result<Unit, Error> {
   let pieces = Vector.of(
     host.CodePiece(kind: "comment", text: "// <img src=y> & \"it's\""),
@@ -629,7 +638,7 @@ test fn escapesEveryPieceOfAColouredFile() -> Result<Unit, Error> {
     // is how a kind the host grows later still reads.
     host.CodePiece(kind: "whatever", text: "\n<b>"),
   ).freeze()
-  let body = codeBody(aColouredFile("a.cove", "", pieces, ""))
+  let body = html.render(codeBody(aColouredFile("a.cove", "", pieces, "")))
   assert(!body.contains("<img"))?
   assert(!body.contains("<script>"))?
   assert(!body.contains("<b>"))?
@@ -643,18 +652,18 @@ test fn escapesEveryPieceOfAColouredFile() -> Result<Unit, Error> {
 /// with nothing in it worth colouring.
 test fn saysWhyAFileIsShownWithNoColour() -> Result<Unit, Error> {
   let none = Vector.of().freeze()
-  let cut = codeBody(aColouredFile("big.cove", "x", none, "cut"))
+  let cut = html.render(codeBody(aColouredFile("big.cove", "x", none, "cut")))
   assert(cut.contains("stops at what the host carries"))?
   assert(cut.contains("<pre class=code>x</pre>"))?
-  let dense = codeBody(aColouredFile("dense.cove", "x", none, "dense"))
+  let dense = html.render(codeBody(aColouredFile("dense.cove", "x", none, "dense")))
   assert(dense.contains("more pieces than one page carries (20000)"))?
-  let unknown = codeBody(aColouredFile("notes.txt", "x", none, "unknown"))
+  let unknown = html.render(codeBody(aColouredFile("notes.txt", "x", none, "unknown")))
   assert(unknown.contains("no reader for this kind of file"))?
   // And a word the host grows later still says something.
-  let later = codeBody(aColouredFile("a.rs", "x", none, "elsewhere"))
+  let later = html.render(codeBody(aColouredFile("a.rs", "x", none, "elsewhere")))
   assert(later.contains("no reader for this kind of file"))?
   // Coloured, there is nothing to explain.
-  let shown = codeBody(aColouredFile("a.cove", "x", Vector.of(host.CodePiece(kind: "plain", text: "x")).freeze(), ""))
+  let shown = html.render(codeBody(aColouredFile("a.cove", "x", Vector.of(host.CodePiece(kind: "plain", text: "x")).freeze(), "")))
   assertEqual(shown, "<pre class=code>x</pre>")?
   Ok(())
 }
@@ -663,26 +672,26 @@ test fn saysWhereTheHostAnswersAnAssetItCannotShow() -> Result<Unit, Error> {
   let logo = aFile("assets/img/logo.png", "asset", false, "same")
   let byPath = anApp("notes", Vector.of().freeze())
   assertEqual(servedAt(byPath, logo), "/notes/img/logo.png")?
-  assert(servedOn(byPath).contains("by path"))?
+  assert(html.render(servedOn(byPath)).contains("by path"))?
   // A hostname reaches its app with the whole path, so the app's name is
   // not part of it.
   let byName = anApp("watch", Vector.of("watch.example").freeze())
   assertEqual(servedAt(byName, logo), "/img/logo.png")?
-  assert(servedOn(byName).contains("watch.example"))?
+  assert(html.render(servedOn(byName)).contains("watch.example"))?
   Ok(())
 }
 
 test fn saysANullCellApartFromAnEmptyOne() -> Result<Unit, Error> {
   // The store keeps the two apart, so the page does: neither is an empty
   // cell, and each says which it is.
-  assert(sqlCell(None).contains("NULL"))?
-  assert(sqlCell(Some("")).contains("empty"))?
-  assertEqual(sqlCell(Some("x")), "<code>x</code>")?
+  assert(html.render(sqlCell(None)).contains("NULL"))?
+  assert(html.render(sqlCell(Some(""))).contains("empty"))?
+  assertEqual(html.render(sqlCell(Some("x"))), "<code>x</code>")?
   Ok(())
 }
 
 test fn escapesACellWhateverTheAppStoredInIt() -> Result<Unit, Error> {
-  let said = sqlCell(Some("<img src=y>&\"'"))
+  let said = html.render(sqlCell(Some("<img src=y>&\"'")))
   assert(!said.contains("<img"))?
   assert(said.contains("&lt;img src=y&gt;&amp;&quot;&#39;"))?
   Ok(())
@@ -691,7 +700,7 @@ test fn escapesACellWhateverTheAppStoredInIt() -> Result<Unit, Error> {
 test fn putsTheStatementBackInTheBoxAsTheAttributesValue() -> Result<Unit, Error> {
   // The statement goes back inside quotes. A quote in it has to come out
   // as an entity, or the rest of the statement would be markup.
-  let said = sqlForm("/apps/notes", "SELECT \"a\" FROM t WHERE v = '<img src=y>'")
+  let said = html.render(sqlForm("/apps/notes", "SELECT \"a\" FROM t WHERE v = '<img src=y>'"))
   assert(said.contains("value=\"SELECT &quot;a&quot; FROM t WHERE v = &#39;&lt;img src=y&gt;&#39;\""))?
   assert(!said.contains("<img"))?
   // And it is a GET: a read is in the URL, and there is no change for a
@@ -709,7 +718,7 @@ test fn showsAnAnswerAsItsColumnsAndRows() -> Result<Unit, Error> {
     )
       .freeze(),
   )
-  let said = sqlAnswerTable(answer)
+  let said = html.render(sqlAnswerTable(answer))
   assert(said.contains("<th>title</th>"))?
   assert(said.contains("<code>Dune</code>"))?
   assert(said.contains("&lt;b&gt;"))?
@@ -720,22 +729,22 @@ test fn showsAnAnswerAsItsColumnsAndRows() -> Result<Unit, Error> {
     columns: Vector.of("<img src=y>").freeze(),
     rows: Vector.of(host.SqlRow(values: Vector.of(Some("1")).freeze())).freeze(),
   )
-  assert(!sqlAnswerTable(evil).contains("<img"))?
+  assert(!html.render(sqlAnswerTable(evil)).contains("<img"))?
   // An answer with no rows is said, not shown as an empty table.
   let none = host.SqlAnswer(columns: Vector.of("n").freeze(), rows: Vector.of().freeze())
-  assert(sqlAnswerTable(none).contains("No rows."))?
+  assert(html.render(sqlAnswerTable(none)).contains("No rows."))?
   Ok(())
 }
 
 test fn listsTheTablesWithAStatementForEach() -> Result<Unit, Error> {
-  let said = sqlTablesTable(
+  let said = html.render(sqlTablesTable(
     "/apps/notes",
     Vector.of(
       host.SqlTable(name: "books", rows: 2, counted: true),
       host.SqlTable(name: "huge", rows: 0, counted: false),
     )
       .freeze(),
-  )
+  ))
   assert(said.contains("<code>books</code>"))?
   assert(said.contains(">2</td>"))?
   // A count that could not be taken says so, where a 0 would have been a
@@ -743,7 +752,7 @@ test fn listsTheTablesWithAStatementForEach() -> Result<Unit, Error> {
   assert(said.contains("not counted"))?
   assert(said.contains("/apps/notes/sql?q=SELECT%20%2A%20FROM%20%22books%22%20LIMIT%2050"))?
   // A store with no tables is said in words.
-  assert(sqlTablesTable("/apps/notes", Vector.of().freeze()).contains("no tables"))?
+  assert(html.render(sqlTablesTable("/apps/notes", Vector.of().freeze())).contains("no tables"))?
   Ok(())
 }
 
@@ -766,25 +775,25 @@ fn waitingMessage(body: String, state: String) -> host.QueueMessage {
 }
 
 test fn saysWhatAMessageIsAndWhatHeldMeans() -> Result<Unit, Error> {
-  assert(queueState("due").contains(">due<"))?
+  assert(html.render(queueState("due")).contains(">due<"))?
   // The one that has to be explained: the store keeps one due time for a
   // lease and for a retry's wait, so the page does not claim to know which.
-  let held = queueState("held")
+  let held = html.render(queueState("held"))
   assert(held.contains(">held<"))?
   assert(held.contains("lease"))?
   assert(held.contains("retry"))?
-  assert(queueState("dead").contains(">dead<"))?
+  assert(html.render(queueState("dead")).contains(">dead<"))?
   Ok(())
 }
 
 test fn escapesABodyWhateverWasSentToTheQueue() -> Result<Unit, Error> {
   // A body is whatever an app sent — a webhook's payload, a form somebody
   // filled in — so it is the likeliest markup on these pages.
-  let said = queueBodyCell(waitingMessage("<img src=y>&\"'", "due"))
+  let said = html.render(queueBodyCell(waitingMessage("<img src=y>&\"'", "due")))
   assert(!said.contains("<img"))?
   assert(said.contains("&lt;img src=y&gt;&amp;&quot;&#39;"))?
   // An empty body is said in words rather than shown as an empty cell.
-  assert(queueBodyCell(waitingMessage("", "due")).contains("empty"))?
+  assert(html.render(queueBodyCell(waitingMessage("", "due"))).contains("empty"))?
   Ok(())
 }
 
@@ -793,17 +802,17 @@ test fn cutsALongBodyToTheColumnAndSaysSo() -> Result<Unit, Error> {
   while long.byteLength() < 400 {
     long = "{long}x"
   }
-  let said = queueBodyCell(waitingMessage(long, "due"))
+  let said = html.render(queueBodyCell(waitingMessage(long, "due")))
   assert(said.contains("…"))?
   assertEqual(said.contains(text.truncateBytes(long, 141)), false)?
   Ok(())
 }
 
 test fn listsTheMessagesWaitingWithTheirTriesAndTheirDueTime() -> Result<Unit, Error> {
-  let said = queueMessagesTable(
+  let said = html.render(queueMessagesTable(
     "/apps/post",
     Vector.of(waitingMessage("one", "due"), waitingMessage("two", "held")).freeze(),
-  )
+  ))
   assert(said.contains("<code>one</code>"))?
   assert(said.contains(">held<"))?
   assert(said.contains("<th>tries</th>"))?
@@ -811,7 +820,7 @@ test fn listsTheMessagesWaitingWithTheirTriesAndTheirDueTime() -> Result<Unit, E
   // message can be due days off and a clock alone would read as today.
   assert(said.contains("2025-10-09T08:53:20.000Z"))?
   // Nothing waiting is said in words, not shown as an empty table.
-  assert(queueMessagesTable("/apps/post", Vector.of().freeze()).contains("Nothing is waiting"))?
+  assert(html.render(queueMessagesTable("/apps/post", Vector.of().freeze())).contains("Nothing is waiting"))?
   // The id is the way to the whole of a body, which a row cuts.
   assert(said.contains("<a href=\"/apps/post/queues?message=7\">"))?
   Ok(())
@@ -832,18 +841,18 @@ test fn saysWhyADeadLetterWasBuriedAndEscapesThat() -> Result<Unit, Error> {
     why: "500 <img src=y>",
     buriedMs: 1760000500000,
   )
-  let said = queueDeadTable("/apps/post", Vector.of(buried).freeze())
+  let said = html.render(queueDeadTable("/apps/post", Vector.of(buried).freeze()))
   assert(said.contains("<th>why</th>"))?
   assert(!said.contains("<img"))?
   assert(said.contains("500 &lt;img src=y&gt;"))?
   assert(said.contains("<code>payload</code>"))?
   assert(said.contains("2025-10-09T09:01:40.000Z"))?
-  assert(queueDeadTable("/apps/post", Vector.of().freeze()).contains("No dead letters"))?
+  assert(html.render(queueDeadTable("/apps/post", Vector.of().freeze())).contains("No dead letters"))?
   Ok(())
 }
 
 test fn namesEachQueueWithWhatItHoldsAndHowItIsDelivered() -> Result<Unit, Error> {
-  let said = queuesTable(
+  let said = html.render(queuesTable(
     Vector.of(
       host.Queue(
         name: "mail",
@@ -877,7 +886,7 @@ test fn namesEachQueueWithWhatItHoldsAndHowItIsDelivered() -> Result<Unit, Error
       ),
     )
       .freeze(),
-  )
+  ))
   assert(said.contains("<code>mail</code>"))?
   assert(said.contains("<code>/queue/mail</code>"))?
   assert(said.contains(">2</td>"))?
@@ -897,8 +906,8 @@ test fn writesADurationAsAppTomlWritesIt() -> Result<Unit, Error> {
 test fn saysWhenAListingReachedTheWindowsLimit() -> Result<Unit, Error> {
   // Under the limit: the listing is the whole of it, and there is nothing
   // to say.
-  assertEqual(queueMore(3, 3, "of what is waiting"), "")?
-  let said = queueMore(queueListSize(), 4000, "of what is waiting")
+  assertEqual(html.render(queueMore(3, 3, "of what is waiting")), "")?
+  let said = html.render(queueMore(queueListSize(), 4000, "of what is waiting"))
   assert(said.contains("The first 200"))?
   assert(said.contains("minicloud queues"))?
   Ok(())
@@ -942,8 +951,8 @@ test fn theWorstCardsComeFirst() -> Result<Unit, Error> {
   // What puts a card above another: an app with a dead letter is above one
   // whose only news is that it is near a limit, as the list within an app
   // puts them.
-  let bad = Flag(level: "is-bad", text: "2 dead on <code>work</code>", path: "/apps/jobs/queues")
-  let warn = Flag(level: "is-warn", text: "Access off", path: "/apps/jobs")
+  let bad = Flag(level: "is-bad", text: html"2 dead on <code>work</code>", path: "/apps/jobs/queues")
+  let warn = Flag(level: "is-warn", text: html"Access off", path: "/apps/jobs")
   assertEqual(anyBad([bad]), true)?
   assertEqual(anyBad([warn, bad]), true)?
   assertEqual(anyBad([warn]), false)?

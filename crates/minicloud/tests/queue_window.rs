@@ -481,8 +481,9 @@ fn waiting_ids(apps: &Apps) -> Vec<String> {
 
 /// A message's body is whatever the outside sent — a webhook's payload, a
 /// form somebody filled in — and the reason a delivery failed is whatever
-/// the consumer answered. Both go into a page, so both go through
-/// `escapeHtml`, or this window would be the way into the admin app.
+/// the consumer answered. Both go into a page, so both are escaped by the
+/// `html"…"` hole they go in, or this window would be the way into the admin
+/// app.
 #[test]
 fn the_page_escapes_a_body_and_a_reason() {
     let apps = ui_apps();

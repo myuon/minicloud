@@ -731,7 +731,7 @@ fn the_page_shows_what_the_version_it_is_running_is_made_of() {
         "{}",
         text.body
     );
-    assert!(text.body.contains("escapeHtml"), "{}", text.body);
+    assert!(text.body.contains("urlEncode"), "{}", text.body);
 
     // An asset that is not text: where the host answers it, not a page
     // pretending to render it. `notes` is reached by path, so the path
@@ -849,8 +849,9 @@ fn the_tree_closes_every_list_it_opens() {
 }
 
 /// The page shows code, which is markup more often than not: every value
-/// the host gives it — a file's name as well as its text — goes through
-/// `escapeHtml`, or this page would be the way into the admin app.
+/// the host gives it — a file's name as well as its text — is escaped by the
+/// `html"…"` hole it goes in, or this page would be the way into the admin
+/// app.
 #[test]
 fn the_page_escapes_the_code_and_the_names_it_shows() {
     let apps = ui_apps();
