@@ -49,9 +49,10 @@ fn fieldsOf(request: web.Request) -> Map<String, String> {
   fields
 }
 
-/// The style, as CSS. It goes into the page through a hole, so it is
-/// escaped like any `String`: it holds none of `& < > " '`, and a selector
-/// that needed one (a child combinator, `>`) would arrive as `&gt;`.
+/// The style, as CSS. A stylesheet is not text to be escaped — a child
+/// combinator, `>`, has to arrive as `>` — so the page puts it in through
+/// `html.markup`, the one way past escaping, which this constant is the
+/// reason to take.
 fn css() -> String {
   "body\{font:14px/1.45 system-ui,sans-serif;margin:0;color:#0b0b0b;background:#fafafa\}header\{background:#24292f;padding:.6em 1.2em\}header a\{color:#fff;text-decoration:none;margin-right:1.2em\}header a.home\{font-weight:600\}header a.here\{text-decoration:underline\}main\{padding:1em 1.2em;max-width:72em\}h1\{font-size:1.4em;margin:.2em 0 .4em\}h2\{font-size:1.1em;margin:1.2em 0 .4em\}table\{border-collapse:collapse;margin:.4em 0 1em;background:#fff\}td,th\{border:1px solid #d0d7de;padding:.2em .6em;text-align:left;vertical-align:top\}th\{background:#f3f4f6;font-weight:600\}td.num,th.num\{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums\}code,textarea,pre\{font:12px/1.4 ui-monospace,monospace\}.muted,.note\{color:#52514e\}.note\{font-size:.9em\}form.run\{display:grid;grid-template-columns:minmax(18em,34em) auto;gap:.6em 1.6em;align-items:start;margin:.4em 0 1em\}form.run textarea\{width:100%;height:16em;box-sizing:border-box\}form.run fieldset\{border:1px solid #d0d7de;margin:0 0 .6em;padding:.4em .8em\}form.run label\{display:block;margin:.15em 0\}form.run input[type=number]\{width:7em\}.buttons\{display:flex;gap:.6em;margin-top:.6em\}button\{font:inherit;padding:.3em 1em\}ul.examples\{margin:.2em 0;padding-left:1.2em\}dl.meta\{display:grid;grid-template-columns:max-content auto;gap:.15em 1em;margin:.4em 0 1em\}dl.meta dt\{color:#52514e\}dl.meta dd\{margin:0\}.stop\{border-left:4px solid #b42318;background:#ffebe9;padding:.5em .8em;margin:.6em 0\}.stop.limit\{border-color:#eda100;background:#fff8c5\}.ok\{border-left:4px solid #1a7f37;background:#eef8f0;padding:.5em .8em;margin:.6em 0\}.running\{border-left:4px solid #2a78d6;background:#eef4fc;padding:.5em .8em;margin:.6em 0\}svg.chart\{max-width:100%;height:auto;display:block;border:1px solid #e1e0d9;border-radius:4px;margin:.4em 0\}details.table\{margin:.4em 0\}.pair\{display:flex;gap:1.5em;flex-wrap:wrap\}.host\{color:#52514e\}pre.diag\{white-space:pre-wrap;background:#fff;border:1px solid #d0d7de;padding:.5em\}"
 }
@@ -72,7 +73,7 @@ fn layout(base: String, title: String, here: String, content: Html) -> Html {
       <meta charset=utf-8>
       <meta name=viewport content="width=device-width">
       <title>{title} · algorithm playground</title>
-      <style>{css()}</style>
+      <style>{html.markup(css())}</style>
       <script src="{base}/app.js" defer></script>
     </head>
     <body>
