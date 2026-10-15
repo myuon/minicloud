@@ -59,7 +59,7 @@ fn redirect(location: String) -> web.Response {
 /// `aria-current=page` on the link to where one is, with the space in front
 /// of it; nothing on any other.
 fn current(here: Bool) -> Html {
-  if here { html" aria-current=page" } else { html"" }
+  html.only(here, html" aria-current=page")
 }
 
 /// The navigation, with the page one is on marked.
@@ -269,7 +269,7 @@ fn appHead(base: String, app: host.App, here: String) -> Html {
   } else {
     html"<code>{app.version}</code> {app.tier}"
   }
-  let entry = if app.entry == "" { html"" } else { html" · entry <code>{app.entry}</code>" }
+  let entry = html.only(app.entry != "", html" · entry <code>{app.entry}</code>")
   html"""
     <p class=crumb><a href="{base}/">apps</a> / {app.name}</p>
     <h1>{app.name} {badge(app.state)}</h1>
@@ -293,13 +293,13 @@ fn appHead(base: String, app: host.App, here: String) -> Html {
 
 /// One line of what is worth a look. `level` is `bad`, `warn`, `ok`, or ""
 /// for a line that is neither news nor reassurance; `what` is the line and
-/// `seen` the way to where it shows, or `html""` for a line that has none.
+/// `seen` the way to where it shows, or `None` for a line that has none.
 /// Both are markup, and every value of the host's in them was escaped by its
 /// hole.
 struct Look {
   level: String
   what: Html
-  seen: Html
+  seen: Option<Html>
 }
 
 /// How full a store has to be before this says so, in hundredths.
@@ -336,7 +336,7 @@ fn sentence(items: Array<Html>) -> Html {
     }
     at = at + 1
   }
-  let last = items.get(items.length() - 1).unwrapOr(html"")
+  let last = items.get(items.length() - 1)
   html"{html.join(first.freeze(), html", ")} and {last}"
 }
 
@@ -351,8 +351,8 @@ fn lookAt(path: String, label: String) -> Html {
 fn lookList(items: Array<Look>) -> Html {
   var out = Vector.of()
   for item in items {
-    let mark = if item.level == "" { html"" } else { html""" class="is-{item.level}"""" }
-    let seen = if item.seen == html"" { html"" } else { html"<span class=where>{item.seen}</span>" }
+    let mark = html.only(item.level != "", html""" class="is-{item.level}"""")
+    let seen = html.only(item.seen.isSome(), html"<span class=where>{item.seen}</span>")
     out.push(html"<li{mark}><span class=what>{item.what}</span>{seen}</li>")
   }
   html"<ul class=look>{out.freeze()}</ul>"
@@ -375,7 +375,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "bad",
         what: html"Refused, so nothing reaches it: {firstLine(app.reason)}",
-        seen: lookAt("{at}/settings", "settings"),
+        seen: Some(lookAt("{at}/settings", "settings")),
       ),
     )
   } else if app.state == "disabled" {
@@ -383,11 +383,11 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"Disabled: requests are answered 503 and its data is kept.",
-        seen: lookAt("{at}/settings", "settings"),
+        seen: Some(lookAt("{at}/settings", "settings")),
       ),
     )
   } else if app.state == "removed" {
-    warn.push(Look(level: "warn", what: html"Removed: the host has no version of it left.", seen: html""))
+    warn.push(Look(level: "warn", what: html"Removed: the host has no version of it left.", seen: None))
   }
   // The failures the host kept, newest first, and then how many more there
   // have been than it keeps.
@@ -401,7 +401,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             A request failed — <code>{failure.kind}</code> {failure.status}:
             {firstLine(failure.message)}
             """,
-          seen: html"{toLog} · {atTime(failure.atMs)}",
+          seen: Some(html"{toLog} · {atTime(failure.atMs)}"),
         ),
       )
       shown = shown + 1
@@ -410,7 +410,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
   if app.errors > shown {
     let rest = app.errors - shown
     let counted = if rest == 1 { "1 more request has failed" } else { "{rest} more requests have failed" }
-    bad.push(Look(level: "bad", what: html"{counted} since the load.", seen: toLog))
+    bad.push(Look(level: "bad", what: html"{counted} since the load.", seen: Some(toLog)))
   }
   if app.errors == 0 {
     clean.push(html"no request failed")
@@ -423,7 +423,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           {app.rejected} requests were turned away: the app was at <code>max_in_flight</code>
           or <code>max_queued</code>.
           """,
-        seen: lookAt("{at}/settings", "limits"),
+        seen: Some(lookAt("{at}/settings", "limits")),
       ),
     )
   } else {
@@ -445,7 +445,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             {counted} on <code>{queue.name}</code>: nothing delivers one again until somebody
             puts it back.
             """,
-          seen: lookAt("{at}/queues", "queues"),
+          seen: Some(lookAt("{at}/queues", "queues")),
         ),
       )
     }
@@ -457,7 +457,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             {queue.held} held on <code>{queue.name}</code>: a delivery on lease, or a failed
             one waiting for its retry.
             """,
-          seen: lookAt("{at}/queues", "queues"),
+          seen: Some(lookAt("{at}/queues", "queues")),
         ),
       )
     }
@@ -469,7 +469,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             <code>{queue.name}</code> holds messages and the app's <code>[[queues]]</code> no
             longer declares it: nothing will ever deliver them.
             """,
-          seen: lookAt("{at}/queues", "queues"),
+          seen: Some(lookAt("{at}/queues", "queues")),
         ),
       )
     }
@@ -489,7 +489,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           The <code>kv</code> store holds {text.bytes(app.kvBytes)} of the
           {text.bytes(app.kvMaxBytes)} it may: a write past that is refused.
           """,
-        seen: lookAt("{at}/kv", "data"),
+        seen: Some(lookAt("{at}/kv", "data")),
       ),
     )
   }
@@ -502,7 +502,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           The <code>kv</code> store holds {app.kvKeys} of the {app.kvMaxKeys} keys it may:
           a write past that is refused.
           """,
-        seen: lookAt("{at}/kv", "data"),
+        seen: Some(lookAt("{at}/kv", "data")),
       ),
     )
   }
@@ -515,7 +515,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           The <code>sql</code> store is {text.bytes(app.sqlBytes)} of the
           {text.bytes(app.sqlMaxBytes)} it may be: a statement that writes past that is refused.
           """,
-        seen: lookAt("{at}/sql", "sql"),
+        seen: Some(lookAt("{at}/sql", "sql")),
       ),
     )
   }
@@ -534,7 +534,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           {text.bytes(disk.bytes)}, past the {text.bytes(disk.budget)} this page reads.
           The Code tab reads every file of it.
           """,
-        seen: lookAt("{at}/code", "code"),
+        seen: Some(lookAt("{at}/code", "code")),
       ),
     )
   } else if disk.differing > 0 {
@@ -547,7 +547,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"{counted}: a deploy staged and not switched to, or an edit made on the machine.",
-        seen: lookAt("{at}/code", "code"),
+        seen: Some(lookAt("{at}/code", "code")),
       ),
     )
   } else {
@@ -561,7 +561,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"Cloudflare Access is off for this app — {app.accessOff}.",
-        seen: toLog,
+        seen: Some(toLog),
       ),
     )
   }
@@ -574,7 +574,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
   }
   if clean.length() > 0 {
     let lead = if items.length() == 0 { "Nothing" } else { "Nothing else" }
-    items.push(Look(level: "ok", what: html"{lead}: {sentence(clean.freeze())}.", seen: html""))
+    items.push(Look(level: "ok", what: html"{lead}: {sentence(clean.freeze())}.", seen: None))
   }
   if items.length() == 0 {
     return html"""
@@ -743,7 +743,7 @@ fn appOverviewPage(base: String, app: host.App) -> Html {
   let at = appAt(base, app)
   let queues = if app.granted.contains("queue") { host.queues(app.name) } else { Vector.of().freeze() }
   let disk = host.codeDisk(app.name)
-  let reason = if app.reason == "" { html"" } else { html"<pre>{app.reason}</pre>" }
+  let reason = html.only(app.reason != "", html"<pre>{app.reason}</pre>")
   let lines = host.logs(app.name, 5)
   let required = if app.requiredOpen {
     html"""
@@ -791,7 +791,7 @@ fn settingsPage(
   posted: Option<Map<String, String>>,
 ) -> Html {
   let at = appAt(base, app)
-  let reason = if app.reason == "" { html"" } else { html"<pre>{app.reason}</pre>" }
+  let reason = html.only(app.reason != "", html"<pre>{app.reason}</pre>")
   let required = if app.requiredOpen {
     html"""
       {names(app.required)} \
@@ -913,7 +913,7 @@ fn appCard(base: String, app: host.App, flags: Array<Flag>) -> Html {
     }
   }
   let tone = if worst == "" { "" } else { " {worst}" }
-  let mine = if app.isAdmin { html" <span class=muted>(this app)</span>" } else { html"" }
+  let mine = html.only(app.isAdmin, html" <span class=muted>(this app)</span>")
   let reached = if app.hosts.length() > 0 {
     names(app.hosts)
   } else {
@@ -926,11 +926,7 @@ fn appCard(base: String, app: host.App, flags: Array<Flag>) -> Html {
   }
   // A refusal's reason is the one thing a list cannot send somebody to go
   // and read: it is why the app is not working at all.
-  let why = if app.reason == "" {
-    html""
-  } else {
-    html"<div class=muted>{firstLine(app.reason)}</div>"
-  }
+  let why = html.only(app.reason != "", html"<div class=muted>{firstLine(app.reason)}</div>")
   var pills = Vector.of()
   for flag in flags {
     pills.push(html"""<a class="flag {flag.level}" href="{flag.path}">{flag.text} →</a>""")
@@ -1092,11 +1088,7 @@ fn configureForm(
       Some(form) => form.contains("cap.{capability}")
       None => app.granted.contains(capability)
     }
-    let needed = if app.required.contains(capability) {
-      html" <span class=note>the code uses it</span>"
-    } else {
-      html""
-    }
+    let needed = html.only(app.required.contains(capability), html" <span class=note>the code uses it</span>")
     if !app.isAdmin && capability == "admin" {
       // Only the admin app may hold it; the host refuses it to any other.
       continue
@@ -1110,7 +1102,7 @@ fn configureForm(
         </label>
         """)
     } else {
-      let mark = if checked { html" checked" } else { html"" }
+      let mark = html.only(checked, html" checked")
       boxes.push(html"""
         <label class=cap>
           <input type=checkbox name="cap.{capability}"{mark}> <code>{capability}</code>{needed}
@@ -1295,11 +1287,7 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
   if more {
     steps.push(html"""<a href="{at}/kv?prefix={first}&amp;after={text.urlEncode(last)}">the next {size} →</a>""")
   }
-  let paging = if steps.length() == 0 {
-    html""
-  } else {
-    html"<p class=actions>{html.join(steps.freeze(), html" ")}</p>"
-  }
+  let paging = html.only(steps.length() > 0, html"<p class=actions>{html.join(steps.freeze(), html" ")}</p>")
   let held = if app.kvKeys < 0 {
     "The host has not opened this store since it started."
   } else {
@@ -2364,7 +2352,7 @@ fn logTable(lines: Array<host.LogLine>, withApp: Bool = false) -> Html {
   }
   var rows = Vector.of()
   for line in lines {
-    let who = if withApp { html"<td class=app><code>{line.app}</code></td>" } else { html"" }
+    let who = html.only(withApp, html"<td class=app><code>{line.app}</code></td>")
     rows.push(html"""
       <tr>
         <td class=at>{atTime(line.atMs)}</td>
