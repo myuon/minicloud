@@ -224,12 +224,8 @@ fn sideNote(at: String, summaries: Array<Summary>, aSpec: String) -> Html {
 fn spreadCell(spread: Option<Spread>) -> Html {
   match spread {
     Some(one) => {
-      let range = if one.count > 1 {
-        html"<br><span class=range>{stats.show(one.least)}–{stats.show(one.most)} ×{one.count}</span>"
-      } else {
-        html"<br><span class=range>×1</span>"
-      }
-      html"<td class=num>{stats.show(one.median)}{range}</td>"
+      let range = if one.count > 1 { "{stats.show(one.least)}–{stats.show(one.most)} ×{one.count}" } else { "×1" }
+      html"<td class=num>{stats.show(one.median)}<br><span class=range>{range}</span></td>"
     }
     None => html"""<td class="num absent" title="not measured">–</td>"""
   }
@@ -374,12 +370,11 @@ fn comparison(
         var first = true
         let span = row.metrics.length()
         for one in row.metrics {
-          let lead = if first {
-            html"<td rowspan={span}>{row.case}</td><td rowspan={span}>{row.input}</td><td rowspan={span}>{row.backend}</td>"
-          } else {
-            html""
-          }
-          let tail = if first { verdictCell(row, span) } else { html"" }
+          let lead = html.only(
+            first,
+            html"<td rowspan={span}>{row.case}</td><td rowspan={span}>{row.input}</td><td rowspan={span}>{row.backend}</td>",
+          )
+          let tail = html.only(first, verdictCell(row, span))
           body.push(
             html"""
               <tr{rowClass(row)}>

@@ -654,11 +654,12 @@ fn storeCards(base: String, app: host.App, queues: Array<host.Queue>) -> Html {
     let keysLevel = if nearLimit(app.kvKeys, app.kvMaxKeys) { "is-warn" } else { "" }
     let sizeLevel = if nearLimit(app.kvBytes, app.kvMaxBytes) { "is-warn" } else { "" }
     let pairs = html"{storePair("keys", keys, keysLevel)}{storePair("size", size, sizeLevel)}"
-    let foot = if app.kvKeys < 0 {
-      html"The host has not opened this store since it started."
+    let note = if app.kvKeys < 0 {
+      "The host has not opened this store since it started."
     } else {
-      html"At most {app.kvMaxKeys} keys and {text.bytes(app.kvMaxBytes)}."
+      "At most {app.kvMaxKeys} keys and {text.bytes(app.kvMaxBytes)}."
     }
+    let foot = html"{note}"
     cards.push(storeCard("{at}/kv", "kv", "browse", pairs, foot))
   }
   if app.granted.contains("sql") {
@@ -1122,11 +1123,10 @@ fn configureForm(
     }
     // The field holds the value; this says where the value came from, which
     // is the one thing the form cannot show by holding it.
-    let changed = if app.limitsChanged.contains(limitKey(field.name)) {
-      html""" <span class=added title="set here, not in app.toml">(changed)</span>"""
-    } else {
-      html""
-    }
+    let changed = html.only(
+      app.limitsChanged.contains(limitKey(field.name)),
+      html""" <span class=added title="set here, not in app.toml">(changed)</span>""",
+    )
     inputs.push(html"""
       <div class=field>
         <label for="{field.name}">{field.label}{changed}</label>
@@ -1239,7 +1239,7 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
       // The host cut at its own length; a row of a table wants less again.
       let preview = text.truncateBytes(entry.value, 140)
       let cut = entry.cut || preview.byteLength() < entry.value.byteLength()
-      let shown = if cut { html"{preview}<span class=muted>…</span>" } else { html"{preview}" }
+      let shown = html"{preview}{html.only(cut, html"<span class=muted>…</span>")}"
       rows.push(html"""
         <tr>
           <td class=title data-label=key><a href="{link}"><code>{entry.key}</code></a></td>
@@ -1313,11 +1313,7 @@ fn storeKeyPage(base: String, app: host.App, key: String) -> Html {
   let back = html"""<p class=actions><a href="{at}/kv">← every key</a></p>"""
   match host.kvValue(app.name, key) {
     Ok(entry) => {
-      let cut = if entry.cut {
-        html" <span class=muted>(cut: the whole value is {text.bytes(entry.bytes)})</span>"
-      } else {
-        html""
-      }
+      let cut = html.only(entry.cut, html" <span class=muted>(cut: the whole value is {text.bytes(entry.bytes)})</span>")
       let facts = html"""
         <div class="scroll narrow">
           <table class=facts>
@@ -1477,7 +1473,7 @@ fn servedOn(app: host.App) -> Html {
 /// and still escaped. A directory is not a link: the host has no text of one
 /// to answer, so there is nothing for it to point at.
 fn codeRow(at: String, file: host.CodeFile) -> Html {
-  let disk = if file.kind == "dir" { html"" } else { onDisk(file) }
+  let disk = if file.kind == "dir" { None } else { Some(onDisk(file)) }
   let meta = html"""
     <span class=meta>
       <span class=what>{codeKind(file)}</span>
@@ -1535,7 +1531,7 @@ fn codeTree(at: String, files: Array<host.CodeFile>) -> Html {
       // A sibling of the row above: that row's item ends here.
       out.push(html"</li>")
     } else {
-      let list = if open == 0 { html"<ul class=tree>" } else { html"<ul>" }
+      let list = html"<ul{html.only(open == 0, html" class=tree")}>"
       out.push(list)
       open = want
     }
@@ -1591,30 +1587,14 @@ fn codePage(base: String, app: host.App, request: web.Request) -> Html {
   } else {
     html"""<div class="panel tree">{codeTree(at, shown.freeze())}</div>"""
   }
-  let differs = if differing == 0 {
-    html""
-  } else {
-    // Text and not markup, so the `'` in it is escaped as a host's value is:
-    // that is how this page has always written it.
-    let count = if differing == 1 {
-      "One file in the app's directory is not the one that is running."
-    } else {
-      "{differing} files in the app's directory are not the ones that are running."
-    }
-    html"""
-      <div class=problem><b>{count}</b> A deploy that was staged and not switched to, or an
-      edit made on the machine: either way, what is below is what the host is running, and the
-      directory holds something else.</div>
-      """
-  }
-  let more = if files > size {
+  let differs = html.only(differing != 0, differingFiles(differing))
+  let more = html.only(
+    files > size,
     html"""
       <p class=muted>The first {size} files; this deploy has more, which this page does not
       show.</p>
-      """
-  } else {
-    html""
-  }
+      """,
+  )
   let summary = html"""
     What is running, not what is in the app's directory — and each file says how the two
     compare.
@@ -1635,6 +1615,24 @@ fn codePage(base: String, app: host.App, request: web.Request) -> Html {
     "{app.name} code",
     html"{appHead(base, app, "Code")}{about(summary, told)}{differs}{tree}{more}",
   )
+}
+
+/// The problem the code page states when `differing` of the files it shows
+/// are not the ones in the app's directory: how many, and the two ways that
+/// comes about.
+fn differingFiles(differing: Int) -> Html {
+  // Text and not markup, so the `'` in it is escaped as a host's value is:
+  // that is how this page has always written it.
+  let count = if differing == 1 {
+    "One file in the app's directory is not the one that is running."
+  } else {
+    "{differing} files in the app's directory are not the ones that are running."
+  }
+  html"""
+    <div class=problem><b>{count}</b> A deploy that was staged and not switched to, or an
+    edit made on the machine: either way, what is below is what the host is running, and the
+    directory holds something else.</div>
+    """
 }
 
 /// One piece of a coloured file: its text, escaped, inside the `<span>` the
@@ -1727,11 +1725,7 @@ fn codeFilePage(base: String, app: host.App, name: String) -> Html {
   match host.codeFile(app.name, name) {
     Ok(file) => {
       let whole = text.bytes(file.bytes)
-      let cut = if file.cut {
-        html" <span class=muted>(cut at {text.bytes(codeTextBytes())}: the whole file is {whole})</span>"
-      } else {
-        html""
-      }
+      let cut = html.only(file.cut, html" <span class=muted>(cut at {text.bytes(codeTextBytes())}: the whole file is {whole})</span>")
       let facts = html"""
         <div class="scroll narrow">
           <table class=facts>
@@ -2072,18 +2066,14 @@ fn queuesTable(queues: Array<host.Queue>) -> Html {
         so the host delivers nothing from it">not declared</span>
         """
     }
-    let settings = if queue.declared {
-      html"""
-        <span class=muted>{queue.maxAttempts} attempts,
-        retry {queueDuration(queue.retryMs)} doubling,
-        lease {queueDuration(queue.leaseMs)},
-        {queue.batch} at once,
-        depth {queue.maxDepth},
-        body {text.bytes(queue.maxBodyBytes)}</span>
-        """
+    let values = if queue.declared {
+      "{queue.maxAttempts} attempts, retry {queueDuration(queue.retryMs)} doubling, \
+        lease {queueDuration(queue.leaseMs)}, {queue.batch} at once, depth {queue.maxDepth}, \
+        body {text.bytes(queue.maxBodyBytes)}"
     } else {
-      html"<span class=muted>–</span>"
+      "–"
     }
+    let settings = html"<span class=muted>{values}</span>"
     rows.push(html"""
       <tr>
         <td class=title data-label=queue><code>{queue.name}</code></td>
@@ -2299,11 +2289,7 @@ fn queueMessagePage(base: String, app: host.App, id: Int) -> Html {
     Ok(message) => {
       let carried = text.bytes(queueBodyChars())
       let whole = text.bytes(message.bytes)
-      let cut = if message.cut {
-        html" <span class=muted>(cut at {carried} of text: the whole body is {whole})</span>"
-      } else {
-        html""
-      }
+      let cut = html.only(message.cut, html" <span class=muted>(cut at {carried} of text: the whole body is {whole})</span>")
       // A dead letter's due time is the one it had when it was buried, so
       // showing it as "due" would be saying something untrue; the two rows
       // it has instead are when it was buried and why.
@@ -2873,11 +2859,10 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
         <button class=primary>{if secret.set { "Replace" } else { "Set" }}</button>
       </form>
       """
-    let force = if secret.apps.length() > 0 {
-      html"<label><input type=checkbox name=force> even though apps use it (they are refused)</label>"
-    } else {
-      html""
-    }
+    let force = html.only(
+      secret.apps.length() > 0,
+      html"<label><input type=checkbox name=force> even though apps use it (they are refused)</label>",
+    )
     let delete = if secret.set {
       html"""
         <form class=inline method=post action="{base}/secrets/delete">

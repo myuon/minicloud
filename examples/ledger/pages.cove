@@ -81,7 +81,8 @@ fn loadRange(least: Option<Float>, most: Option<Float>) -> Html {
   match least {
     Some(low) => {
       let high = most.unwrapOr(low)
-      if low == high { html"{low.format(1)}" } else { html"{low.format(1)}–{high.format(1)}" }
+      let range = if low == high { low.format(1) } else { "{low.format(1)}–{high.format(1)}" }
+      html"{range}"
     }
     None => html"""<span class=absent title="not recorded">–</span>"""
   }

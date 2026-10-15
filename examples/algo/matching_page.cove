@@ -118,7 +118,7 @@ fn matchingPage(base: String, fields: Map<String, String>, post: Bool) -> web.Re
 fn matchingForm(base: String, input: String, algorithm: String) -> Html {
   var examples = Vector.of()
   for example in matchingExamples() {
-    let pick = if example.algorithm == "" { html"" } else { html"&amp;algorithm={example.algorithm}" }
+    let pick = html.only(example.algorithm != "", html"&amp;algorithm={example.algorithm}")
     examples.push(html"""
       <li><a href="{base}/matching?example={example.name}{pick}">{example.name}</a> —
         {example.title}</li>
@@ -226,19 +226,7 @@ fn matchingResult(input: String, algorithm: String) -> Html {
         """,
     ))
   }
-  let agree = if all.length() > 1 {
-    let second = all.get(1).unwrapOr(first)
-    if second.found.size == found.size {
-      html"""
-        <p class=note>The two agree on the size; the faster examined
-          {ratio(first.found.scans, second.found.scans)} the edges.</p>
-        """
-    } else {
-      html"<div class=stop><strong>The algorithms disagree:</strong> {second.found.size} against {found.size}.</div>"
-    }
-  } else {
-    html""
-  }
+  let agree = html.only(all.length() > 1, agreement(first, all.get(1).unwrapOr(first)))
   let picture = if n <= drawLimit() && m <= drawLimit() {
     drawMatching(graph, found, proof)
   } else {
@@ -248,6 +236,20 @@ fn matchingResult(input: String, algorithm: String) -> Html {
       """
   }
   html"{verdict}{summary(facts.freeze())}{agree}{picture}{matchingTable(graph, found, proof)}"
+}
+
+/// What `second`'s run says of `first`'s: that the two found matchings of
+/// the same size, and what share of the edges the faster examined — or that
+/// they did not.
+fn agreement(first: Timed, second: Timed) -> Html {
+  if second.found.size == first.found.size {
+    html"""
+      <p class=note>The two agree on the size; the faster examined
+        {ratio(first.found.scans, second.found.scans)} the edges.</p>
+      """
+  } else {
+    html"<div class=stop><strong>The algorithms disagree:</strong> {second.found.size} against {first.found.size}.</div>"
+  }
 }
 
 /// `small` as a share of `large`, in words.
