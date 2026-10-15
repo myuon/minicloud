@@ -291,7 +291,9 @@ Every value a poster controls — the run ID, repository, commit, note,
 source, environment, toolchain, conditions, case, input and backend — is a
 `String` in a hole of an `html"…"` literal, where it is escaped because it is
 not `Html`; every page and the trend chart's SVG are such literals, and every
-page is sent with a `Content-Security-Policy` that allows no script.
+page is sent with a `Content-Security-Policy` that allows no script and no
+inline style (`style-src 'self'`: the stylesheet is `assets/style.css`, which
+the host answers at `/ledger/style.css` before the app runs).
 
 ## Layout
 

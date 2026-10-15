@@ -20,3 +20,10 @@ max_bytes = 1073741824
 # app is refused at load without it.
 [secrets]
 post = { env = "LEDGER_TOKEN" }
+
+# `assets/` beside this file is served by the host itself, before any
+# request reaches the app: the pages' stylesheet, as a file, so that the
+# pages need no inline style and the CSP can say `style-src 'self'`. A GET or
+# HEAD for `/ledger/style.css` is `assets/style.css`. The host's defaults for
+# it (8 MiB in all, `cache-control: no-cache`) are right for one small file,
+# so there is no `[assets]` section here.

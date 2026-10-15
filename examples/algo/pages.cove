@@ -9,17 +9,19 @@ use std.html.Html
 // escaped unless its type is `Html`: every value that came from the request
 // is a `String`, so it is text on the page whatever it holds. A part built in
 // one function and put in another is an `Html`, which is how the second knows
-// to take it whole. The script (`/app.js`) and the style are not markup and
-// stay `String`s.
+// to take it whole. The script and the stylesheet are not markup at all:
+// they are files in `assets/` (`app.js`, `style.css`), which the host answers
+// itself, before this app runs, at `{base}/app.js` and `{base}/style.css`.
 
 /// The response headers every page carries: the page's own script and
-/// nothing else, no framing, no sniffing, no referrer.
+/// stylesheet — files from `assets/`, so nothing inline — and nothing else,
+/// no framing, no sniffing, no referrer.
 fn pageHeaders(contentType: String) -> Map<String, String> {
   Map.of(
     MapEntry(key: "content-type", value: contentType),
     MapEntry(
       key: "content-security-policy",
-      value: "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      value: "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     ),
     MapEntry(key: "x-content-type-options", value: "nosniff"),
     MapEntry(key: "x-frame-options", value: "DENY"),
@@ -49,14 +51,6 @@ fn fieldsOf(request: web.Request) -> Map<String, String> {
   fields
 }
 
-/// The style, as CSS. A stylesheet is not text to be escaped — a child
-/// combinator, `>`, has to arrive as `>` — so the page puts it in through
-/// `html.markup`, the one way past escaping, which this constant is the
-/// reason to take.
-fn css() -> String {
-  "body\{font:14px/1.45 system-ui,sans-serif;margin:0;color:#0b0b0b;background:#fafafa\}header\{background:#24292f;padding:.6em 1.2em\}header a\{color:#fff;text-decoration:none;margin-right:1.2em\}header a.home\{font-weight:600\}header a.here\{text-decoration:underline\}main\{padding:1em 1.2em;max-width:72em\}h1\{font-size:1.4em;margin:.2em 0 .4em\}h2\{font-size:1.1em;margin:1.2em 0 .4em\}table\{border-collapse:collapse;margin:.4em 0 1em;background:#fff\}td,th\{border:1px solid #d0d7de;padding:.2em .6em;text-align:left;vertical-align:top\}th\{background:#f3f4f6;font-weight:600\}td.num,th.num\{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums\}code,textarea,pre\{font:12px/1.4 ui-monospace,monospace\}.muted,.note\{color:#52514e\}.note\{font-size:.9em\}form.run\{display:grid;grid-template-columns:minmax(18em,34em) auto;gap:.6em 1.6em;align-items:start;margin:.4em 0 1em\}form.run textarea\{width:100%;height:16em;box-sizing:border-box\}form.run fieldset\{border:1px solid #d0d7de;margin:0 0 .6em;padding:.4em .8em\}form.run label\{display:block;margin:.15em 0\}form.run input[type=number]\{width:7em\}.buttons\{display:flex;gap:.6em;margin-top:.6em\}button\{font:inherit;padding:.3em 1em\}ul.examples\{margin:.2em 0;padding-left:1.2em\}dl.meta\{display:grid;grid-template-columns:max-content auto;gap:.15em 1em;margin:.4em 0 1em\}dl.meta dt\{color:#52514e\}dl.meta dd\{margin:0\}.stop\{border-left:4px solid #b42318;background:#ffebe9;padding:.5em .8em;margin:.6em 0\}.stop.limit\{border-color:#eda100;background:#fff8c5\}.ok\{border-left:4px solid #1a7f37;background:#eef8f0;padding:.5em .8em;margin:.6em 0\}.running\{border-left:4px solid #2a78d6;background:#eef4fc;padding:.5em .8em;margin:.6em 0\}svg.chart\{max-width:100%;height:auto;display:block;border:1px solid #e1e0d9;border-radius:4px;margin:.4em 0\}details.table\{margin:.4em 0\}.pair\{display:flex;gap:1.5em;flex-wrap:wrap\}.host\{color:#52514e\}pre.diag\{white-space:pre-wrap;background:#fff;border:1px solid #d0d7de;padding:.5em\}"
-}
-
 /// The page around `content`; `here` is the nav entry to mark.
 fn layout(base: String, title: String, here: String, content: Html) -> Html {
   var nav = Vector.of()
@@ -73,7 +67,7 @@ fn layout(base: String, title: String, here: String, content: Html) -> Html {
       <meta charset=utf-8>
       <meta name=viewport content="width=device-width">
       <title>{title} · algorithm playground</title>
-      <style>{html.markup(css())}</style>
+      <link rel=stylesheet href="{base}/style.css">
       <script src="{base}/app.js" defer></script>
     </head>
     <body>
@@ -164,85 +158,4 @@ fn page(base: String, here: String, title: String, form: Html, result: Html) -> 
 /// playground's bounds, a search over its own budget.
 fn stopNote(title: String, why: String) -> Html {
   html"""<div class="stop limit" data-stop=app><strong>{title}</strong> {why}</div>"""
-}
-
-/// The script: runs the form with `fetch`, so the page can be cancelled
-/// (the abort closes the connection, and the host cancels the run), can say
-/// why a run stopped (the host's `x-cove-stop`), and can show what the run
-/// cost (the host's `x-cove-run-*`). Without it the forms still work, as
-/// plain submissions.
-fn script() -> String {
-  "'use strict';
-(function () \{
-  var stops = \{
-    deadline: 'the run passed its wall-clock deadline (app.toml: limits.deadline) and was stopped by the host',
-    cancelled: 'the request was cancelled and the host stopped the run',
-    heap: 'the run grew its heap past max_heap_words (app.toml) and its answer was discarded',
-    host_calls: 'the run made more host calls than max_host_calls allows',
-    call_depth: 'the run nested calls deeper than max_call_depth allows',
-    queue_timeout: 'the request waited for a worker longer than its deadline and was never run',
-    response_too_large: 'the answer was larger than max_response_bytes'
-  \};
-  function el(tag, cls, text) \{ var e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; \}
-  function meter(response) \{
-    var n = function (name) \{ var v = response.headers.get('x-cove-run-' + name); return v === null ? '–' : Number(v).toLocaleString('en-US'); \};
-    return 'instructions ' + n('instructions') + ' · yields ' + n('yields') + ' (declined ' + n('yields-declined') + ') · on a worker ' + n('worker-us') + ' µs · admission to answer ' + n('wall-us') + ' µs';
-  \}
-  function show(target, node) \{ target.replaceChildren(node); \}
-  document.addEventListener('DOMContentLoaded', function () \{
-    var form = document.querySelector('form.run');
-    var target = document.getElementById('result');
-    if (!form || !target) return;
-    var cancel = form.querySelector('button.cancel');
-    var running = null;
-    cancel.hidden = false;
-    cancel.disabled = true;
-    cancel.addEventListener('click', function () \{ if (running) running.abort(); \});
-    form.addEventListener('submit', function (event) \{
-      event.preventDefault();
-      if (running) running.abort();
-      var controller = new AbortController();
-      running = controller;
-      cancel.disabled = false;
-      var body = new URLSearchParams(new FormData(form));
-      body.set('part', 'result');
-      var started = performance.now();
-      show(target, el('div', 'running', 'Running… (Cancel withdraws the request; the host stops the run at its next safepoint)'));
-      fetch(form.action, \{ method: 'POST', body: body, signal: controller.signal \}).then(function (response) \{
-        return response.text().then(function (text) \{
-          var took = Math.round(performance.now() - started);
-          if (response.ok) \{
-            target.innerHTML = text;
-            var host = target.querySelector('[data-host]');
-            if (host) host.textContent = meter(response) + ' · round trip ' + took + ' ms';
-            return;
-          \}
-          var stop = response.headers.get('x-cove-stop');
-          var box = el('div', 'stop');
-          box.dataset.stop = stop || String(response.status);
-          box.appendChild(el('strong', null, stop ? 'Stopped: ' + stop + '. ' : 'Failed: HTTP ' + response.status + '. '));
-          var why = stop ? (stops[stop] || 'the host stopped the run') : (response.status === 429 ? 'too many runs of this app are queued; try again in a moment' : '');
-          box.appendChild(document.createTextNode(why ? why.charAt(0).toUpperCase() + why.slice(1) + '.' : ''));
-          box.appendChild(el('p', 'host', meter(response) + ' · round trip ' + took + ' ms'));
-          box.appendChild(el('pre', 'diag', text));
-          show(target, box);
-        \});
-      \}).catch(function (error) \{
-        if (error.name === 'AbortError') \{
-          var box = el('div', 'stop');
-          box.dataset.stop = 'cancelled';
-          box.appendChild(el('strong', null, 'Cancelled. '));
-          box.appendChild(document.createTextNode('You withdrew the request after ' + Math.round(performance.now() - started) + ' ms; the connection closed and the host cancelled the run.'));
-          show(target, box);
-        \} else \{
-          show(target, el('div', 'stop', 'The request failed: ' + error));
-        \}
-      \}).finally(function () \{
-        if (running === controller) \{ running = null; cancel.disabled = true; \}
-      \});
-    \});
-    if (location.hash === '#run' || target.hasAttribute('data-autorun')) form.requestSubmit();
-  \});
-\})();
-"
 }

@@ -11,14 +11,15 @@ use std.html.Html
 // the only markup in it. A part of a page built in one function and put in
 // another is an `Html`, which is how the second knows to take it whole.
 
-/// The response headers every admin page carries: no script but the page's
-/// own, no framing, no sniffing, no caching, no referrer to another site.
+/// The response headers every admin page carries: no script and no style but
+/// the page's own files — `assets/app.js` and `assets/style.css`, nothing
+/// inline — no framing, no sniffing, no caching, no referrer to another site.
 fn pageHeaders(contentType: String) -> Map<String, String> {
   Map.of(
     MapEntry(key: "content-type", value: contentType),
     MapEntry(
       key: "content-security-policy",
-      value: "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      value: "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     ),
     MapEntry(key: "x-content-type-options", value: "nosniff"),
     MapEntry(key: "x-frame-options", value: "DENY"),
@@ -55,12 +56,10 @@ fn redirect(location: String) -> web.Response {
   )
 }
 
-/// The stylesheet, which goes in the page's `<style>` as written.
-fn css() -> Html {
-  html"body\{font:14px/1.45 system-ui,sans-serif;margin:0;color:#1d1d1f;background:#fafafa\}header\{background:#24292f;padding:.6em 1.2em\}header a\{color:#fff;text-decoration:none;font-weight:600\}main\{padding:1em 1.2em;max-width:72em\}table\{border-collapse:collapse;margin:.4em 0 1.2em;background:#fff\}td,th\{border:1px solid #d0d7de;padding:.25em .6em;text-align:left;vertical-align:top\}th\{background:#f3f4f6\}code,pre\{font:12px/1.4 ui-monospace,monospace\}pre\{background:#fff;border:1px solid #d0d7de;padding:.6em;white-space:pre-wrap;word-break:break-all;max-height:40em;overflow:auto\}form.inline\{display:inline\}button\{font:inherit;padding:.2em .7em\}.muted\{color:#6e7781\}.danger\{color:#b42318\}input\{font:inherit\}"
-}
-
-/// The page around `content`.
+/// The page around `content`. Its stylesheet and its script are files in
+/// `assets/`, which the host answers at `{base}/style.css` and
+/// `{base}/app.js` before this app runs. The script is what the markup's
+/// `data-confirm` and `data-copy` attributes do.
 fn layout(base: String, title: String, content: Html) -> Html {
   html"""
     <!doctype html>
@@ -69,7 +68,8 @@ fn layout(base: String, title: String, content: Html) -> Html {
       <meta charset=utf-8>
       <meta name=viewport content="width=device-width">
       <title>{title} · webhook lab</title>
-      <style>{css()}</style>
+      <link rel=stylesheet href="{base}/style.css">
+      <script src="{base}/app.js" defer></script>
     </head>
     <body>
       <header><a href="{base}/admin">webhook lab</a></header>
@@ -80,11 +80,11 @@ fn layout(base: String, title: String, content: Html) -> Html {
 }
 
 /// A form that POSTs to `action` with one button. A `confirm` that is not
-/// empty is asked first, and it is escaped like any other value: inside the
-/// attribute, a `'` in it is `&#39;`, which the browser reads back as a quote
-/// before the script sees it.
+/// empty is asked first: it is the button's `data-confirm`, which
+/// `assets/app.js` puts to `confirm()`, cancelling the click when the answer
+/// is no. It is an attribute value like any other, escaped as one.
 fn postButton(action: String, label: String, confirm: String) -> Html {
-  let check = html.only(confirm != "", html""" onclick="return confirm('{confirm}')"""")
+  let check = html.only(confirm != "", html""" data-confirm="{confirm}"""")
   html"""<form class=inline method=post action="{action}"><button{check}>{label}</button></form>"""
 }
 
@@ -175,7 +175,7 @@ fn endpointPage(
     None => None
   }
   let settings = html"""
-    <p>Receive URL: <code id=url>{url}</code> <button onclick="navigator.clipboard.writeText(document.getElementById('url').textContent)">Copy</button></p>
+    <p>Receive URL: <code id=url>{url}</code> <button data-copy=url>Copy</button></p>
     <p class=muted>Keeps the last {endpoint.retention} requests · stores at most {text.bytes(endpoint.maxBody)} of a body ·
     {if endpoint.mask { "masks secret headers" } else { "stores every header as sent" }} · created {text.isoTime(endpoint.created)}</p>
     """
@@ -247,7 +247,7 @@ fn eventPage(base: String, endpoint: Endpoint, event: Event, attempts: Array<Att
   } else {
     html"""
       <p>
-        <button onclick="navigator.clipboard.writeText(document.getElementById('body').textContent)">Copy body</button> \
+        <button data-copy=body>Copy body</button> \
         <a href="{at}?view=raw">raw</a> · <a href="{at}?view=json">JSON</a>
       </p>
       <pre id=body>{event.body}</pre>

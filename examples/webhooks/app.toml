@@ -52,3 +52,11 @@ fallback = "none"
 # host runs in; the app is refused at load without it.
 [secrets]
 admin = { env = "WEBHOOKS_ADMIN_TOKEN" }
+
+# `assets/` beside this file is served by the host itself, before any
+# request reaches the app — and before the `[access]` above: the admin pages'
+# stylesheet and script, which are public anyway. As files, the pages need
+# nothing inline and the CSP can say `style-src 'self'; script-src 'self'`.
+# A GET or HEAD for `/webhooks/app.js` is `assets/app.js`. The host's
+# defaults for it (8 MiB in all, `cache-control: no-cache`) are right for
+# two small files, so there is no `[assets]` section here.

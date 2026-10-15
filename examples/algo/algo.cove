@@ -15,7 +15,9 @@ use std.html.Html
 /// - `GET /anneal` is simulated annealing on a travelling-salesman problem:
 ///   two runs with their own settings, compared.
 /// - `part=result` answers the result alone, for the page's script.
-/// - `GET /app.js` is that script.
+///
+/// That script, `/app.js`, and the stylesheet, `/style.css`, are files in
+/// `assets/`: the host answers them before this app runs.
 ///
 /// The algorithms are Cove, run in this request's isolate: the host gives
 /// them a clock to time themselves by, and the limits in `app.toml`.
@@ -26,9 +28,6 @@ export fn handle(request: web.Request) -> web.Response {
   let get = request.method == "GET" || request.method == "HEAD"
   if first == "" && get {
     return htmlResponse(200, indexPage(base))
-  }
-  if first == "app.js" && get {
-    return web.Response(status: 200, headers: pageHeaders("text/javascript; charset=utf-8"), body: script())
   }
   if first == "matching" && (get || request.method == "POST") {
     return matchingPage(base, fieldsOf(request), request.method == "POST")

@@ -15,14 +15,15 @@ use std.html.Html
 // markup in it. A part of a page built in one function and put in another is
 // an `Html`, which is how the second knows to take it whole.
 
-/// The response headers every page carries: no script, no framing, no
+/// The response headers every page carries: no script, no style but the
+/// stylesheet the host answers from `assets/style.css`, no framing, no
 /// sniffing, no referrer to another site.
 fn pageHeaders(contentType: String) -> Map<String, String> {
   Map.of(
     MapEntry(key: "content-type", value: contentType),
     MapEntry(
       key: "content-security-policy",
-      value: "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      value: "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     ),
     MapEntry(key: "x-content-type-options", value: "nosniff"),
     MapEntry(key: "x-frame-options", value: "DENY"),
@@ -44,15 +45,8 @@ fn textResponse(status: Int, body: String) -> web.Response {
   web.Response(status: status, headers: pageHeaders("text/plain; charset=utf-8"), body: body)
 }
 
-/// The stylesheet. It is CSS rather than markup or text, and a `>`
-/// combinator in it has to arrive as `>`, so [`layout`] puts it into
-/// `<style>` through `html.markup`, the one way past escaping — taken here
-/// because this is a constant of the app's own.
-fn css() -> String {
-  "body\{font:14px/1.45 system-ui,sans-serif;margin:0;color:#0b0b0b;background:#fafafa\}header\{background:#24292f;padding:.6em 1.2em\}header a\{color:#fff;text-decoration:none;margin-right:1.2em\}header a.home\{font-weight:600\}main\{padding:1em 1.2em\}h1\{font-size:1.4em;margin:.2em 0 .6em\}h2\{font-size:1.1em;margin:1.4em 0 .4em\}table\{border-collapse:collapse;margin:.4em 0 1.2em;background:#fff\}td,th\{border:1px solid #d0d7de;padding:.25em .6em;text-align:left;vertical-align:top\}th\{background:#f3f4f6;font-weight:600\}td.num,th.num\{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums\}.range\{color:#52514e;font-size:.85em\}.absent\{color:#8c8b87\}.unit\{color:#52514e;font-weight:400;font-size:.85em\}code\{font:12px/1.4 ui-monospace,monospace\}.muted\{color:#52514e\}dl.meta\{display:grid;grid-template-columns:max-content auto;gap:.15em 1em;margin:.4em 0 1em\}dl.meta dt\{color:#52514e\}dl.meta dd\{margin:0\}.pair\{display:flex;gap:1.5em;flex-wrap:wrap\}.better\{color:#1a7f37\}.worse\{color:#b42318\}.warn\{background:#fff8c5\}.bad\{background:#ffebe9\}.note\{color:#52514e;font-size:.9em\}form.pick\{display:flex;flex-wrap:wrap;gap:.6em 1.2em;align-items:center;margin:.4em 0 1em\}form.pick select\{font:inherit;max-width:32em\}details.note ul\{margin:.3em 0\}ul.only\{columns:3;margin:.3em 0\}svg.chart\{max-width:100%;height:auto;display:block;border:1px solid #e1e0d9;border-radius:4px\}section.trend\{margin-bottom:1.6em\}details.table\{margin:.4em 0\}"
-}
-
-/// The page around `content`.
+/// The page around `content`. Its stylesheet is `assets/style.css`, which the
+/// host answers at `{base}/style.css` before this app runs.
 fn layout(base: String, title: String, content: Html) -> Html {
   html"""
     <!doctype html>
@@ -61,7 +55,7 @@ fn layout(base: String, title: String, content: Html) -> Html {
       <meta charset=utf-8>
       <meta name=viewport content="width=device-width">
       <title>{title} · bench ledger</title>
-      <style>{html.markup(css())}</style>
+      <link rel=stylesheet href="{base}/style.css">
     </head>
     <body>
       <header>
