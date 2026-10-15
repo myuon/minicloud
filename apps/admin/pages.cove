@@ -36,7 +36,7 @@ fn pageHeaders(contentType: String) -> Map<String, String> {
 /// and becomes the text of a body: everything before it is markup that every
 /// hole was checked into.
 fn htmlResponse(status: Int, page: Html) -> web.Response {
-  let body = html.render(page)
+  let body = page.render()
   web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: body)
 }
 
@@ -56,24 +56,10 @@ fn redirect(location: String) -> web.Response {
   )
 }
 
-/// `items` one after another with `between` between each two of them: what
-/// `" ".join` was for text, for markup. Nothing before the first and nothing
-/// after the last, and no items is no markup.
-fn joined(items: Array<Html>, between: Html) -> Html {
-  var out = Vector.of()
-  for item in items {
-    if out.length() > 0 {
-      out.push(between)
-    }
-    out.push(item)
-  }
-  html"{out.freeze()}"
-}
-
 /// `aria-current=page` on the link to where one is, with the space in front
 /// of it; nothing on any other.
 fn current(here: Bool) -> Html {
-  if here { html" aria-current=page" } else { html.empty() }
+  if here { html" aria-current=page" } else { html"" }
 }
 
 /// The navigation, with the page one is on marked.
@@ -86,9 +72,7 @@ fn nav(base: String, here: String) -> Html {
     MapEntry(key: "history", value: "/history"),
   )
     .freeze() {
-    out.push(html"""
-      <a href="{base}{item.value}"{current(item.key == here)}>{item.key}</a>
-      """)
+    out.push(html"""<a href="{base}{item.value}"{current(item.key == here)}>{item.key}</a>""")
   }
   html"<nav>{out.freeze()}</nav>"
 }
@@ -150,9 +134,7 @@ fn layout(base: String, here: String, title: String, content: Html) -> Html {
 }
 
 fn badge(state: String) -> Html {
-  html"""
-    <span class="state {state}">{state}</span>
-    """
+  html"""<span class="state {state}">{state}</span>"""
 }
 
 /// A list of names, or a dash.
@@ -164,7 +146,7 @@ fn names(items: Array<String>) -> Html {
   for item in items {
     out.push(html"<code>{item}</code>")
   }
-  joined(out.freeze(), html" ")
+  html.join(out.freeze(), html" ")
 }
 
 /// The grant, with what the admin added and what it took away marked.
@@ -172,22 +154,18 @@ fn grantList(app: host.App) -> Html {
   var out = Vector.of()
   for capability in app.granted {
     if app.grantAdded.contains(capability) {
-      out.push(html"""
-        <code class=added title="granted here, not in app.toml">+{capability}</code>
-        """)
+      out.push(html"""<code class=added title="granted here, not in app.toml">+{capability}</code>""")
     } else {
       out.push(html"<code>{capability}</code>")
     }
   }
   for capability in app.grantRemoved {
-    out.push(html"""
-      <code class=taken title="in app.toml, taken away here">{capability}</code>
-      """)
+    out.push(html"""<code class=taken title="in app.toml, taken away here">{capability}</code>""")
   }
   if out.length() == 0 {
     return html"<span class=muted>–</span>"
   }
-  joined(out.freeze(), html" ")
+  html.join(out.freeze(), html" ")
 }
 
 /// The first line of `reason`.
@@ -272,9 +250,7 @@ fn appTabs(base: String, app: host.App, here: String) -> Html {
   tabs.push(Tab(label: "Settings", path: "{at}/settings"))
   var out = Vector.of()
   for tab in tabs.freeze() {
-    out.push(html"""
-      <a href="{tab.path}"{current(tab.label == here)}>{tab.label}</a>
-      """)
+    out.push(html"""<a href="{tab.path}"{current(tab.label == here)}>{tab.label}</a>""")
   }
   html"<nav class=tabs>{out.freeze()}</nav>"
 }
@@ -293,7 +269,7 @@ fn appHead(base: String, app: host.App, here: String) -> Html {
   } else {
     html"<code>{app.version}</code> {app.tier}"
   }
-  let entry = if app.entry == "" { html.empty() } else { html" · entry <code>{app.entry}</code>" }
+  let entry = if app.entry == "" { html"" } else { html" · entry <code>{app.entry}</code>" }
   html"""
     <p class=crumb><a href="{base}/">apps</a> / {app.name}</p>\
     <h1>{app.name} {badge(app.state)}</h1>\
@@ -317,12 +293,13 @@ fn appHead(base: String, app: host.App, here: String) -> Html {
 
 /// One line of what is worth a look. `level` is `bad`, `warn`, `ok`, or ""
 /// for a line that is neither news nor reassurance; `what` is the line and
-/// `seen` the way to where it shows, for a line that has one. Both are
-/// markup, and every value of the host's in them was escaped by its hole.
+/// `seen` the way to where it shows, or `html""` for a line that has none.
+/// Both are markup, and every value of the host's in them was escaped by its
+/// hole.
 struct Look {
   level: String
   what: Html
-  seen: Option<Html>
+  seen: Html
 }
 
 /// How full a store has to be before this says so, in hundredths.
@@ -359,16 +336,14 @@ fn sentence(items: Array<Html>) -> Html {
     }
     at = at + 1
   }
-  let last = items.get(items.length() - 1).unwrapOr(html.empty())
-  html"{joined(first.freeze(), html", ")} and {last}"
+  let last = items.get(items.length() - 1).unwrapOr(html"")
+  html"{html.join(first.freeze(), html", ")} and {last}"
 }
 
 /// A link to `path` that says `label`: the way to where a line of
 /// [`worthALook`] shows.
 fn lookAt(path: String, label: String) -> Html {
-  html"""
-    <a href="{path}">{label}</a>
-    """
+  html"""<a href="{path}">{label}</a>"""
 }
 
 /// The lines, as a list. The worst are first because the caller put them
@@ -376,11 +351,8 @@ fn lookAt(path: String, label: String) -> Html {
 fn lookList(items: Array<Look>) -> Html {
   var out = Vector.of()
   for item in items {
-    let mark = if item.level == "" { html.empty() } else { html" class=\"is-{item.level}\"" }
-    let seen = match item.seen {
-      Some(link) => html"<span class=where>{link}</span>"
-      None => html.empty()
-    }
+    let mark = if item.level == "" { html"" } else { html""" class="is-{item.level}"""" }
+    let seen = if item.seen == html"" { html"" } else { html"<span class=where>{item.seen}</span>" }
     out.push(html"<li{mark}><span class=what>{item.what}</span>{seen}</li>")
   }
   html"<ul class=look>{out.freeze()}</ul>"
@@ -403,7 +375,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "bad",
         what: html"Refused, so nothing reaches it: {firstLine(app.reason)}",
-        seen: Some(lookAt("{at}/settings", "settings")),
+        seen: lookAt("{at}/settings", "settings"),
       ),
     )
   } else if app.state == "disabled" {
@@ -411,11 +383,11 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"Disabled: requests are answered 503 and its data is kept.",
-        seen: Some(lookAt("{at}/settings", "settings")),
+        seen: lookAt("{at}/settings", "settings"),
       ),
     )
   } else if app.state == "removed" {
-    warn.push(Look(level: "warn", what: html"Removed: the host has no version of it left.", seen: None))
+    warn.push(Look(level: "warn", what: html"Removed: the host has no version of it left.", seen: html""))
   }
   // The failures the host kept, newest first, and then how many more there
   // have been than it keeps.
@@ -429,7 +401,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             A request failed — <code>{failure.kind}</code> {failure.status}: \
             {firstLine(failure.message)}
             """,
-          seen: Some(html"{toLog} · {atTime(failure.atMs)}"),
+          seen: html"{toLog} · {atTime(failure.atMs)}",
         ),
       )
       shown = shown + 1
@@ -438,7 +410,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
   if app.errors > shown {
     let rest = app.errors - shown
     let counted = if rest == 1 { "1 more request has failed" } else { "{rest} more requests have failed" }
-    bad.push(Look(level: "bad", what: html"{counted} since the load.", seen: Some(toLog)))
+    bad.push(Look(level: "bad", what: html"{counted} since the load.", seen: toLog))
   }
   if app.errors == 0 {
     clean.push(html"no request failed")
@@ -451,7 +423,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           {app.rejected} requests were turned away: the app was at <code>max_in_flight</code> \
           or <code>max_queued</code>.
           """,
-        seen: Some(lookAt("{at}/settings", "limits")),
+        seen: lookAt("{at}/settings", "limits"),
       ),
     )
   } else {
@@ -473,7 +445,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             {counted} on <code>{queue.name}</code>: nothing delivers one again until somebody \
             puts it back.
             """,
-          seen: Some(lookAt("{at}/queues", "queues")),
+          seen: lookAt("{at}/queues", "queues"),
         ),
       )
     }
@@ -485,7 +457,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             {queue.held} held on <code>{queue.name}</code>: a delivery on lease, or a failed \
             one waiting for its retry.
             """,
-          seen: Some(lookAt("{at}/queues", "queues")),
+          seen: lookAt("{at}/queues", "queues"),
         ),
       )
     }
@@ -497,7 +469,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
             <code>{queue.name}</code> holds messages and the app's <code>[[queues]]</code> no \
             longer declares it: nothing will ever deliver them.
             """,
-          seen: Some(lookAt("{at}/queues", "queues")),
+          seen: lookAt("{at}/queues", "queues"),
         ),
       )
     }
@@ -517,7 +489,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           The <code>kv</code> store holds {text.bytes(app.kvBytes)} of the \
           {text.bytes(app.kvMaxBytes)} it may: a write past that is refused.
           """,
-        seen: Some(lookAt("{at}/kv", "data")),
+        seen: lookAt("{at}/kv", "data"),
       ),
     )
   }
@@ -530,7 +502,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           The <code>kv</code> store holds {app.kvKeys} of the {app.kvMaxKeys} keys it may: \
           a write past that is refused.
           """,
-        seen: Some(lookAt("{at}/kv", "data")),
+        seen: lookAt("{at}/kv", "data"),
       ),
     )
   }
@@ -543,7 +515,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           The <code>sql</code> store is {text.bytes(app.sqlBytes)} of the \
           {text.bytes(app.sqlMaxBytes)} it may be: a statement that writes past that is refused.
           """,
-        seen: Some(lookAt("{at}/sql", "sql")),
+        seen: lookAt("{at}/sql", "sql"),
       ),
     )
   }
@@ -562,7 +534,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
           {text.bytes(disk.bytes)}, past the {text.bytes(disk.budget)} this page reads. \
           The Code tab reads every file of it.
           """,
-        seen: Some(lookAt("{at}/code", "code")),
+        seen: lookAt("{at}/code", "code"),
       ),
     )
   } else if disk.differing > 0 {
@@ -575,7 +547,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"{counted}: a deploy staged and not switched to, or an edit made on the machine.",
-        seen: Some(lookAt("{at}/code", "code")),
+        seen: lookAt("{at}/code", "code"),
       ),
     )
   } else {
@@ -589,7 +561,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"Cloudflare Access is off for this app — {app.accessOff}.",
-        seen: Some(toLog),
+        seen: toLog,
       ),
     )
   }
@@ -602,7 +574,7 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
   }
   if clean.length() > 0 {
     let lead = if items.length() == 0 { "Nothing" } else { "Nothing else" }
-    items.push(Look(level: "ok", what: html"{lead}: {sentence(clean.freeze())}.", seen: None))
+    items.push(Look(level: "ok", what: html"{lead}: {sentence(clean.freeze())}.", seen: html""))
   }
   if items.length() == 0 {
     return html"""
@@ -655,9 +627,7 @@ fn nowStrip(app: host.App) -> Html {
 /// a dash for a store the host has not opened.
 fn storePair(label: String, value: String, level: String) -> Html {
   let mark = if level == "" { "" } else { " {level}" }
-  html"""
-    <span class=pair><span class=lbl>{label}</span><span class="v{mark}">{value}</span></span>
-    """
+  html"""<span class=pair><span class=lbl>{label}</span><span class="v{mark}">{value}</span></span>"""
 }
 
 /// A store, as a card that is the way into it. Every card has a foot: what
@@ -711,7 +681,7 @@ fn storeCards(base: String, app: host.App, queues: Array<host.Queue>) -> Html {
     let foot = if named.length() == 0 {
       html"No tables yet."
     } else {
-      joined(named.freeze(), html" · ")
+      html.join(named.freeze(), html" · ")
     }
     cards.push(storeCard("{at}/sql", "sql", "run a statement", pairs, foot))
   }
@@ -733,12 +703,12 @@ fn storeCards(base: String, app: host.App, queues: Array<host.Queue>) -> Html {
       {storePair("held", "{held}", if held > 0 { "is-warn" } else { "" })}\
       {storePair("dead", "{dead}", if dead > 0 { "is-bad" } else { "" })}
       """
-    let listed = joined(named.freeze(), html" · ")
+    let listed = html.join(named.freeze(), html" · ")
     let foot = if due + held + dead == 0 { html"Nothing waits on {listed}." } else { listed }
     cards.push(storeCard("{at}/queues", "queues", "see what waits", pairs, foot))
   }
   if cards.length() == 0 {
-    return html.empty()
+    return html""
   }
   html"<h2>Stores</h2><div class=stores>{cards.freeze()}</div>"
 }
@@ -773,7 +743,7 @@ fn appOverviewPage(base: String, app: host.App) -> Html {
   let at = appAt(base, app)
   let queues = if app.granted.contains("queue") { host.queues(app.name) } else { Vector.of().freeze() }
   let disk = host.codeDisk(app.name)
-  let reason = if app.reason == "" { html.empty() } else { html"<pre>{app.reason}</pre>" }
+  let reason = if app.reason == "" { html"" } else { html"<pre>{app.reason}</pre>" }
   let lines = host.logs(app.name, 5)
   let required = if app.requiredOpen {
     html"""
@@ -821,7 +791,7 @@ fn settingsPage(
   posted: Option<Map<String, String>>,
 ) -> Html {
   let at = appAt(base, app)
-  let reason = if app.reason == "" { html.empty() } else { html"<pre>{app.reason}</pre>" }
+  let reason = if app.reason == "" { html"" } else { html"<pre>{app.reason}</pre>" }
   let required = if app.requiredOpen {
     html"""
       {names(app.required)} \
@@ -845,9 +815,7 @@ fn settingsPage(
     This is where <code>{app.name}</code> is changed — every change is a re-check, and one \
     that does not load is not kept.
     """
-  let told = html"""
-    {recheck()} Each one is a line in the <a href="{base}/history">history</a>.
-    """
+  let told = html"""{recheck()} Each one is a line in the <a href="{base}/history">history</a>."""
   layout(
     base,
     "apps",
@@ -945,7 +913,7 @@ fn appCard(base: String, app: host.App, flags: Array<Flag>) -> Html {
     }
   }
   let tone = if worst == "" { "" } else { " {worst}" }
-  let mine = if app.isAdmin { html" <span class=muted>(this app)</span>" } else { html.empty() }
+  let mine = if app.isAdmin { html" <span class=muted>(this app)</span>" } else { html"" }
   let reached = if app.hosts.length() > 0 {
     names(app.hosts)
   } else {
@@ -959,15 +927,13 @@ fn appCard(base: String, app: host.App, flags: Array<Flag>) -> Html {
   // A refusal's reason is the one thing a list cannot send somebody to go
   // and read: it is why the app is not working at all.
   let why = if app.reason == "" {
-    html.empty()
+    html""
   } else {
     html"<div class=muted>{firstLine(app.reason)}</div>"
   }
   var pills = Vector.of()
   for flag in flags {
-    pills.push(html"""
-      <a class="flag {flag.level}" href="{flag.path}">{flag.text} →</a>
-      """)
+    pills.push(html"""<a class="flag {flag.level}" href="{flag.path}">{flag.text} →</a>""")
   }
   let said = if pills.length() == 0 {
     html"<span class=quiet>quiet</span>"
@@ -1030,7 +996,7 @@ fn appsPage(base: String, apps: Array<host.App>) -> Html {
     "{serving} serving, {", ".join(away.freeze())}"
   }
   let wants = if wanting == 0 {
-    html.empty()
+    html""
   } else if wanting == 1 {
     html" <b>1 wants a look.</b>"
   } else {
@@ -1084,7 +1050,7 @@ fn enableForm(at: String, app: host.App) -> Html {
       """
   }
   if app.state == "removed" {
-    return html.empty()
+    return html""
   }
   if app.state == "disabled" {
     return html"""
@@ -1118,7 +1084,7 @@ fn configureForm(
   posted: Option<Map<String, String>>,
 ) -> Html {
   if app.state == "removed" {
-    return html.empty()
+    return html""
   }
   var boxes = Vector.of()
   for capability in capabilities {
@@ -1129,7 +1095,7 @@ fn configureForm(
     let needed = if app.required.contains(capability) {
       html" <span class=note>the code uses it</span>"
     } else {
-      html.empty()
+      html""
     }
     if !app.isAdmin && capability == "admin" {
       // Only the admin app may hold it; the host refuses it to any other.
@@ -1144,7 +1110,7 @@ fn configureForm(
         </label>
         """)
     } else {
-      let mark = if checked { html" checked" } else { html.empty() }
+      let mark = if checked { html" checked" } else { html"" }
       boxes.push(html"""
         <label class=cap>\
           <input type=checkbox name="cap.{capability}"{mark}> <code>{capability}</code>{needed}\
@@ -1165,9 +1131,9 @@ fn configureForm(
     // The field holds the value; this says where the value came from, which
     // is the one thing the form cannot show by holding it.
     let changed = if app.limitsChanged.contains(limitKey(field.name)) {
-      html" <span class=added title=\"set here, not in app.toml\">(changed)</span>"
+      html""" <span class=added title="set here, not in app.toml">(changed)</span>"""
     } else {
-      html.empty()
+      html""
     }
     inputs.push(html"""
       <div class=field>\
@@ -1237,9 +1203,7 @@ fn appAt(base: String, app: host.App) -> String {
 fn atTime(millis: Int) -> Html {
   let stamp = text.isoTime(millis)
   let clock = stamp.sliceBytes(11, 23).unwrapOr(stamp)
-  html"""
-    <span title="{stamp}">{clock}</span>
-    """
+  html"""<span title="{stamp}">{clock}</span>"""
 }
 
 /// What a page about one thing of an app's says when the host could not
@@ -1326,19 +1290,15 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
   let first = text.urlEncode(prefix)
   var steps = Vector.of()
   if after != "" {
-    steps.push(html"""
-      <a href="{at}/kv?prefix={first}">← the first {size}</a>
-      """)
+    steps.push(html"""<a href="{at}/kv?prefix={first}">← the first {size}</a>""")
   }
   if more {
-    steps.push(html"""
-      <a href="{at}/kv?prefix={first}&amp;after={text.urlEncode(last)}">the next {size} →</a>
-      """)
+    steps.push(html"""<a href="{at}/kv?prefix={first}&amp;after={text.urlEncode(last)}">the next {size} →</a>""")
   }
   let paging = if steps.length() == 0 {
-    html.empty()
+    html""
   } else {
-    html"<p class=actions>{joined(steps.freeze(), html" ")}</p>"
+    html"<p class=actions>{html.join(steps.freeze(), html" ")}</p>"
   }
   let held = if app.kvKeys < 0 {
     "The host has not opened this store since it started."
@@ -1362,15 +1322,13 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
 /// carries, which the page says).
 fn storeKeyPage(base: String, app: host.App, key: String) -> Html {
   let at = appAt(base, app)
-  let back = html"""
-    <p class=actions><a href="{at}/kv">← every key</a></p>
-    """
+  let back = html"""<p class=actions><a href="{at}/kv">← every key</a></p>"""
   match host.kvValue(app.name, key) {
     Ok(entry) => {
       let cut = if entry.cut {
         html" <span class=muted>(cut: the whole value is {text.bytes(entry.bytes)})</span>"
       } else {
-        html.empty()
+        html""
       }
       let facts = html"""
         <div class="scroll narrow">\
@@ -1461,9 +1419,7 @@ fn onDisk(file: host.CodeFile) -> Html {
   if file.kind == "config" {
     // There is nothing for it to disagree with: the load keeps only what
     // it parsed to, so this file is the directory's.
-    return html"""
-      <span class=muted title="this file is read from the app's directory">read from there</span>
-      """
+    return html"""<span class=muted title="this file is read from the app's directory">read from there</span>"""
   }
   if file.onDisk == "same" {
     return html"<span class=muted>same</span>"
@@ -1475,9 +1431,7 @@ fn onDisk(file: host.CodeFile) -> Html {
       """
   }
   if file.onDisk == "missing" {
-    return html"""
-      <span class="state removed" title="the app's directory has no such file">missing</span>
-      """
+    return html"""<span class="state removed" title="the app's directory has no such file">missing</span>"""
   }
   html"""
     <span class="state removed" \
@@ -1535,7 +1489,7 @@ fn servedOn(app: host.App) -> Html {
 /// and still escaped. A directory is not a link: the host has no text of one
 /// to answer, so there is nothing for it to point at.
 fn codeRow(at: String, file: host.CodeFile) -> Html {
-  let disk = if file.kind == "dir" { html.empty() } else { onDisk(file) }
+  let disk = if file.kind == "dir" { html"" } else { onDisk(file) }
   let meta = html"""
     <span class=meta>\
       <span class=what>{codeKind(file)}</span>\
@@ -1647,12 +1601,10 @@ fn codePage(base: String, app: host.App, request: web.Request) -> Html {
       running.</p>
       """
   } else {
-    html"""
-      <div class="panel tree">{codeTree(at, shown.freeze())}</div>
-      """
+    html"""<div class="panel tree">{codeTree(at, shown.freeze())}</div>"""
   }
   let differs = if differing == 0 {
-    html.empty()
+    html""
   } else {
     // Text and not markup, so the `'` in it is escaped as a host's value is:
     // that is how this page has always written it.
@@ -1673,7 +1625,7 @@ fn codePage(base: String, app: host.App, request: web.Request) -> Html {
       show.</p>
       """
   } else {
-    html.empty()
+    html""
   }
   let summary = html"""
     What is running, not what is in the app's directory — and each file says how the two \
@@ -1783,16 +1735,14 @@ fn codeBody(file: host.CodeFile) -> Html {
 /// does — so where the host answers it is said instead.
 fn codeFilePage(base: String, app: host.App, name: String) -> Html {
   let at = appAt(base, app)
-  let back = html"""
-    <p class=actions><a href="{at}/code">← every file</a></p>
-    """
+  let back = html"""<p class=actions><a href="{at}/code">← every file</a></p>"""
   match host.codeFile(app.name, name) {
     Ok(file) => {
       let whole = text.bytes(file.bytes)
       let cut = if file.cut {
         html" <span class=muted>(cut at {text.bytes(codeTextBytes())}: the whole file is {whole})</span>"
       } else {
-        html.empty()
+        html""
       }
       let facts = html"""
         <div class="scroll narrow">\
@@ -1881,9 +1831,7 @@ fn sqlCell(value: Option<String>) -> Html {
   match value {
     Some(said) => {
       if said == "" {
-        html"""
-          <span class=muted title="the empty string, not NULL">empty</span>
-          """
+        html"""<span class=muted title="the empty string, not NULL">empty</span>"""
       } else {
         let preview = text.truncateBytes(said, sqlCellBytes())
         if preview.byteLength() < said.byteLength() {
@@ -1895,9 +1843,7 @@ fn sqlCell(value: Option<String>) -> Html {
         }
       }
     }
-    None => html"""
-      <span class=muted title="SQL NULL, not the empty string">NULL</span>
-      """
+    None => html"""<span class=muted title="SQL NULL, not the empty string">NULL</span>"""
   }
 }
 
@@ -1919,9 +1865,7 @@ fn sqlAnswerTable(answer: host.SqlAnswer) -> Html {
     var at = 0
     for value in row.values {
       let label = answer.columns.get(at).unwrapOr("")
-      cells.push(html"""
-        <td class="value block" data-label="{label}">{sqlCell(value)}</td>
-        """)
+      cells.push(html"""<td class="value block" data-label="{label}">{sqlCell(value)}</td>""")
       at = at + 1
     }
     rows.push(html"<tr>{cells.freeze()}</tr>")
@@ -1953,9 +1897,7 @@ fn sqlTablesTable(at: String, tables: Array<host.SqlTable>) -> Html {
     let count = if table.counted {
       html"{table.rows}"
     } else {
-      html"""
-        <span class=muted title="counting its rows ran out of the window's time">not counted</span>
-        """
+      html"""<span class=muted title="counting its rows ran out of the window's time">not counted</span>"""
     }
     // A name is an identifier in the statement's text, which is where
     // SQLite takes one: quoted, with a `"` in it doubled.
@@ -2046,13 +1988,9 @@ fn sqlPage(base: String, app: host.App, request: web.Request) -> Html {
   }
   let answered = match host.sqlQuery(app.name, statement) {
     Ok(answer) => html"<h2>Answer</h2>{sqlAnswerTable(answer)}"
-    Err(error) => html"""
-      <div class=problem><b>Not answered.</b> The host said:<pre>{error.message}</pre></div>
-      """
+    Err(error) => html"<div class=problem><b>Not answered.</b> The host said:<pre>{error.message}</pre></div>"
   }
-  let back = html"""
-    <p class=actions><a href="{at}/sql">← the tables</a></p>
-    """
+  let back = html"""<p class=actions><a href="{at}/sql">← the tables</a></p>"""
   layout(base, "apps", "{app.name} sql", html"{head}{sqlLead(app)}{form}{answered}{back}")
 }
 
@@ -2098,9 +2036,7 @@ fn queueDuration(millis: Int) -> String {
 /// says `held` rather than calling a backoff a lease.
 fn queueState(state: String) -> Html {
   if state == "due" {
-    return html"""
-      <span class="state serving" title="the next delivery tick may take it">due</span>
-      """
+    return html"""<span class="state serving" title="the next delivery tick may take it">due</span>"""
   }
   if state == "held" {
     return html"""
@@ -2120,9 +2056,7 @@ fn queueState(state: String) -> Html {
 /// markup on these pages, and every part of it is a `String` in a hole.
 fn queueBodyCell(message: host.QueueMessage) -> Html {
   if message.bytes == 0 {
-    return html"""
-      <span class=muted title="the message's body is empty">empty</span>
-      """
+    return html"""<span class=muted title="the message's body is empty">empty</span>"""
   }
   // The host cut at its own length; a row of a table wants less again.
   let preview = text.truncateBytes(message.body, queueBodyBytes())
@@ -2197,9 +2131,7 @@ fn queueTime(millis: Int) -> String {
 /// page has for a key, and for the same reason: a listing cuts a body, and
 /// a queue's body is a payload that is often longer than the cut.
 fn queueIdLink(at: String, message: host.QueueMessage) -> Html {
-  html"""
-    <a href="{at}/queues?message={message.id}"><code>{message.id}</code></a>
-    """
+  html"""<a href="{at}/queues?message={message.id}"><code>{message.id}</code></a>"""
 }
 
 /// The messages still on an app's queues, what is due first — the order the
@@ -2279,7 +2211,7 @@ fn queueDeadTable(at: String, messages: Array<host.QueueMessage>) -> Html {
 /// wrong answer here.
 fn queueMore(listed: Int, counted: Int, what: String) -> Html {
   if listed < queueListSize() {
-    return html.empty()
+    return html""
   }
   html"""
     <p class=muted>The first {listed} {what}, which is this window's limit; the counts above \
@@ -2374,9 +2306,7 @@ fn queueMessagePage(base: String, app: host.App, id: Int) -> Html {
   let at = appAt(base, app)
   let head = appHead(base, app, "Queues")
   let title = "{app.name} queues"
-  let back = html"""
-    <p class=actions><a href="{at}/queues">← every queue</a></p>
-    """
+  let back = html"""<p class=actions><a href="{at}/queues">← every queue</a></p>"""
   match host.queueMessage(app.name, id) {
     Ok(message) => {
       let carried = text.bytes(queueBodyChars())
@@ -2384,7 +2314,7 @@ fn queueMessagePage(base: String, app: host.App, id: Int) -> Html {
       let cut = if message.cut {
         html" <span class=muted>(cut at {carried} of text: the whole body is {whole})</span>"
       } else {
-        html.empty()
+        html""
       }
       // A dead letter's due time is the one it had when it was buried, so
       // showing it as "due" would be saying something untrue; the two rows
@@ -2434,7 +2364,7 @@ fn logTable(lines: Array<host.LogLine>, withApp: Bool = false) -> Html {
   }
   var rows = Vector.of()
   for line in lines {
-    let who = if withApp { html"<td class=app><code>{line.app}</code></td>" } else { html.empty() }
+    let who = if withApp { html"<td class=app><code>{line.app}</code></td>" } else { html"" }
     rows.push(html"""
       <tr>\
         <td class=at>{atTime(line.atMs)}</td>\
@@ -2480,12 +2410,10 @@ fn logSteps(at: String, n: Int) -> Html {
     if size == n {
       steps.push(html"<b>{size}</b>")
     } else {
-      steps.push(html"""
-        <a href="{at}?n={size}">{size}</a>
-        """)
+      steps.push(html"""<a href="{at}?n={size}">{size}</a>""")
     }
   }
-  html"<p class=actions><span class=muted>lines:</span> {joined(steps.freeze(), html" ")}</p>"
+  html"<p class=actions><span class=muted>lines:</span> {html.join(steps.freeze(), html" ")}</p>"
 }
 
 /// One app's log: the host's ring of its last lines, oldest first.
@@ -2550,12 +2478,10 @@ fn metricsSteps(at: String, over: String) -> Html {
     if name == over {
       steps.push(html"<b>{label}</b>")
     } else {
-      steps.push(html"""
-        <a href="{at}/metrics?over={name}">{label}</a>
-        """)
+      steps.push(html"""<a href="{at}/metrics?over={name}">{label}</a>""")
     }
   }
-  html"<p class=actions><span class=muted>window:</span> {joined(steps.freeze(), html" ")}</p>"
+  html"<p class=actions><span class=muted>window:</span> {html.join(steps.freeze(), html" ")}</p>"
 }
 
 /// Microseconds as milliseconds with one decimal, which is what the speed
@@ -2823,16 +2749,12 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
 /// two answers to one question.
 fn logChips(base: String, apps: Array<String>) -> Html {
   var out = Vector.of()
-  out.push(html"""
-    <a href="{base}/logs" aria-current=page>all apps</a>
-    """)
+  out.push(html"""<a href="{base}/logs" aria-current=page>all apps</a>""")
   if apps.length() > 0 {
     out.push(html"<span class=sep></span>")
   }
   for app in apps {
-    out.push(html"""
-      <a href="{base}/apps/{app}/logs">{app}</a>
-      """)
+    out.push(html"""<a href="{base}/apps/{app}/logs">{app}</a>""")
   }
   html"<nav class=pick><span class=lbl>app</span>{out.freeze()}</nav>"
 }
@@ -2891,11 +2813,9 @@ fn notice(request: web.Request) -> Html {
     ""
   }
   if said == "" {
-    return html.empty()
+    return html""
   }
-  html"""
-    <div class=notice>{said} <a href="{base(request)}/history">history</a></div>
-    """
+  html"""<div class=notice>{said} <a href="{base(request)}/history">history</a></div>"""
 }
 
 fn problemsNotice(problems: Array<String>) -> Html {
@@ -2925,9 +2845,7 @@ fn historyApp(base: String, app: String) -> Html {
   if app == "" {
     return html"<span class=muted>–</span>"
   }
-  html"""
-    <a href="{base}/apps/{app}">{app}</a>
-    """
+  html"""<a href="{base}/apps/{app}">{app}</a>"""
 }
 
 fn doneNotice(message: String) -> Html {
@@ -2942,13 +2860,9 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
   var rows = Vector.of()
   for secret in secrets {
     let state = if secret.set {
-      html"""
-        <span class="state serving">set</span>
-        """
+      html"""<span class="state serving">set</span>"""
     } else {
-      html"""
-        <span class="state refused">unset</span>
-        """
+      html"""<span class="state refused">unset</span>"""
     }
     let updated = if secret.set {
       html"{text.isoTime(secret.updatedMs)}"
@@ -2957,14 +2871,12 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
     }
     var users = Vector.of()
     for app in secret.apps {
-      users.push(html"""
-        <a href="{base}/apps/{app}"><code>{app}</code></a>
-        """)
+      users.push(html"""<a href="{base}/apps/{app}"><code>{app}</code></a>""")
     }
     let used = if users.length() == 0 {
       html"<span class=muted>none</span>"
     } else {
-      joined(users.freeze(), html" ")
+      html.join(users.freeze(), html" ")
     }
     let replace = html"""
       <form class=inline method=post action="{base}/secrets/set">\
@@ -2974,11 +2886,9 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
       </form>
       """
     let force = if secret.apps.length() > 0 {
-      html"""
-        <label><input type=checkbox name=force> even though apps use it (they are refused)</label>
-        """
+      html"<label><input type=checkbox name=force> even though apps use it (they are refused)</label>"
     } else {
-      html.empty()
+      html""
     }
     let delete = if secret.set {
       html"""
