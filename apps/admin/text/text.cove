@@ -1,32 +1,6 @@
 // Pure text helpers the admin app needs and the standard library does not
-// have: HTML escaping, form decoding, and calendar dates.
-
-/// `text` with `&`, `<`, `>`, `"` and `'` written as HTML entities, so that it
-/// reads as text inside an element or a quoted attribute, whatever it holds.
-export fn escapeHtml(text: String) -> String {
-  if !needsHtmlEscaping(text) {
-    return text
-  }
-  text.replace("&", "&amp;")
-    .replace("<", "&lt;")
-    .replace(">", "&gt;")
-    .replace("\"", "&quot;")
-    .replace("'", "&#39;")
-}
-
-/// Whether `text` holds a character `escapeHtml` would replace.
-fn needsHtmlEscaping(text: String) -> Bool {
-  let end = text.byteLength()
-  var at = 0
-  while at < end {
-    let byte = text.byteAt(at)
-    if byte == 38 || byte == 60 || byte == 62 || byte == 34 || byte == 39 {
-      return true
-    }
-    at += 1
-  }
-  false
-}
+// have: form decoding, query encoding, and calendar dates. HTML escaping is
+// not here: a page is an `html"…"` literal, and its holes escape by type.
 
 /// Decodes `application/x-www-form-urlencoded` text: `+` is a space and
 /// `%XX` a byte, and the bytes are read as UTF-8 (a byte sequence that is not

@@ -452,14 +452,14 @@ plain**, and the page says so: a colouring guessed from a name is a claim
 about the file, and none is no claim.
 
 **The host answers pieces and never HTML.** Every other value these pages
-show goes through the admin app's `escapeHtml`, and a file's own text is the
-value likeliest to *be* markup — a comment holding `<img src=y>`, a string
-literal holding `<script>`. A host that returned `<span>`s would split the
-escaping between the two sides of the boundary and leave the page unable to
-check its own. So `host.CodePiece` is a kind and a run of the file's bytes,
-the page puts every one of them through `h`, and the class names live in the
-page beside the stylesheet that colours them. The vocabulary is nine kinds
-for four languages — `plain`, `keyword`, `type`, `ident`, `string`,
+show is a `String` in a hole of an `html"…"` literal, which escapes it, and a
+file's own text is the value likeliest to *be* markup — a comment holding
+`<img src=y>`, a string literal holding `<script>`. A host that returned
+`<span>`s would split the escaping between the two sides of the boundary and
+leave the page unable to check its own. So `host.CodePiece` is a kind and a
+run of the file's bytes, the page puts every one of them in a hole as text,
+and the class names live in the page beside the stylesheet that colours
+them. The vocabulary is nine kinds for four languages — `plain`, `keyword`, `type`, `ident`, `string`,
 `number`, `comment`, `doc`, `punct` — because a kind is a *role*: a Cove
 type, a CSS selector and an XML tag all want the colour of "the name the
 language gives meaning to". A kind the page has no colour for is its text
@@ -542,7 +542,7 @@ is how to ask for the rest.
 the URL — the page can be linked, reloaded and gone back to — and there is
 nothing here for a form on another site to make happen, which is what the
 origin check on the app's POSTs is for. The statement goes back into the
-form's `value=` inside quotes, and `escapeHtml` writes `"` and `'` as
+form's `value=` inside quotes, and the hole it goes in writes `"` and `'` as
 entities as well as the angle brackets, so it stays the attribute's value
 whatever it holds. **Nothing typed here is kept**: the change history
 records who changed what, and a read is not a change.

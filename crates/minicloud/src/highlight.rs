@@ -165,8 +165,9 @@ fn kind_of(kind: &TokenKind) -> &'static str {
         // One token spans the whole literal, interpolations included, so
         // `"at {name}"` is one string. The lexer re-parses an interpolation
         // from the text inside; what is on the page is the literal as it was
-        // written.
-        TokenKind::Str(_) => STRING,
+        // written. A tagged literal, `html"…"`, is one token with its tag, and
+        // is a string the same way.
+        TokenKind::Str(_) | TokenKind::Tagged { .. } => STRING,
         TokenKind::DocComment(_) => DOC,
         TokenKind::Ident(name) => {
             if name.starts_with(|c: char| c.is_ascii_uppercase()) {
@@ -663,6 +664,28 @@ mod tests {
                 (COMMENT, "// why"),
                 (COMMENT, "// after"),
                 (COMMENT, "/* over\n   two */"),
+            ]
+        );
+    }
+
+    /// A `"""` literal is one string over its lines, and so is a tagged
+    /// one: `html"…"` is a single token with its tag, and colouring it as
+    /// the punctuation every other token falls to would paint a page's
+    /// markup the colour of a comma.
+    #[test]
+    fn a_tagged_and_a_triple_quoted_literal_are_each_one_string() {
+        let text = "let a = html\"<p>{n}</p>\"\nlet b = \"\"\"\n  x\n  \"\"\"\n";
+        let pieces = as_cove(text);
+        assert_eq!(whole(&pieces), text);
+        let strings: Vec<(&str, &str)> = kinds(&pieces)
+            .into_iter()
+            .filter(|(kind, _)| *kind == STRING)
+            .collect();
+        assert_eq!(
+            strings,
+            [
+                (STRING, "html\"<p>{n}</p>\""),
+                (STRING, "\"\"\"\n  x\n  \"\"\""),
             ]
         );
     }
