@@ -9,6 +9,8 @@ use compare.Change
 use stats
 use stats.Spread
 use text
+use std.html
+use std.html.Html
 
 // `GET /compare?a=…&b=…`: two sides, case by case. A side is a run ID, or
 // `commit:<sha>` for every run of a commit (where two of its runs measured
@@ -58,7 +60,7 @@ fn comparePage(request: web.Request) -> web.Response {
     if wantsJson {
       return problem(400, "a comparison needs `a` and `b`: run IDs, or `commit:<sha>`")
     }
-    return htmlResponse(200, compareLayout(at, summaries, aSpec, bSpec, metric, all, "", sideNote(at, summaries, aSpec)))
+    return htmlResponse(200, compareLayout(at, summaries, aSpec, bSpec, metric, all, html"", sideNote(at, summaries, aSpec)))
   }
   let a = match resolveSide(aSpec) {
     Ok(side) => side
@@ -94,7 +96,7 @@ fn compareRefused(
   let at = base(request)
   htmlResponse(
     404,
-    compareLayout(at, summaries, aSpec, bSpec, metric, all, "<p class=bad>{h(why)}</p>", ""),
+    compareLayout(at, summaries, aSpec, bSpec, metric, all, html"<p class=bad>{why}</p>", html""),
   )
 }
 
@@ -138,126 +140,152 @@ fn compareLayout(
   bSpec: String,
   metric: String,
   all: Bool,
-  content: String,
-  note: String,
-) -> String {
-  let form = "<form method=get action=\"{h(at)}/compare\" class=pick><label>A (baseline) {sideSelect("a", summaries, aSpec)}</label><label>B {sideSelect("b", summaries, bSpec)}</label><label>metric {metricSelect(metric)}</label><label><input type=checkbox name=all value=1{if all { " checked" } else { "" }}> include measurements that are not comparable</label><button>Compare</button></form>"
-  layout(at, "compare", "<h1>Compare</h1>{form}{note}{content}")
+  content: Html,
+  note: Html,
+) -> Html {
+  let form = html"""
+    <form method=get action="{at}/compare" class=pick>
+      <label>A (baseline) {sideSelect("a", summaries, aSpec)}</label>
+      <label>B {sideSelect("b", summaries, bSpec)}</label>
+      <label>metric {metricSelect(metric)}</label>
+      <label><input type=checkbox name=all value=1{html.only(all, html" checked")}> include measurements that are not comparable</label>
+      <button>Compare</button>
+    </form>
+    """
+  layout(at, "compare", html"<h1>Compare</h1>{form}{note}{content}")
 }
 
-fn sideSelect(name: String, summaries: Array<Summary>, chosen: String) -> String {
+fn sideSelect(name: String, summaries: Array<Summary>, chosen: String) -> Html {
   var runs = Vector.of()
   var commits = Vector.of()
   var seen = Vector.of()
   for summary in summaries {
-    let selected = if summary.id == chosen { " selected" } else { "" }
-    runs.push("<option value=\"{h(summary.id)}\"{selected}>{h(summary.id)} · {h(summary.commit)} · {when(summary.measuredAt)}</option>")
+    let selected = html.only(summary.id == chosen, html" selected")
+    runs.push(html"""<option value="{summary.id}"{selected}>{summary.id} · {summary.commit} · {when(summary.measuredAt)}</option>""")
     if !seen.contains(summary.commit) {
       seen.push(summary.commit)
       let spec = "commit:{summary.commit}"
-      let picked = if spec == chosen { " selected" } else { "" }
-      commits.push("<option value=\"{h(spec)}\"{picked}>{h(summary.commit)} · {h(summary.repository)}</option>")
+      let picked = html.only(spec == chosen, html" selected")
+      commits.push(html"""<option value="{spec}"{picked}>{summary.commit} · {summary.repository}</option>""")
     }
   }
-  "<select name={name}><option value=\"\">choose…</option><optgroup label=runs>{"".join(runs.freeze())}</optgroup><optgroup label=\"commits (all their runs)\">{"".join(commits.freeze())}</optgroup></select>"
+  html"""
+    <select name={name}>
+      <option value="">choose…</option>
+      <optgroup label=runs>{runs.freeze()}</optgroup>
+      <optgroup label="commits (all their runs)">{commits.freeze()}</optgroup>
+    </select>
+    """
 }
 
-fn metricSelect(chosen: String) -> String {
+fn metricSelect(chosen: String) -> Html {
   var options = Vector.of()
-  options.push("<option value=\"\">all</option>")
+  options.push(html"""<option value="">all</option>""")
   for name in metricNamesStored() {
-    let selected = if name == chosen { " selected" } else { "" }
-    options.push("<option value=\"{h(name)}\"{selected}>{h(name)}</option>")
+    let selected = html.only(name == chosen, html" selected")
+    options.push(html"""<option value="{name}"{selected}>{name}</option>""")
   }
-  "<select name=metric>{"".join(options.freeze())}</select>"
+  html"<select name=metric>{options.freeze()}</select>"
 }
 
 /// The runs measured on the same machine under the same conditions as the
 /// run `aSpec`: the ones a comparison with it means something against.
-fn sideNote(at: String, summaries: Array<Summary>, aSpec: String) -> String {
+fn sideNote(at: String, summaries: Array<Summary>, aSpec: String) -> Html {
   let a = match loadRun(aSpec) {
     Some(run) => run
-    None => return ""
+    None => return html""
   }
   var same = Vector.of()
   var other = 0
   for summary in summaries {
     if summary.id != a.id {
       if summary.environment == a.environment && summary.conditions == a.conditions {
-        let warn = if summary.toolchain == a.toolchain { "" } else { " <span class=muted title=\"another toolchain\">(toolchain differs)</span>" }
-        same.push("<li><a href=\"{h(at)}/compare?a={h(text.urlEncode(a.id))}&amp;b={h(text.urlEncode(summary.id))}\">{h(summary.id)}</a> <code>{h(summary.commit)}</code> {when(summary.measuredAt)}{warn}</li>")
+        let warn = html.only(summary.toolchain != a.toolchain, html""" <span class=muted title="another toolchain">(toolchain differs)</span>""")
+        same.push(
+          html"""<li><a href="{at}/compare?a={text.urlEncode(a.id)}&amp;b={text.urlEncode(summary.id)}">{summary.id}</a> <code>{summary.commit}</code> {when(summary.measuredAt)}{warn}</li>""",
+        )
       } else {
         other += 1
       }
     }
   }
   if same.length() == 0 {
-    return "<p class=note>No other run was measured on the same machine under the same conditions as <code>{h(a.id)}</code>.</p>"
+    return html"<p class=note>No other run was measured on the same machine under the same conditions as <code>{a.id}</code>.</p>"
   }
-  "<details class=note{if aSpec != "" { "" } else { " open" }}><summary>{same.length()} runs measured on the same machine under the same conditions as <code>{h(a.id)}</code> ({other} others are not comparable with it)</summary><ul>{"".join(same.freeze())}</ul></details>"
+  html"""
+    <details class=note{html.only(aSpec == "", html" open")}>
+      <summary>{same.length()} runs measured on the same machine under the same conditions as <code>{a.id}</code> ({other} others are not comparable with it)</summary>
+      <ul>{same.freeze()}</ul>
+    </details>
+    """
 }
 
 /// A spread as a cell: the median, and the range with the count under it.
-fn spreadCell(spread: Option<Spread>) -> String {
+fn spreadCell(spread: Option<Spread>) -> Html {
   match spread {
     Some(one) => {
-      let range = if one.count > 1 { "<br><span class=range>{stats.show(one.least)}–{stats.show(one.most)} ×{one.count}</span>" } else { "<br><span class=range>×1</span>" }
-      "<td class=num>{stats.show(one.median)}{range}</td>"
+      let range = if one.count > 1 {
+        html"<br><span class=range>{stats.show(one.least)}–{stats.show(one.most)} ×{one.count}</span>"
+      } else {
+        html"<br><span class=range>×1</span>"
+      }
+      html"<td class=num>{stats.show(one.median)}{range}</td>"
     }
-    None => "<td class=\"num absent\" title=\"not measured\">–</td>"
+    None => html"""<td class="num absent" title="not measured">–</td>"""
   }
 }
 
 /// The difference cells: absolute, then relative, coloured by which way is
 /// better unless the two ranges overlap.
-fn differenceCells(metric: MetricRow) -> String {
+fn differenceCells(metric: MetricRow) -> Html {
   match metric.delta {
     Some(delta) => {
       let sign = if delta > 0.0 { "+" } else { "" }
       let way = compare.direction(metric)
       let class = if metric.overlap || way == 0 { "num muted" } else if way > 0 { "num better" } else { "num worse" }
-      let note = if metric.overlap { " title=\"within the repetitions' spread\"" } else { "" }
+      let note = html.only(metric.overlap, html""" title="within the repetitions' spread"""")
       let relative = match metric.ratio {
         Some(ratio) => stats.percent(ratio)
         None => "–"
       }
       let mark = if metric.overlap { " ~" } else if way > 0 { " ▲" } else if way < 0 { " ▼" } else { "" }
-      "<td class=\"{class}\"{note}>{sign}{stats.show(delta)}</td><td class=\"{class}\"{note}>{relative}{mark}</td>"
+      html"""<td class="{class}"{note}>{sign}{stats.show(delta)}</td><td class="{class}"{note}>{relative}{mark}</td>"""
     }
     None => {
       let why = if metric.a.isNone() { "not measured in A" } else { "not measured in B" }
-      "<td class=\"num absent\" colspan=2>{why}</td>"
+      html"""<td class="num absent" colspan=2>{why}</td>"""
     }
   }
 }
 
-fn verdictCell(row: Row) -> String {
+/// The conditions cell of `row`, spanning the `span` rows of its metrics.
+fn verdictCell(row: Row, span: Int) -> Html {
   if row.a.isNone() {
-    return "<td class=muted>only in B</td>"
+    return html"<td rowspan={span} class=muted>only in B</td>"
   }
   if row.b.isNone() {
-    return "<td class=muted>only in A</td>"
+    return html"<td rowspan={span} class=muted>only in A</td>"
   }
-  let reasons = h("; ".join(row.verdict.reasons))
+  let reasons = "; ".join(row.verdict.reasons)
   if row.verdict.level == "no" {
-    "<td class=bad title=\"{reasons}\">not comparable: {reasons}</td>"
+    html"""<td rowspan={span} class=bad title="{reasons}">not comparable: {reasons}</td>"""
   } else if row.verdict.level == "warn" {
-    "<td class=warn title=\"{reasons}\">⚠ {reasons}</td>"
+    html"""<td rowspan={span} class=warn title="{reasons}">⚠ {reasons}</td>"""
   } else {
-    "<td class=muted>comparable</td>"
+    html"<td rowspan={span} class=muted>comparable</td>"
   }
 }
 
-fn rowClass(row: Row) -> String {
-  if row.verdict.level == "no" { " class=bad" } else if row.verdict.level == "warn" { " class=warn" } else { "" }
+fn rowClass(row: Row) -> Html {
+  if row.verdict.level == "no" { html" class=bad" } else if row.verdict.level == "warn" { html" class=warn" } else { html"" }
 }
 
-fn caseCells(row: Row) -> String {
-  "<td>{h(row.case)}</td><td>{h(row.input)}</td><td>{h(row.backend)}</td>"
+fn caseCells(row: Row) -> Html {
+  html"<td>{row.case}</td><td>{row.input}</td><td>{row.backend}</td>"
 }
 
-fn metricHead(metric: MetricRow) -> String {
-  "{h(metric.name)} <span class=unit>{h(metric.unit)}</span>"
+fn metricHead(metric: MetricRow) -> Html {
+  html"{metric.name} <span class=unit>{metric.unit}</span>"
 }
 
 /// The comparison under the form.
@@ -269,7 +297,7 @@ fn comparison(
   largest: Array<Change>,
   metric: String,
   all: Bool,
-) -> String {
+) -> Html {
   var compared = 0
   var refused = 0
   var onlyA = 0
@@ -286,21 +314,51 @@ fn comparison(
     }
   }
   let toggle = if refused == 0 {
-    ""
+    html""
   } else if all {
-    " (shown, marked)"
+    html" (shown, marked)"
   } else {
-    " (hidden: <a href=\"{h(at)}/compare?a={h(text.urlEncode(a.spec))}&amp;b={h(text.urlEncode(b.spec))}&amp;metric={h(text.urlEncode(metric))}&amp;all=1\">show them</a>)"
+    html""" (hidden: <a href="{at}/compare?a={text.urlEncode(a.spec)}&amp;b={text.urlEncode(b.spec)}&amp;metric={text.urlEncode(metric)}&amp;all=1">show them</a>)"""
   }
-  let counts = "<p><b>A</b> {sideLink(at, a)} · <b>B</b> {sideLink(at, b)}</p><p class=note>{compared} cases compared · {refused} not comparable{toggle} · {onlyA} only in A · {onlyB} only in B. Medians in canonical units, the least–most and the repetitions under them; differences are B − A, and ▲ / ▼ mark a change for the better or the worse when the two ranges do not overlap (~ when they do).</p>"
+  let counts = html"""
+    <p><b>A</b> {sideLink(at, a)} · <b>B</b> {sideLink(at, b)}</p>
+    <p class=note>{compared} cases compared · {refused} not comparable{toggle} · {onlyA} only in A · {onlyB} only in B.
+    Medians in canonical units, the least–most and the repetitions under them; differences are B − A,
+    and ▲ / ▼ mark a change for the better or the worse when the two ranges do not overlap (~ when they do).</p>
+    """
   var top = Vector.of()
   for change in largest {
-    top.push("<tr{rowClass(change.row)}>{caseCells(change.row)}<td>{metricHead(change.metric)}</td>{spreadCell(change.metric.a)}{spreadCell(change.metric.b)}{differenceCells(change.metric)}</tr>")
+    top.push(
+      html"""
+        <tr{rowClass(change.row)}>
+          {caseCells(change.row)}
+          <td>{metricHead(change.metric)}</td>
+          {spreadCell(change.metric.a)}
+          {spreadCell(change.metric.b)}
+          {differenceCells(change.metric)}
+        </tr>
+        """,
+    )
   }
   let largestTable = if top.length() == 0 {
-    "<p class=muted>No measurement both sides made can be compared.</p>"
+    html"<p class=muted>No measurement both sides made can be compared.</p>"
   } else {
-    "<h2>Largest differences</h2><table><tr><th>case</th><th>input</th><th>backend</th><th>metric</th><th class=num>A</th><th class=num>B</th><th class=num>B − A</th><th class=num>relative</th></tr>{"".join(top.freeze())}</table>"
+    html"""
+      <h2>Largest differences</h2>
+      <table>
+        <tr>
+          <th>case</th>
+          <th>input</th>
+          <th>backend</th>
+          <th>metric</th>
+          <th class=num>A</th>
+          <th class=num>B</th>
+          <th class=num>B − A</th>
+          <th class=num>relative</th>
+        </tr>
+        {top.freeze()}
+      </table>
+      """
   }
   var body = Vector.of()
   var onlyHere = Vector.of()
@@ -316,35 +374,74 @@ fn comparison(
         var first = true
         let span = row.metrics.length()
         for one in row.metrics {
-          let lead = if first { "<td rowspan={span}>{h(row.case)}</td><td rowspan={span}>{h(row.input)}</td><td rowspan={span}>{h(row.backend)}</td>" } else { "" }
-          let tail = if first { verdictCell(row).replace("<td", "<td rowspan={span}") } else { "" }
-          body.push("<tr{rowClass(row)}>{lead}<td>{metricHead(one)}</td>{spreadCell(one.a)}{spreadCell(one.b)}{differenceCells(one)}{tail}</tr>")
+          let lead = if first {
+            html"<td rowspan={span}>{row.case}</td><td rowspan={span}>{row.input}</td><td rowspan={span}>{row.backend}</td>"
+          } else {
+            html""
+          }
+          let tail = if first { verdictCell(row, span) } else { html"" }
+          body.push(
+            html"""
+              <tr{rowClass(row)}>
+                {lead}
+                <td>{metricHead(one)}</td>
+                {spreadCell(one.a)}
+                {spreadCell(one.b)}
+                {differenceCells(one)}
+                {tail}
+              </tr>
+              """,
+          )
           first = false
         }
       }
       if pass == 0 && !both {
-        let name = "<li>{h(row.case)} <span class=muted>{h(row.input)} · {h(row.backend)}</span></li>"
+        let name = html"<li>{row.case} <span class=muted>{row.input} · {row.backend}</span></li>"
         if row.a.isSome() { onlyHere.push(name) } else { onlyThere.push(name) }
       }
     }
   }
-  let full = if body.length() == 0 { "" } else { "<h2>Every case both measured</h2><table><tr><th>case</th><th>input</th><th>backend</th><th>metric</th><th class=num>A</th><th class=num>B</th><th class=num>B − A</th><th class=num>relative</th><th>conditions</th></tr>{"".join(body.freeze())}</table>" }
-  let lonely = "{onlyList("Only in A", onlyHere.freeze())}{onlyList("Only in B", onlyThere.freeze())}"
-  "{counts}{largestTable}{full}{lonely}"
+  let full = html.only(
+    body.length() > 0,
+    html"""
+      <h2>Every case both measured</h2>
+      <table>
+        <tr>
+          <th>case</th>
+          <th>input</th>
+          <th>backend</th>
+          <th>metric</th>
+          <th class=num>A</th>
+          <th class=num>B</th>
+          <th class=num>B − A</th>
+          <th class=num>relative</th>
+          <th>conditions</th>
+        </tr>
+        {body.freeze()}
+      </table>
+      """,
+  )
+  html"""
+    {counts}
+    {largestTable}
+    {full}
+    {onlyList("Only in A", onlyHere.freeze())}
+    {onlyList("Only in B", onlyThere.freeze())}
+    """
 }
 
-fn onlyList(title: String, items: Array<String>) -> String {
+fn onlyList(title: String, items: Array<Html>) -> Html {
   if items.length() == 0 {
-    return ""
+    return html""
   }
-  "<h2>{h(title)} ({items.length()})</h2><ul class=only>{"".join(items)}</ul>"
+  html"<h2>{title} ({items.length()})</h2><ul class=only>{items}</ul>"
 }
 
-fn sideLink(at: String, side: Side) -> String {
+fn sideLink(at: String, side: Side) -> Html {
   if side.runs.length() == 1 && !side.spec.startsWith("commit:") {
-    "<a href=\"{h(at)}/runs/{h(side.spec)}\">{h(side.label)}</a>"
+    html"""<a href="{at}/runs/{side.spec}">{side.label}</a>"""
   } else {
-    h(side.label)
+    html"{side.label}"
   }
 }
 

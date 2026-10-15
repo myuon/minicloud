@@ -15,10 +15,10 @@ test fn ticksAreRoundNumbersCoveringTheRange() -> Result<Unit, Error> {
 test fn aGapBreaksTheLine() -> Result<Unit, Error> {
   let point = Some(Point(median: 1.0, least: 1.0, most: 1.0, count: 1, tip: "t", href: "/r"))
   let ticks = [Tick(label: "a", sub: "", id: "a"), Tick(label: "b", sub: "", id: "b"), Tick(label: "c", sub: "", id: "c")]
-  let gapped = trend("p99", "ms", ticks, [Series(name: "vm", points: [point, None, point])])
+  let gapped = trend("p99", "ms", ticks, [Series(name: "vm", points: [point, None, point])]).render()
   assert(!gapped.contains("class=line"))?
   assert(!gapped.contains("class=legend"))?
-  let joined = trend("p99", "ms", ticks, [Series(name: "vm", points: [point, point, None])])
+  let joined = trend("p99", "ms", ticks, [Series(name: "vm", points: [point, point, None])]).render()
   assert(joined.contains("class=line"))?
   Ok(())
 }

@@ -1,4 +1,6 @@
 use web
+use std.html
+use std.html.Html
 
 /// The algorithm playground: an algorithm, an input to run it on, and a
 /// page that shows what it found, what it cost and why it stopped.
@@ -40,7 +42,37 @@ export fn handle(request: web.Request) -> web.Response {
   textResponse(404, "no such page\n")
 }
 
-fn indexPage(base: String) -> String {
-  let content = "<h1>Algorithm playground</h1><p>Algorithms written in Cove, run in a fresh isolate for each request on minicloud, beside the other apps. Each page takes an input — or an example, some generated from a seed — runs the algorithm under this app's limits, and shows the answer, a check of it, what the run cost and, if a limit stopped it, which.</p><table><tr><th>algorithm</th><th>what it shows</th></tr><tr><td><a href=\"{h(base)}/matching\">Maximum bipartite matching</a></td><td>Hopcroft–Karp against the simple augmenting-path algorithm; the matching drawn over the graph; König's vertex cover as the proof that no larger matching exists</td></tr><tr><td><a href=\"{h(base)}/sat\">Satisfiability (SAT)</a></td><td>DPLL with unit propagation on DIMACS CNF, random 3-SAT near the threshold, the pigeonhole principle and a sudoku; every satisfying assignment checked clause by clause</td></tr><tr><td><a href=\"{h(base)}/anneal\">Simulated annealing</a></td><td>a travelling-salesman tour through seeded random points by 2-opt moves; two runs with their own seed, iterations and temperature schedule, their trajectories on one chart; reproducible from the seeds</td></tr></table><p class=note>Limits per request (<code>examples/algo/app.toml</code>): a wall-clock deadline, a heap, the request and response sizes, and at most a few runs in flight at once. A heavy run yields its worker every couple of milliseconds while other requests wait, so the other apps on the host keep answering.</p>"
+fn indexPage(base: String) -> Html {
+  let content = html"""
+    <h1>Algorithm playground</h1>
+    <p>Algorithms written in Cove, run in a fresh isolate for each request on minicloud, beside
+      the other apps. Each page takes an input — or an example, some generated from a seed —
+      runs the algorithm under this app's limits, and shows the answer, a check of it, what the
+      run cost and, if a limit stopped it, which.</p>
+    <table>
+      <tr><th>algorithm</th><th>what it shows</th></tr>
+      <tr>
+        <td><a href="{base}/matching">Maximum bipartite matching</a></td>
+        <td>Hopcroft–Karp against the simple augmenting-path algorithm; the matching drawn over
+          the graph; König's vertex cover as the proof that no larger matching exists</td>
+      </tr>
+      <tr>
+        <td><a href="{base}/sat">Satisfiability (SAT)</a></td>
+        <td>DPLL with unit propagation on DIMACS CNF, random 3-SAT near the threshold, the
+          pigeonhole principle and a sudoku; every satisfying assignment checked clause by
+          clause</td>
+      </tr>
+      <tr>
+        <td><a href="{base}/anneal">Simulated annealing</a></td>
+        <td>a travelling-salesman tour through seeded random points by 2-opt moves; two runs with
+          their own seed, iterations and temperature schedule, their trajectories on one chart;
+          reproducible from the seeds</td>
+      </tr>
+    </table>
+    <p class=note>Limits per request (<code>examples/algo/app.toml</code>): a wall-clock deadline,
+      a heap, the request and response sizes, and at most a few runs in flight at once. A heavy
+      run yields its worker every couple of milliseconds while other requests wait, so the other
+      apps on the host keep answering.</p>
+    """
   layout(base, "algorithms", "", content)
 }

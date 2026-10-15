@@ -1,15 +1,16 @@
 use web
-use draw
 use text
+use std.html
+use std.html.Html
 
 // The page around every algorithm: the same header, the same form on the
 // left and the result under it, the same summary of what the run cost and
-// why it stopped. Every value that came from the request goes through `h`
-// before it is part of a page.
-
-fn h(value: String) -> String {
-  draw.h(value)
-}
+// why it stopped. Every page is an `html"…"` literal, and a hole in one is
+// escaped unless its type is `Html`: every value that came from the request
+// is a `String`, so it is text on the page whatever it holds. A part built in
+// one function and put in another is an `Html`, which is how the second knows
+// to take it whole. The script (`/app.js`) and the style are not markup and
+// stay `String`s.
 
 /// The response headers every page carries: the page's own script and
 /// nothing else, no framing, no sniffing, no referrer.
@@ -27,8 +28,10 @@ fn pageHeaders(contentType: String) -> Map<String, String> {
   )
 }
 
-fn htmlResponse(status: Int, page: String) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: page)
+/// A page as the answer: the one place a page stops being `Html` and becomes
+/// the text of a body.
+fn htmlResponse(status: Int, page: Html) -> web.Response {
+  web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: page.render())
 }
 
 fn textResponse(status: Int, body: String) -> web.Response {
@@ -46,32 +49,65 @@ fn fieldsOf(request: web.Request) -> Map<String, String> {
   fields
 }
 
+/// The style, as CSS. A stylesheet is not text to be escaped — a child
+/// combinator, `>`, has to arrive as `>` — so the page puts it in through
+/// `html.markup`, the one way past escaping, which this constant is the
+/// reason to take.
 fn css() -> String {
   "body\{font:14px/1.45 system-ui,sans-serif;margin:0;color:#0b0b0b;background:#fafafa\}header\{background:#24292f;padding:.6em 1.2em\}header a\{color:#fff;text-decoration:none;margin-right:1.2em\}header a.home\{font-weight:600\}header a.here\{text-decoration:underline\}main\{padding:1em 1.2em;max-width:72em\}h1\{font-size:1.4em;margin:.2em 0 .4em\}h2\{font-size:1.1em;margin:1.2em 0 .4em\}table\{border-collapse:collapse;margin:.4em 0 1em;background:#fff\}td,th\{border:1px solid #d0d7de;padding:.2em .6em;text-align:left;vertical-align:top\}th\{background:#f3f4f6;font-weight:600\}td.num,th.num\{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums\}code,textarea,pre\{font:12px/1.4 ui-monospace,monospace\}.muted,.note\{color:#52514e\}.note\{font-size:.9em\}form.run\{display:grid;grid-template-columns:minmax(18em,34em) auto;gap:.6em 1.6em;align-items:start;margin:.4em 0 1em\}form.run textarea\{width:100%;height:16em;box-sizing:border-box\}form.run fieldset\{border:1px solid #d0d7de;margin:0 0 .6em;padding:.4em .8em\}form.run label\{display:block;margin:.15em 0\}form.run input[type=number]\{width:7em\}.buttons\{display:flex;gap:.6em;margin-top:.6em\}button\{font:inherit;padding:.3em 1em\}ul.examples\{margin:.2em 0;padding-left:1.2em\}dl.meta\{display:grid;grid-template-columns:max-content auto;gap:.15em 1em;margin:.4em 0 1em\}dl.meta dt\{color:#52514e\}dl.meta dd\{margin:0\}.stop\{border-left:4px solid #b42318;background:#ffebe9;padding:.5em .8em;margin:.6em 0\}.stop.limit\{border-color:#eda100;background:#fff8c5\}.ok\{border-left:4px solid #1a7f37;background:#eef8f0;padding:.5em .8em;margin:.6em 0\}.running\{border-left:4px solid #2a78d6;background:#eef4fc;padding:.5em .8em;margin:.6em 0\}svg.chart\{max-width:100%;height:auto;display:block;border:1px solid #e1e0d9;border-radius:4px;margin:.4em 0\}details.table\{margin:.4em 0\}.pair\{display:flex;gap:1.5em;flex-wrap:wrap\}.host\{color:#52514e\}pre.diag\{white-space:pre-wrap;background:#fff;border:1px solid #d0d7de;padding:.5em\}"
 }
 
 /// The page around `content`; `here` is the nav entry to mark.
-fn layout(base: String, title: String, here: String, content: String) -> String {
+fn layout(base: String, title: String, here: String, content: Html) -> Html {
   var nav = Vector.of()
   for entry in [["matching", "Matching"], ["sat", "SAT"], ["anneal", "Annealing"]] {
     let path = entry.get(0).unwrapOr("")
     let name = entry.get(1).unwrapOr("")
-    let mark = if path == here { " class=here" } else { "" }
-    nav.push("<a{mark} href=\"{h(base)}/{path}\">{name}</a>")
+    let mark = html.only(path == here, html" class=here")
+    nav.push(html"""<a{mark} href="{base}/{path}">{name}</a>""")
   }
-  "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>{h(title)} · algorithm playground</title><style>{css()}</style><script src=\"{h(base)}/app.js\" defer></script></head><body><header><a class=home href=\"{h(base)}/\">algorithm playground</a>{"".join(nav.freeze())}</header><main>{content}</main></body></html>"
+  html"""
+    <!doctype html>
+    <html lang=en>
+    <head>
+      <meta charset=utf-8>
+      <meta name=viewport content="width=device-width">
+      <title>{title} · algorithm playground</title>
+      <style>{html.markup(css())}</style>
+      <script src="{base}/app.js" defer></script>
+    </head>
+    <body>
+      <header>
+        <a class=home href="{base}/">algorithm playground</a>
+        {nav.freeze()}
+      </header>
+      <main>{content}</main>
+    </body>
+    </html>
+    """
 }
 
-/// The summary every result starts with: what was computed, `rows` of
-/// `(name, value)` in a definition list, and the host's meter, which the
-/// page's script fills in from the response headers.
-fn summary(rows: Array<Array<String>>) -> String {
-  var items = Vector.of()
-  for row in rows {
-    items.push("<dt>{h(row.get(0).unwrapOr(""))}</dt><dd>{row.get(1).unwrapOr("")}</dd>")
-  }
-  items.push("<dt>host meter</dt><dd class=host data-host>run from the form (with scripts on) to read the host's count of this run's instructions and yields</dd>")
-  "<dl class=meta>{"".join(items.freeze())}</dl>"
+/// One line of a result's summary: what it is, and what was found, as markup.
+struct Fact {
+  name: String
+  value: Html
+}
+
+/// The summary every result starts with: what was computed, `facts` in a
+/// definition list, and the host's meter, which the page's script fills in
+/// from the response headers.
+fn summary(facts: Array<Fact>) -> Html {
+  let items = facts.map(fn(fact) {
+    html"<dt>{fact.name}</dt><dd>{fact.value}</dd>"
+  })
+  html"""
+    <dl class=meta>
+      {items}
+      <dt>host meter</dt>
+      <dd class=host data-host>run from the form (with scripts on) to read the host's count
+        of this run's instructions and yields</dd>
+    </dl>
+    """
 }
 
 /// Microseconds as the pages show them.
@@ -106,24 +142,28 @@ fn grouped(value: Int) -> String {
 
 /// The run's result, the part the page's script asks for (`part=result`)
 /// and puts in place of the last.
-fn resultSection(content: String) -> String {
-  "<section id=result>{content}</section>"
+fn resultSection(content: Html) -> Html {
+  html"<section id=result>{content}</section>"
 }
 
 /// A result to come: the page's script runs the form as soon as it loads.
-fn pendingSection() -> String {
-  "<section id=result data-autorun><p class=muted>Running… (this needs scripts; without them, press Run)</p></section>"
+fn pendingSection() -> Html {
+  html"""
+    <section id=result data-autorun>
+      <p class=muted>Running… (this needs scripts; without them, press Run)</p>
+    </section>
+    """
 }
 
 /// An algorithm's page: its title, its form and its result.
-fn page(base: String, here: String, title: String, form: String, result: String) -> String {
-  layout(base, here, here, "<h1>{h(title)}</h1>{form}{result}")
+fn page(base: String, here: String, title: String, form: Html, result: Html) -> Html {
+  layout(base, here, here, html"<h1>{title}</h1>{form}{result}")
 }
 
 /// A stop the app itself made, before a host limit: an input over the
 /// playground's bounds, a search over its own budget.
-fn stopNote(title: String, why: String) -> String {
-  "<div class=\"stop limit\" data-stop=app><strong>{h(title)}</strong> {h(why)}</div>"
+fn stopNote(title: String, why: String) -> Html {
+  html"""<div class="stop limit" data-stop=app><strong>{title}</strong> {why}</div>"""
 }
 
 /// The script: runs the form with `fetch`, so the page can be cancelled

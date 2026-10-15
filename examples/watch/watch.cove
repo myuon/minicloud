@@ -10,6 +10,8 @@ use time
 use log
 use auth
 use text
+use std.html
+use std.html.Html
 
 /// A watch on the things you run.
 ///
@@ -80,7 +82,7 @@ export fn handle(request: web.Request) -> web.Response {
     }
     return removeTargetFrom(request)
   }
-  page(404, "not here", "<p>No such page. The dashboard is at <a href=\"./\">/</a>.</p>")
+  page(404, "not here", html"""<p>No such page. The dashboard is at <a href="./">/</a>.</p>""")
 }
 
 // ------------------------------------------------------------- who is asking
@@ -353,55 +355,73 @@ fn dashboard(request: web.Request) -> web.Response {
   let base = request.headers.get("x-forwarded-prefix").unwrapOr("")
   let found = match statuses(time.nowMillis() - day()) {
     Ok(found) => found
-    Err(error) => return page(500, "the store", "<p>{text.escapeHtml(error.message)}</p>")
+    Err(error) => return page(500, "the store", html"<p>{error.message}</p>")
   }
-  var rows = Vector.of()
-  for status in found {
-    rows.push(row(base, status))
-  }
+  let rows = found.map(fn(status) { row(base, status) })
   let table = if found.length() == 0 {
-    "<p class=quiet>Nothing is being watched yet. Add one below.</p>"
+    html"<p class=quiet>Nothing is being watched yet. Add one below.</p>"
   } else {
-    "<table><tr><th>target</th><th>state</th><th>last answer</th><th>when</th><th>a day</th><th></th></tr>{"".join(rows.freeze())}</table>"
+    html"""
+      <table>
+        <tr><th>target</th><th>state</th><th>last answer</th><th>when</th><th>a day</th><th></th></tr>
+        {rows}
+      </table>
+      """
   }
   page(
     200,
     "watch",
-    "{table}
-<h2>Watch something</h2>
-<form method=post action=\"{base}/targets\">
-  <label>name <input name=id required pattern=\"[A-Za-z0-9_-]+\"></label>
-  <label>url <input name=url type=url required></label>
-  <label>tell <input name=notify type=url placeholder=\"optional: where to POST a change\"></label>
-  <button>watch it</button>
-</form>
-<p class=quiet>Live: <a href=\"{base}/events\">server-sent events</a>, or a
-WebSocket at <code>{base}/live</code>. A target is checked every minute, and
-every half minute while it is down.</p>",
+    html"""
+      {table}
+      <h2>Watch something</h2>
+      <form method=post action="{base}/targets">
+        <label>name <input name=id required pattern="[A-Za-z0-9_-]+"></label>
+        <label>url <input name=url type=url required></label>
+        <label>tell <input name=notify type=url placeholder="optional: where to POST a change"></label>
+        <button>watch it</button>
+      </form>
+      <p class=quiet>Live: <a href="{base}/events">server-sent events</a>, or a
+      WebSocket at <code>{base}/live</code>. A target is checked every minute, and
+      every half minute while it is down.</p>
+      """,
   )
 }
 
 /// One target's line.
-fn row(base: String, status: Status) -> String {
+///
+/// Its id goes in the history link and the "check now" form as text, so a
+/// hostile one is escaped there as it is between the tags.
+fn row(base: String, status: Status) -> Html {
   let state = if status.at == 0 {
-    "<span class=\"state new\">not yet</span>"
+    html"""<span class="state new">not yet</span>"""
   } else {
     if status.ok {
-      "<span class=\"state up\">up</span>"
+      html"""<span class="state up">up</span>"""
     } else {
-      "<span class=\"state down\">down</span>"
+      html"""<span class="state down">down</span>"""
     }
   }
   let said = if status.at == 0 {
     "—"
   } else {
-    if status.ok { "{status.status} in {status.ms} ms" } else { text.escapeHtml(status.why) }
+    if status.ok { "{status.status} in {status.ms} ms" } else { status.why }
   }
   let when = if status.at == 0 { "—" } else { text.isoTime(status.at) }
-  "<tr><td><a href=\"{base}/history?target={status.target}\">{text.escapeHtml(status.target)}</a>
-   <div class=quiet>{text.escapeHtml(status.url)}</div></td>
-   <td>{state}</td><td>{said}</td><td>{when}</td><td>{uptime(status)}</td>
-   <td><form method=post action=\"{base}/check?target={status.target}\"><button>check now</button></form></td></tr>"
+  html"""
+    <tr>
+      <td>
+        <a href="{base}/history?target={status.target}">{status.target}</a>
+        <div class=quiet>{status.url}</div>
+      </td>
+      <td>{state}</td>
+      <td>{said}</td>
+      <td>{when}</td>
+      <td>{uptime(status)}</td>
+      <td>
+        <form method=post action="{base}/check?target={status.target}"><button>check now</button></form>
+      </td>
+    </tr>
+    """
 }
 
 /// How much of the window was good, as a percentage.
@@ -419,24 +439,31 @@ fn historyPage(request: web.Request) -> web.Response {
   let id = request.query.get("target").unwrapOr("")
   let checks = match history(id, 100) {
     Ok(checks) => checks
-    Err(error) => return page(500, "the store", "<p>{text.escapeHtml(error.message)}</p>")
+    Err(error) => return page(500, "the store", html"<p>{error.message}</p>")
   }
-  var rows = Vector.of()
-  for check in checks {
-    let said = if check.ok { "{check.status}" } else { text.escapeHtml(check.why) }
+  let rows = checks.map(fn(check) {
+    let said = if check.ok { "{check.status}" } else { check.why }
     let state = if check.ok { "up" } else { "down" }
-    rows.push(
-      "<tr><td>{text.isoTime(check.at)}</td><td><span class=\"state {state}\">{state}</span></td>
-       <td>{said}</td><td>{check.ms} ms</td></tr>",
-    )
-  }
+    html"""
+      <tr>
+        <td>{text.isoTime(check.at)}</td>
+        <td><span class="state {state}">{state}</span></td>
+        <td>{said}</td>
+        <td>{check.ms} ms</td>
+      </tr>
+      """
+  })
   page(
     200,
-    "{id}",
-    "<p><a href=\"{base}/\">← every target</a></p>
-     <h2>{text.escapeHtml(id)}</h2>
-     <table><tr><th>when</th><th>state</th><th>answer</th><th>took</th></tr>
-     {"".join(rows.freeze())}</table>",
+    id,
+    html"""
+      <p><a href="{base}/">← every target</a></p>
+      <h2>{id}</h2>
+      <table>
+        <tr><th>when</th><th>state</th><th>answer</th><th>took</th></tr>
+        {rows}
+      </table>
+      """,
   )
 }
 
@@ -561,13 +588,25 @@ fn answer(status: Int, body: String) -> web.Response {
 
 /// One page, around `content`. The stylesheet and the icon are files the
 /// host answers from `assets/` before this app runs.
-fn page(status: Int, title: String, content: String) -> web.Response {
-  let body = "<!doctype html><html lang=en><head><meta charset=utf-8>
-<meta name=viewport content=\"width=device-width,initial-scale=1\">
-<title>{text.escapeHtml(title)} · watch</title>
-<link rel=stylesheet href=\"style.css\"><link rel=icon href=\"favicon.svg\" type=\"image/svg+xml\">
-</head><body><header><strong>watch</strong> — what is up, and what is not</header>
-<main>{content}</main></body></html>"
+///
+/// This is where a page stops being `Html` and becomes the text of a body.
+fn page(status: Int, title: String, content: Html) -> web.Response {
+  let body = html"""
+    <!doctype html>
+    <html lang=en>
+    <head>
+      <meta charset=utf-8>
+      <meta name=viewport content="width=device-width,initial-scale=1">
+      <title>{title} · watch</title>
+      <link rel=stylesheet href="style.css">
+      <link rel=icon href="favicon.svg" type="image/svg+xml">
+    </head>
+    <body>
+      <header><strong>watch</strong> — what is up, and what is not</header>
+      <main>{content}</main>
+    </body>
+    </html>
+    """
   web.Response(
     status: status,
     headers: Map.of(
@@ -575,6 +614,6 @@ fn page(status: Int, title: String, content: String) -> web.Response {
       MapEntry(key: "content-security-policy", value: "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'"),
       MapEntry(key: "x-content-type-options", value: "nosniff"),
     ),
-    body: body,
+    body: body.render(),
   )
 }

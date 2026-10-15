@@ -1,5 +1,6 @@
-use text
 use stats
+use std.html
+use std.html.Html
 
 // A trend chart as inline SVG: one metric of one case across runs, one
 // series per backend. Pure — the points are handed in.
@@ -76,10 +77,6 @@ fn axisColour() -> String {
   "#c3c2b7"
 }
 
-fn h(value: String) -> String {
-  text.escapeHtml(value)
-}
-
 /// A coordinate, to a tenth of a pixel.
 fn px(value: Float) -> String {
   value.format(1)
@@ -151,17 +148,17 @@ fn niceStep(raw: Float) -> Float {
 
 /// The marker of series `index`, centred on `x`, `y`: a circle, a square,
 /// a diamond, a triangle, then round again.
-fn marker(index: Int, x: Float, y: Float, colour: String) -> String {
-  let ring = "stroke=\"{surface()}\" stroke-width=\"2\""
+fn marker(index: Int, x: Float, y: Float, colour: String) -> Html {
+  let ring = html"""stroke="{surface()}" stroke-width="2""""
   let shape = index % 4
   if shape == 0 {
-    "<circle cx=\"{px(x)}\" cy=\"{px(y)}\" r=\"4.5\" fill=\"{colour}\" {ring}/>"
+    html"""<circle cx="{px(x)}" cy="{px(y)}" r="4.5" fill="{colour}" {ring}/>"""
   } else if shape == 1 {
-    "<rect x=\"{px(x - 4.5)}\" y=\"{px(y - 4.5)}\" width=\"9\" height=\"9\" fill=\"{colour}\" {ring}/>"
+    html"""<rect x="{px(x - 4.5)}" y="{px(y - 4.5)}" width="9" height="9" fill="{colour}" {ring}/>"""
   } else if shape == 2 {
-    "<path d=\"M{px(x)} {px(y - 5.5)}L{px(x + 5.5)} {px(y)}L{px(x)} {px(y + 5.5)}L{px(x - 5.5)} {px(y)}Z\" fill=\"{colour}\" {ring}/>"
+    html"""<path d="M{px(x)} {px(y - 5.5)}L{px(x + 5.5)} {px(y)}L{px(x)} {px(y + 5.5)}L{px(x - 5.5)} {px(y)}Z" fill="{colour}" {ring}/>"""
   } else {
-    "<path d=\"M{px(x)} {px(y - 5.5)}L{px(x + 5.5)} {px(y + 4.5)}L{px(x - 5.5)} {px(y + 4.5)}Z\" fill=\"{colour}\" {ring}/>"
+    html"""<path d="M{px(x)} {px(y - 5.5)}L{px(x + 5.5)} {px(y + 4.5)}L{px(x - 5.5)} {px(y + 4.5)}Z" fill="{colour}" {ring}/>"""
   }
 }
 
@@ -185,9 +182,9 @@ fn legendRows(series: Array<Series>, width: Float) -> Int {
 
 /// The legend: each series' marker and line beside its name, in ink,
 /// wrapping onto more rows when it does not fit.
-fn legend(series: Array<Series>, width: Float) -> String {
+fn legend(series: Array<Series>, width: Float) -> Html {
   if series.length() < 2 {
-    return ""
+    return html""
   }
   var parts = Vector.of()
   var x = 84.0
@@ -201,17 +198,23 @@ fn legend(series: Array<Series>, width: Float) -> String {
       y = y + 18.0
     }
     parts.push(
-      "<g class=legend data-series=\"{h(one.name)}\"><line x1=\"{px(x)}\" y1=\"{px(y)}\" x2=\"{px(x + 22.0)}\" y2=\"{px(y)}\" stroke=\"{colour}\" stroke-width=\"2\" stroke-linecap=\"round\"/>{marker(index, x + 11.0, y, colour)}<text x=\"{px(x + 28.0)}\" y=\"{px(y + 4.0)}\" fill=\"{ink()}\">{h(one.name)}</text></g>",
+      html"""
+        <g class=legend data-series="{one.name}">
+          <line x1="{px(x)}" y1="{px(y)}" x2="{px(x + 22.0)}" y2="{px(y)}" stroke="{colour}" stroke-width="2" stroke-linecap="round"/>
+          {marker(index, x + 11.0, y, colour)}
+          <text x="{px(x + 28.0)}" y="{px(y + 4.0)}" fill="{ink()}">{one.name}</text>
+        </g>
+        """,
     )
     x = x + span
     index += 1
   }
-  "".join(parts.freeze())
+  html"{parts.freeze()}"
 }
 
 /// The chart: `ticks` along the bottom, `series` over them, values in
 /// `unit` on the one y-axis named `title`.
-export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<Series>) -> String {
+export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<Series>) -> Html {
   let width = 760.0
   let height = 300.0 + 18.0 * legendRows(series, width).toFloat()
   let left = 84.0
@@ -256,7 +259,11 @@ export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<S
   }
   var out = Vector.of()
   out.push(
-    "<svg class=chart xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {px(width)} {px(height)}\" width=\"{px(width)}\" height=\"{px(height)}\" role=img aria-label=\"{h(title)} in {h(unit)}, by run\" font-family=\"system-ui,sans-serif\" font-size=\"12\"><rect width=\"100%\" height=\"100%\" fill=\"{surface()}\"/>",
+    html"""
+      <svg class=chart xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {px(width)} {px(height)}" width="{px(width)}" height="{px(height)}"
+        role=img aria-label="{title} in {unit}, by run" font-family="system-ui,sans-serif" font-size="12">
+      <rect width="100%" height="100%" fill="{surface()}"/>
+      """,
   )
   out.push(legend(series, width))
   // The grid and the y-axis labels.
@@ -264,14 +271,16 @@ export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<S
   var guard = 0
   while value <= axis.high + axis.step / 1000.0 && guard < 50 {
     let y = yAt(value)
-    out.push("<line x1=\"{px(left)}\" y1=\"{px(y)}\" x2=\"{px(width - right)}\" y2=\"{px(y)}\" stroke=\"{gridColour()}\" stroke-width=\"1\"/>")
-    out.push("<text x=\"{px(left - 8.0)}\" y=\"{px(y + 4.0)}\" text-anchor=end fill=\"{secondary()}\">{stats.show(value)}</text>")
+    out.push(html"""<line x1="{px(left)}" y1="{px(y)}" x2="{px(width - right)}" y2="{px(y)}" stroke="{gridColour()}" stroke-width="1"/>""")
+    out.push(html"""<text x="{px(left - 8.0)}" y="{px(y + 4.0)}" text-anchor=end fill="{secondary()}">{stats.show(value)}</text>""")
     value = value + axis.step
     guard += 1
   }
-  out.push("<line x1=\"{px(left)}\" y1=\"{px(top + plotHeight)}\" x2=\"{px(width - right)}\" y2=\"{px(top + plotHeight)}\" stroke=\"{axisColour()}\" stroke-width=\"1\"/>")
   out.push(
-    "<text transform=\"translate(14 {px(top + plotHeight / 2.0)}) rotate(-90)\" text-anchor=middle fill=\"{ink()}\">{h(title)} ({h(unit)})</text>",
+    html"""<line x1="{px(left)}" y1="{px(top + plotHeight)}" x2="{px(width - right)}" y2="{px(top + plotHeight)}" stroke="{axisColour()}" stroke-width="1"/>""",
+  )
+  out.push(
+    html"""<text transform="translate(14 {px(top + plotHeight / 2.0)}) rotate(-90)" text-anchor=middle fill="{ink()}">{title} ({unit})</text>""",
   )
   // The x labels: every one, or every few when they would collide.
   let every = if count > 12 { (count + 11) / 12 } else { 1 }
@@ -279,12 +288,18 @@ export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<S
   for tick in ticks {
     if index % every == 0 || index == count - 1 {
       let x = xAt(index)
-      out.push("<text x=\"{px(x)}\" y=\"{px(top + plotHeight + 18.0)}\" text-anchor=middle fill=\"{ink()}\">{h(tick.label)}</text>")
-      out.push("<text x=\"{px(x)}\" y=\"{px(top + plotHeight + 33.0)}\" text-anchor=middle fill=\"{secondary()}\" font-size=\"11\">{h(tick.sub)}</text>")
+      out.push(html"""<text x="{px(x)}" y="{px(top + plotHeight + 18.0)}" text-anchor=middle fill="{ink()}">{tick.label}</text>""")
+      out.push(
+        html"""<text x="{px(x)}" y="{px(top + plotHeight + 33.0)}" text-anchor=middle fill="{secondary()}" font-size="11">{tick.sub}</text>""",
+      )
     }
     index += 1
   }
-  out.push("<text x=\"{px(left + plotWidth / 2.0)}\" y=\"{px(height - 4.0)}\" text-anchor=middle fill=\"{secondary()}\" font-size=\"11\">run, oldest measured first (commit, date)</text>")
+  out.push(
+    html"""
+      <text x="{px(left + plotWidth / 2.0)}" y="{px(height - 4.0)}" text-anchor=middle fill="{secondary()}" font-size="11">run, oldest measured first (commit, date)</text>
+      """,
+  )
   // Each series: whiskers, the line in pieces between gaps, the markers.
   var seriesIndex = 0
   for one in series {
@@ -302,11 +317,25 @@ export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<S
           current.push("{px(x)} {px(y)}")
           if point.most > point.least {
             marks.push(
-              "<g class=whisker data-series=\"{h(one.name)}\" data-run=\"{h(tick.id)}\" data-least=\"{point.least}\" data-most=\"{point.most}\"><line x1=\"{px(x)}\" y1=\"{px(yAt(point.least))}\" x2=\"{px(x)}\" y2=\"{px(yAt(point.most))}\" stroke=\"{colour}\" stroke-width=\"1.5\"/><line x1=\"{px(x - 4.0)}\" y1=\"{px(yAt(point.least))}\" x2=\"{px(x + 4.0)}\" y2=\"{px(yAt(point.least))}\" stroke=\"{colour}\" stroke-width=\"1.5\"/><line x1=\"{px(x - 4.0)}\" y1=\"{px(yAt(point.most))}\" x2=\"{px(x + 4.0)}\" y2=\"{px(yAt(point.most))}\" stroke=\"{colour}\" stroke-width=\"1.5\"/></g>",
+              html"""
+                <g class=whisker data-series="{one.name}" data-run="{tick.id}" data-least="{point.least}" data-most="{point.most}">
+                  <line x1="{px(x)}" y1="{px(yAt(point.least))}" x2="{px(x)}" y2="{px(yAt(point.most))}" stroke="{colour}" stroke-width="1.5"/>
+                  <line x1="{px(x - 4.0)}" y1="{px(yAt(point.least))}" x2="{px(x + 4.0)}" y2="{px(yAt(point.least))}" stroke="{colour}" stroke-width="1.5"/>
+                  <line x1="{px(x - 4.0)}" y1="{px(yAt(point.most))}" x2="{px(x + 4.0)}" y2="{px(yAt(point.most))}" stroke="{colour}" stroke-width="1.5"/>
+                </g>
+                """,
             )
           }
           marks.push(
-            "<a href=\"{h(point.href)}\"><g class=point data-series=\"{h(one.name)}\" data-run=\"{h(tick.id)}\" data-median=\"{point.median}\"><title>{h(point.tip)}</title><circle cx=\"{px(x)}\" cy=\"{px(y)}\" r=\"12\" fill=\"transparent\"/>{marker(seriesIndex, x, y, colour)}</g></a>",
+            html"""
+              <a href="{point.href}">
+                <g class=point data-series="{one.name}" data-run="{tick.id}" data-median="{point.median}">
+                  <title>{point.tip}</title>
+                  <circle cx="{px(x)}" cy="{px(y)}" r="12" fill="transparent"/>
+                  {marker(seriesIndex, x, y, colour)}
+                </g>
+              </a>
+              """,
           )
         }
         None => {
@@ -325,7 +354,9 @@ export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<S
     for segment in segments {
       if segment.length() > 1 {
         out.push(
-          "<path class=line data-series=\"{h(one.name)}\" d=\"M{"L".join(segment)}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"2\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>",
+          html"""
+            <path class=line data-series="{one.name}" d="M{"L".join(segment)}" fill="none" stroke="{colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+            """,
         )
       }
     }
@@ -334,6 +365,6 @@ export fn trend(title: String, unit: String, ticks: Array<Tick>, series: Array<S
     }
     seriesIndex += 1
   }
-  out.push("</svg>")
-  "".join(out.freeze())
+  out.push(html"</svg>")
+  html"{out.freeze()}"
 }
