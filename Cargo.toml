@@ -12,11 +12,11 @@ repository = "https://github.com/myuon/minicloud"
 # change the host needs from the compiler or the runtime goes to myuon/cove
 # first and is picked up here by moving `rev`.
 [workspace.dependencies]
-cove-diag = { git = "https://github.com/myuon/cove", rev = "e7ab3c09f8273d4df2f417e19926f365cc389318" }
-cove-ir = { git = "https://github.com/myuon/cove", rev = "e7ab3c09f8273d4df2f417e19926f365cc389318" }
-cove-runtime = { git = "https://github.com/myuon/cove", rev = "e7ab3c09f8273d4df2f417e19926f365cc389318", features = ["template"] }
-cove-sema = { git = "https://github.com/myuon/cove", rev = "e7ab3c09f8273d4df2f417e19926f365cc389318" }
-cove-syntax = { git = "https://github.com/myuon/cove", rev = "e7ab3c09f8273d4df2f417e19926f365cc389318" }
+cove-diag = { git = "https://github.com/myuon/cove", rev = "08823c84d83a004ecc517057e5323e333a6024d4" }
+cove-ir = { git = "https://github.com/myuon/cove", rev = "08823c84d83a004ecc517057e5323e333a6024d4" }
+cove-runtime = { git = "https://github.com/myuon/cove", rev = "08823c84d83a004ecc517057e5323e333a6024d4", features = ["template"] }
+cove-sema = { git = "https://github.com/myuon/cove", rev = "08823c84d83a004ecc517057e5323e333a6024d4" }
+cove-syntax = { git = "https://github.com/myuon/cove", rev = "08823c84d83a004ecc517057e5323e333a6024d4" }
 
 # The profile the tests run under, for Cove's own reason: they run Cove
 # programs (the CPU-heavy sample app counts primes for tens of milliseconds a
