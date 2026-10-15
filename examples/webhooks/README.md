@@ -126,7 +126,10 @@ another site, or when `Origin` names another origin. curl sends neither header
 and is allowed, because it holds the secret itself.
 
 **Page headers.** Every admin page is sent with a `Content-Security-Policy`
-(no script but the page's own copy buttons, no framing, forms to the lab
+(`script-src 'self'; style-src 'self'`: no script but `assets/app.js` —
+the copy buttons and the confirmation before a delete, attached to the
+markup's `data-copy` and `data-confirm` — no style but `assets/style.css`,
+both answered by the host before the app runs; no framing, forms to the lab
 only), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, no referrer
 and `Cache-Control: no-store`.
 

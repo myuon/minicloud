@@ -18,7 +18,7 @@ keep answering.
 | `GET /sat`, `GET /sat?example=<name>`, `POST /sat` (`formula`, `budget`) | satisfiability, the same way |
 | `GET /anneal`, `GET /anneal?example=<name>&…`, `POST /anneal` | simulated annealing, two runs compared (fields below) |
 | `…&part=result` (`GET` or `POST`) | the result alone, as HTML — what the page's script asks for |
-| `GET /app.js` | the page's script |
+| `GET /app.js`, `GET /style.css` | the page's script and stylesheet: files in `assets/`, answered by the host before the app runs |
 
 `algorithm` is `hopcroft-karp` (the default), `augmenting` or `both`.
 
@@ -70,9 +70,10 @@ three run-time features:
 
 Example links fill the form and let the script run it (`data-autorun`), so a
 heavy example's stop reason is shown in the page rather than instead of it.
-The pages carry a CSP that allows only the app's own script
-(`script-src 'self'`), only same-origin fetches, inline styles and nothing
-else; every name from the input is escaped wherever it lands.
+The pages carry a CSP that allows only the app's own script and stylesheet
+(`script-src 'self'; style-src 'self'` — both are files in `assets/`, so
+nothing inline is allowed), only same-origin fetches and nothing else; every
+name from the input is escaped wherever it lands.
 
 ## Maximum bipartite matching
 
