@@ -1239,7 +1239,7 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
       // The host cut at its own length; a row of a table wants less again.
       let preview = text.truncateBytes(entry.value, 140)
       let cut = entry.cut || preview.byteLength() < entry.value.byteLength()
-      let shown = if cut { html"{preview}<span class=muted>…</span>" } else { html"{preview}" }
+      let shown = html"{preview}{html.only(cut, html"<span class=muted>…</span>")}"
       rows.push(html"""
         <tr>
           <td class=title data-label=key><a href="{link}"><code>{entry.key}</code></a></td>
