@@ -7,6 +7,7 @@
 //! | `GET /_host/apps/<app>` | one app: the same, its versions, and its recent errors |
 //! | `GET /_host/metrics` | the same counters as OpenMetrics, for Prometheus to scrape |
 //! | `GET /_host/series?app=&over=hour\|day\|month` | what each app did, minute by minute (or hour by hour), as JSON |
+//! | `GET /_host/platform?over=hour\|day\|month` | the host's process and machine ([`crate::platform`]) now, and minute by minute (or hour by hour), as JSON |
 //! | `GET /_host/apps/<app>/logs?n=` | its recent log lines, as text |
 //! | `GET /_host/apps/<app>/logs?follow=1` | the same, and then every line as it is written, as server-sent events |
 //! | `GET /_host/ui` | a page of all of it; every value from an app is escaped |
@@ -125,6 +126,86 @@ pub fn series(context: &OpsContext, app: Option<&str>, over: &str) -> Json {
     }
 }
 
+/// A platform figure as JSON: the number, or `null` for one the host could
+/// not read.
+fn known(value: Option<u64>) -> Json {
+    value.map_or(Json::Null, Json::from)
+}
+
+/// The platform now, as `GET /_host/platform` answers it in `now`.
+pub fn platform_now_json(now: &crate::platform::PlatformSample) -> Json {
+    json!({
+        "memory_bytes": known(now.memory_bytes),
+        "memory_max_bytes": known(now.memory_max_bytes),
+        "rss_bytes": known(now.rss_bytes),
+        "cpu_usage_usec": known(now.cpu_usage_usec),
+        "cpu_throttled_usec": known(now.cpu_throttled_usec),
+        "cpu_throttled_periods": known(now.cpu_throttled_periods),
+        "cpu_quota_millicores": known(now.cpu_quota_millicores),
+        "disk_total_bytes": known(now.disk_total_bytes),
+        "disk_available_bytes": known(now.disk_available_bytes),
+        "store_bytes": known(now.store_bytes),
+        "load1_milli": known(now.load1_milli),
+        "host_memory_total_bytes": known(now.host_memory_total_bytes),
+        "host_memory_available_bytes": known(now.host_memory_available_bytes),
+        "in_flight": now.in_flight,
+        "queued": now.queued,
+        "busy": now.busy,
+        "workers": now.workers,
+    })
+}
+
+/// What `GET /_host/platform` answers: the platform `now`, and the rows of
+/// its history over `over`, a window as [`series`]' is.
+///
+/// A row's `cpu_usec`, `cpu_throttled_usec` and `cpu_throttled_periods` are
+/// what the counters grew by over the row's span (a minute, or an hour for
+/// `month`); every other column is a gauge (see [`crate::series::HostRow`]).
+pub fn platform(context: &OpsContext, now: &crate::platform::PlatformSample, over: &str) -> Json {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    let (secs, hourly) = crate::series::window(over);
+    let current = platform_now_json(now);
+    let Some(series) = context.series else {
+        return json!({"over": over, "kept": false, "now": current, "rows": []});
+    };
+    let series = series.lock().unwrap_or_else(|p| p.into_inner());
+    let rows = if hourly {
+        series.host_hours(unix - secs)
+    } else {
+        series.host_minutes(unix - secs)
+    };
+    match rows {
+        Ok(rows) => json!({
+            "over": over,
+            "kept": true,
+            "now": current,
+            "rows": rows.iter().map(|row| json!({
+                "at_unix": row.at_unix,
+                "memory_bytes": known(row.memory_bytes),
+                "memory_max_bytes": known(row.memory_max_bytes),
+                "rss_bytes": known(row.rss_bytes),
+                "cpu_usec": known(row.cpu_usec),
+                "cpu_throttled_usec": known(row.cpu_throttled_usec),
+                "cpu_throttled_periods": known(row.cpu_throttled_periods),
+                "cpu_quota_millicores": known(row.cpu_quota_millicores),
+                "disk_total_bytes": known(row.disk_total_bytes),
+                "disk_available_bytes": known(row.disk_available_bytes),
+                "store_bytes": known(row.store_bytes),
+                "load1_milli": known(row.load1_milli),
+                "host_memory_total_bytes": known(row.host_memory_total_bytes),
+                "host_memory_available_bytes": known(row.host_memory_available_bytes),
+                "in_flight": row.in_flight,
+                "queued": row.queued,
+                "busy": row.busy,
+                "workers": row.workers,
+            })).collect::<Vec<Json>>(),
+        }),
+        Err(why) => json!({"over": over, "kept": true, "now": current, "error": why, "rows": []}),
+    }
+}
+
 /// What `GET /_host/metrics` answers: the counters in the text exposition
 /// format Prometheus scrapes.
 ///
@@ -134,7 +215,11 @@ pub fn series(context: &OpsContext, app: Option<&str>, over: &str) -> Json {
 /// ([`crate::histogram`]), so a quantile is the scraper's to compute with
 /// `histogram_quantile` over whatever window it wants — the host's own
 /// estimate over all time is in the stats, and is a different question.
-pub fn metrics(context: &OpsContext) -> String {
+///
+/// The host's own figures (`minicloud_host_*`, from `platform`) come last
+/// and have no label: there is one host. A figure the host could not read
+/// is left out, family and all, rather than written as zero.
+pub fn metrics(context: &OpsContext, platform: &crate::platform::PlatformSample) -> String {
     let mut out = String::new();
     out.push_str("# HELP minicloud_up Whether the host is answering.\n");
     out.push_str("# TYPE minicloud_up gauge\nminicloud_up 1\n");
@@ -295,6 +380,99 @@ pub fn metrics(context: &OpsContext) -> String {
             snapshot.count
         ));
     }
+    let seconds = |usec: Option<u64>| usec.map(|n| format!("{:.6}", n as f64 / 1e6));
+    let whole = |n: Option<u64>| n.map(|n| n.to_string());
+    let host: [(&str, &str, &str, Option<String>); 13] = [
+        (
+            "memory_current_bytes",
+            "gauge",
+            "Memory the host's cgroup is charged for (memory.current).",
+            whole(platform.memory_bytes),
+        ),
+        (
+            "memory_max_bytes",
+            "gauge",
+            "The host's cgroup's memory limit (memory.max); absent for none.",
+            whole(platform.memory_max_bytes),
+        ),
+        (
+            "rss_bytes",
+            "gauge",
+            "The host process's resident set.",
+            whole(platform.rss_bytes),
+        ),
+        (
+            "cpu_usage_seconds_total",
+            "counter",
+            "CPU time the host's cgroup used (cpu.stat usage_usec).",
+            seconds(platform.cpu_usage_usec),
+        ),
+        (
+            "cpu_throttled_seconds_total",
+            "counter",
+            "Time the CPU quota held the host's cgroup back (cpu.stat throttled_usec).",
+            seconds(platform.cpu_throttled_usec),
+        ),
+        (
+            "cpu_quota_cores",
+            "gauge",
+            "The host's cgroup's CPU quota, in CPUs (cpu.max); absent for none.",
+            platform
+                .cpu_quota_millicores
+                .map(|m| format!("{:.3}", m as f64 / 1000.0)),
+        ),
+        (
+            "disk_available_bytes",
+            "gauge",
+            "Free space for the host on the data directory's disk.",
+            whole(platform.disk_available_bytes),
+        ),
+        (
+            "disk_total_bytes",
+            "gauge",
+            "The size of the data directory's disk.",
+            whole(platform.disk_total_bytes),
+        ),
+        (
+            "load1",
+            "gauge",
+            "The machine's one-minute load average.",
+            platform
+                .load1_milli
+                .map(|m| format!("{:.3}", m as f64 / 1000.0)),
+        ),
+        (
+            "memory_available_bytes",
+            "gauge",
+            "Memory the machine could still give (MemAvailable).",
+            whole(platform.host_memory_available_bytes),
+        ),
+        (
+            "workers_busy",
+            "gauge",
+            "Workers running a run now.",
+            Some(platform.busy.to_string()),
+        ),
+        (
+            "workers",
+            "gauge",
+            "Workers in all.",
+            Some(platform.workers.to_string()),
+        ),
+        (
+            "queued",
+            "gauge",
+            "Requests waiting to start, over every app.",
+            Some(platform.queued.to_string()),
+        ),
+    ];
+    for (name, kind, help, value) in host {
+        if let Some(value) = value {
+            out.push_str(&format!("# HELP minicloud_host_{name} {help}\n"));
+            out.push_str(&format!("# TYPE minicloud_host_{name} {kind}\n"));
+            out.push_str(&format!("minicloud_host_{name} {value}\n"));
+        }
+    }
     out.push_str("# EOF\n");
     out
 }
@@ -391,7 +569,21 @@ pub(crate) fn sample_now(front: &crate::server::Front, at: i64) -> usize {
         }
         before.insert(slot.name.clone(), (totals, histogram));
     }
+    drop(before);
+    // The platform, read before the store is locked: the files are the
+    // kernel's and quick, but a test's source is anybody's.
+    let platform = front.platform_now();
+    let was = front
+        .platform_sampled
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .replace(platform.clone());
     let series = series.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(was) = was {
+        if let Err(why) = series.record_host(&host_row(&was, &platform, at - 60)) {
+            eprintln!("minicloud: cannot keep the platform's history: {why}");
+        }
+    }
     if !samples.is_empty() {
         if let Err(why) = series.record(&samples) {
             eprintln!("minicloud: cannot keep the history: {why}");
@@ -410,6 +602,43 @@ pub(crate) fn sample_now(front: &crate::server::Front, at: i64) -> usize {
         }
     }
     samples.len()
+}
+
+/// The host's row for the minute that ends with `now`: what the CPU
+/// counters grew by since `was`, and every other figure as `now` has it.
+///
+/// A counter known at one end and not the other is unknown over the minute,
+/// and one that went backwards (a cgroup that was made anew) counts from
+/// nothing rather than wrapping.
+pub(crate) fn host_row(
+    was: &crate::platform::PlatformSample,
+    now: &crate::platform::PlatformSample,
+    at_unix: i64,
+) -> crate::series::HostRow {
+    let grew = |before: Option<u64>, after: Option<u64>| {
+        let (before, after) = (before?, after?);
+        Some(after.checked_sub(before).unwrap_or(after))
+    };
+    crate::series::HostRow {
+        at_unix,
+        memory_bytes: now.memory_bytes,
+        memory_max_bytes: now.memory_max_bytes,
+        rss_bytes: now.rss_bytes,
+        cpu_usec: grew(was.cpu_usage_usec, now.cpu_usage_usec),
+        cpu_throttled_usec: grew(was.cpu_throttled_usec, now.cpu_throttled_usec),
+        cpu_throttled_periods: grew(was.cpu_throttled_periods, now.cpu_throttled_periods),
+        cpu_quota_millicores: now.cpu_quota_millicores,
+        disk_total_bytes: now.disk_total_bytes,
+        disk_available_bytes: now.disk_available_bytes,
+        store_bytes: now.store_bytes,
+        load1_milli: now.load1_milli,
+        host_memory_total_bytes: now.host_memory_total_bytes,
+        host_memory_available_bytes: now.host_memory_available_bytes,
+        in_flight: now.in_flight,
+        queued: now.queued,
+        busy: now.busy,
+        workers: now.workers,
+    }
 }
 
 /// One app's running totals now, and its request times.

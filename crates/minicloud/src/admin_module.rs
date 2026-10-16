@@ -24,6 +24,8 @@
 //! | `host.queueDead(app, limit)` | `Array<host.QueueMessage>`: the dead letters, newest buried first, each with `why`; at most `limit` as above |
 //! | `host.queueMessage(app, id)` | `Result<host.QueueMessage, Error>`: one of them whole, its body cut past [`crate::queue::READ_BODY_CHARS`]; an `Err` for an id no queue of the app holds |
 //! | `host.series(app, over)` | `Array<host.Point>`: what the app did over `over` — `"hour"`, `"day"` or `"month"` — as the host's history keeps it ([`crate::series`]), oldest first: a row a minute for the first two and a row an hour for the last, because the store keeps the two at those granularities and [`crate::series::window`] is the one place that says which. The same rows `GET /_host/series` answers, as values; an `over` that is none of the three is an hour, as there. Empty — not an `Err` — for a host that keeps no history (no `--data`, or `minicloud test`), so a page that draws a graph shows "nothing yet" before there is one; never more than [`SERIES_ROWS`] rows, the newest if there would be |
+//! | `host.platform(over)` | `Array<host.PlatformPoint>`: the host's process and machine over `over` ([`crate::platform`], kept beside the apps' rows in [`crate::series`]), windowed, capped and empty when there is no history exactly as `host.series` is. A figure the host could not read is `None` |
+//! | `host.platformNow()` | `host.PlatformNow`: the same figures as they are now, the CPU's as running totals; every file figure `None` and the engine's zero where there is no host (`minicloud test`) |
 //! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
 //! | `host.allLogs(limit)` | `host.AllLogs`: every app's log as one sequence — the last `limit` lines of it, oldest first, each saying which app it came from — and `apps`, every app whose ring holds a line. The host merges the rings, and "the last `limit`" is the last `limit` of its whole log, so one app that is talking fills it ([`crate::manage`]) |
 //! | `host.setEnabled(app, enabled, who)` | `Result<String, Error>`: routes to the app again, or stops; nothing is reloaded |
@@ -67,6 +69,7 @@ use crate::sql::{Answer as SqlAnswer, Table as SqlTable};
 const STR: HostType = HostType::String;
 const INT: HostType = HostType::Int;
 const STRINGS: HostType = HostType::Array(&HostType::String);
+const OPT_INT: HostType = HostType::Option(&HostType::Int);
 /// The most rows one `host.series` answers. The windows hold 1440 minutes
 /// and 720 hours at most, but that is what the store *should* hold: a sweep
 /// that has not run, or a retention set longer, would otherwise make one call
@@ -223,6 +226,18 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             "series",
             &[STR, STR],
             HostType::Array(&HostType::Named("host.Point")),
+            Effect::Read,
+        ),
+        op(
+            "platform",
+            &[STR],
+            HostType::Array(&HostType::Named("host.PlatformPoint")),
+            Effect::Read,
+        ),
+        op(
+            "platformNow",
+            &[],
+            HostType::Named("host.PlatformNow"),
             Effect::Read,
         ),
         op(
@@ -507,6 +522,61 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 // of all time.
                 field("p50Us", INT),
                 field("p99Us", INT),
+            ],
+        },
+        // One row of the host's own history ([`crate::series::HostRow`]):
+        // the CPU's figures are what it used over the row's span, a minute
+        // or an hour; the rest are gauges at the end of it. `None` is a
+        // figure the host could not read (no cgroup, not Linux), which is
+        // not zero.
+        TypeSchema {
+            name: "PlatformPoint",
+            cases: &[],
+            fields: &[
+                field("atUnix", INT),
+                field("memoryBytes", OPT_INT),
+                field("memoryMaxBytes", OPT_INT),
+                field("rssBytes", OPT_INT),
+                field("cpuUsec", OPT_INT),
+                field("cpuThrottledUsec", OPT_INT),
+                field("cpuThrottledPeriods", OPT_INT),
+                // Thousandths of a CPU: `CPUQuota=200%` is 2000.
+                field("cpuQuotaMillicores", OPT_INT),
+                field("diskTotalBytes", OPT_INT),
+                field("diskAvailableBytes", OPT_INT),
+                field("storeBytes", OPT_INT),
+                // Thousandths, as the load average is a fraction.
+                field("load1Milli", OPT_INT),
+                field("hostMemoryTotalBytes", OPT_INT),
+                field("hostMemoryAvailableBytes", OPT_INT),
+                field("inFlight", INT),
+                field("queued", INT),
+                field("busy", INT),
+                field("workers", INT),
+            ],
+        },
+        // The same figures now ([`crate::platform::PlatformSample`]), the
+        // CPU's as the cgroup's running totals.
+        TypeSchema {
+            name: "PlatformNow",
+            cases: &[],
+            fields: &[
+                field("memoryBytes", OPT_INT),
+                field("memoryMaxBytes", OPT_INT),
+                field("rssBytes", OPT_INT),
+                field("cpuUsageUsec", OPT_INT),
+                field("cpuThrottledUsec", OPT_INT),
+                field("cpuQuotaMillicores", OPT_INT),
+                field("diskTotalBytes", OPT_INT),
+                field("diskAvailableBytes", OPT_INT),
+                field("storeBytes", OPT_INT),
+                field("load1Milli", OPT_INT),
+                field("hostMemoryTotalBytes", OPT_INT),
+                field("hostMemoryAvailableBytes", OPT_INT),
+                field("inFlight", INT),
+                field("queued", INT),
+                field("busy", INT),
+                field("workers", INT),
             ],
         },
         // One queue of an app ([`crate::queue`]), with its counts whole:
@@ -849,6 +919,69 @@ fn point_value(row: Sample) -> Value {
     )
 }
 
+fn maybe(value: Option<u64>) -> Value {
+    match value {
+        Some(n) => Value::some(int(n)),
+        None => Value::none(),
+    }
+}
+
+fn platform_point_value(row: crate::series::HostRow) -> Value {
+    Value::structure(
+        "host.PlatformPoint",
+        vec![
+            ("atUnix", Value::int(row.at_unix)),
+            ("memoryBytes", maybe(row.memory_bytes)),
+            ("memoryMaxBytes", maybe(row.memory_max_bytes)),
+            ("rssBytes", maybe(row.rss_bytes)),
+            ("cpuUsec", maybe(row.cpu_usec)),
+            ("cpuThrottledUsec", maybe(row.cpu_throttled_usec)),
+            ("cpuThrottledPeriods", maybe(row.cpu_throttled_periods)),
+            ("cpuQuotaMillicores", maybe(row.cpu_quota_millicores)),
+            ("diskTotalBytes", maybe(row.disk_total_bytes)),
+            ("diskAvailableBytes", maybe(row.disk_available_bytes)),
+            ("storeBytes", maybe(row.store_bytes)),
+            ("load1Milli", maybe(row.load1_milli)),
+            ("hostMemoryTotalBytes", maybe(row.host_memory_total_bytes)),
+            (
+                "hostMemoryAvailableBytes",
+                maybe(row.host_memory_available_bytes),
+            ),
+            ("inFlight", int(row.in_flight)),
+            ("queued", int(row.queued)),
+            ("busy", int(row.busy)),
+            ("workers", int(row.workers)),
+        ],
+    )
+}
+
+fn platform_now_value(now: crate::platform::PlatformSample) -> Value {
+    Value::structure(
+        "host.PlatformNow",
+        vec![
+            ("memoryBytes", maybe(now.memory_bytes)),
+            ("memoryMaxBytes", maybe(now.memory_max_bytes)),
+            ("rssBytes", maybe(now.rss_bytes)),
+            ("cpuUsageUsec", maybe(now.cpu_usage_usec)),
+            ("cpuThrottledUsec", maybe(now.cpu_throttled_usec)),
+            ("cpuQuotaMillicores", maybe(now.cpu_quota_millicores)),
+            ("diskTotalBytes", maybe(now.disk_total_bytes)),
+            ("diskAvailableBytes", maybe(now.disk_available_bytes)),
+            ("storeBytes", maybe(now.store_bytes)),
+            ("load1Milli", maybe(now.load1_milli)),
+            ("hostMemoryTotalBytes", maybe(now.host_memory_total_bytes)),
+            (
+                "hostMemoryAvailableBytes",
+                maybe(now.host_memory_available_bytes),
+            ),
+            ("inFlight", int(now.in_flight)),
+            ("queued", int(now.queued)),
+            ("busy", int(now.busy)),
+            ("workers", int(now.workers)),
+        ],
+    )
+}
+
 fn queue_value(queue: QueueInfo) -> Value {
     Value::structure(
         "host.Queue",
@@ -1147,6 +1280,34 @@ impl HostApi for AdminHost {
             .map_err(|why| RuntimeError::new(format!("admin: series: {why}")))?;
             let skip = rows.len().saturating_sub(SERIES_ROWS);
             return Ok(Value::array(rows.into_iter().skip(skip).map(point_value)));
+        }
+        // The host's own history and its figures now: absences are answers
+        // here too, for the reason `series` gives.
+        if op == "platform" || op == "platformNow" {
+            let front = self.control.as_ref().and_then(|control| control.front());
+            if op == "platformNow" {
+                let now = front.map(|front| front.platform_now()).unwrap_or_default();
+                return Ok(platform_now_value(now));
+            }
+            let over = args.first().and_then(Value::as_str).unwrap_or_default();
+            let Some(store) = front.and_then(|front| front.series.clone()) else {
+                return Ok(Value::array(std::iter::empty::<Value>()));
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs() as i64);
+            let (secs, hourly) = crate::series::window(over);
+            let store = store.lock().unwrap_or_else(|p| p.into_inner());
+            let rows = if hourly {
+                store.host_hours(now - secs)
+            } else {
+                store.host_minutes(now - secs)
+            }
+            .map_err(|why| RuntimeError::new(format!("admin: platform: {why}")))?;
+            let skip = rows.len().saturating_sub(SERIES_ROWS);
+            return Ok(Value::array(
+                rows.into_iter().skip(skip).map(platform_point_value),
+            ));
         }
         let control = self.control()?;
         match op {
