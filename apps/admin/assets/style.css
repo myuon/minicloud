@@ -343,6 +343,10 @@ svg.chart{display:block;width:100%;height:auto;margin:.2em 0 1.4em;padding:.4em;
 .ln-served,.ln-p50{stroke:var(--link)}
 .ln-errors{stroke:var(--bad);stroke-dasharray:7 4}
 .ln-p99{stroke:var(--warn);stroke-dasharray:2 3}
+/* the platform page: what is used, against the limit it is held to (dashed and quiet, because it is the frame and not the subject), and what is held back or waiting (dotted, the warning colour) */
+.ln-used{stroke:var(--link)}
+.ln-limit{stroke:var(--muted);stroke-dasharray:7 4}
+.ln-held{stroke:var(--warn);stroke-dasharray:2 3}
 p.legend{display:flex;flex-wrap:wrap;gap:.3em 1.4em;margin:.4em 0;font-size:13px}
 p.legend .key{display:inline-flex;align-items:center;gap:.5em}
 p.legend .ln{vector-effect:none}

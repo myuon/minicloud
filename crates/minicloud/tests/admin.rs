@@ -1206,3 +1206,74 @@ fn every_apps_lines_are_one_order() {
     // The page only reads, whatever is posted to it.
     assert_eq!(ui(&host, "POST", "/logs", &same_site(), "").status, 404);
 }
+
+#[test]
+fn the_platform_page_shows_the_host_against_its_limits() {
+    let apps = ui_apps();
+    let host = deployed(&apps);
+    let cpu = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let used = std::sync::Arc::clone(&cpu);
+    host.set_platform_source(std::sync::Arc::new(move || {
+        minicloud::platform::PlatformSample {
+            memory_bytes: Some(1 << 30),
+            memory_max_bytes: Some(2 << 30),
+            cpu_usage_usec: Some(used.load(std::sync::atomic::Ordering::Relaxed)),
+            cpu_throttled_usec: Some(0),
+            cpu_quota_millicores: Some(2000),
+            disk_total_bytes: Some(100 << 30),
+            disk_available_bytes: Some(4 << 30),
+            load1_milli: Some(1250),
+            host_memory_total_bytes: Some(8 << 30),
+            host_memory_available_bytes: Some(6 << 30),
+            in_flight: 3,
+            queued: 2,
+            busy: 1,
+            workers: 2,
+            ..Default::default()
+        }
+    }));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let minute = now - now % 60;
+    host.sample_now(minute - 180);
+    for (n, usec) in [(1, 30_000_000), (2, 36_000_000)] {
+        cpu.store(usec, std::sync::atomic::Ordering::Relaxed);
+        host.sample_now(minute - 180 + n * 60);
+    }
+    let page = ui(&host, "GET", "/platform", &authed(), "");
+    assert_eq!(page.status, 200, "{}", page.body);
+    let body = page.body;
+    for expected in [
+        "<a href=\"/platform\" aria-current=page>platform</a>",
+        // Memory: 1 GiB of 2, half.
+        "<span class=big>1.0 GiB</span>",
+        "of 2.0 GiB, 50%",
+        // CPU: the last minute used 6 s of two CPUs' 120 s.
+        "<span class=big>5%</span>",
+        "of 2.00 CPUs (CPUQuota), last minute",
+        // Disk: 96% used is trouble.
+        "<div class=\"fig is-bad\">",
+        "<span class=big>4.0 GiB</span>",
+        // Workers, with requests waiting.
+        "<span class=big>1 / 2</span>",
+        "3 in flight, 2 queued",
+        "<span class=big>1.25</span>",
+        "2 rows, one for each minute",
+        "<svg class=chart",
+        "class=\"ln ln-limit\"",
+    ] {
+        assert!(body.contains(expected), "no `{expected}` in:\n{body}");
+    }
+    // The other windows: the month has no hours rolled up yet.
+    let month = ui(&host, "GET", "/platform?over=month", &authed(), "").body;
+    assert!(
+        month.contains("Nothing to chart for the last 30 days"),
+        "{month}"
+    );
+    assert!(
+        month.contains("<span class=big>5%</span>"),
+        "the figures are now"
+    );
+}

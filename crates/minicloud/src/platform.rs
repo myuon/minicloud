@@ -33,7 +33,7 @@ use std::path::Path;
 /// What the host's process and machine look like at one moment.
 ///
 /// The CPU figures are the cgroup's running totals, as the kernel keeps
-/// them; the sampler ([`crate::ops::sample_now`]) keeps what they grew by
+/// them; the sampler ([`crate::Host::sample_now`]) keeps what they grew by
 /// over each minute. The rest are gauges: their value now.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlatformSample {

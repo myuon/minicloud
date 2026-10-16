@@ -389,6 +389,52 @@ test fn marksTheWindowItShowsAndLinksTheOthers() -> Result<Unit, Error> {
   Ok(())
 }
 
+test fn writesThePlatformsFiguresAsPeopleReadThem() -> Result<Unit, Error> {
+  assertEqual(platformBytes(512), "512 B")?
+  assertEqual(platformBytes(1572864), "1.5 MiB")?
+  assertEqual(platformBytes(2147483648), "2.0 GiB")?
+  assertEqual(platformBytes(1073741824 * 3 / 2), "1.5 GiB")?
+  assertEqual(knownBytes(None), "—")?
+  assertEqual(knownBytes(Some(1024)), "1.0 KiB")?
+  assertEqual(percentOf(1, 4), "25%")?
+  assertEqual(percentOf(1, 0), "—")?
+  assertEqual(thousandths(750), "0.75")?
+  assertEqual(thousandths(2000), "2.00")?
+  assertEqual(thousandths(12005), "12.01")?
+  assertEqual(thousandths(0), "0.00")?
+  Ok(())
+}
+
+test fn takesTheCpuAsAShareOfTheQuota() -> Result<Unit, Error> {
+  // 30 s of a minute, of two CPUs, is a quarter.
+  assertEqual(cpuPercent(30000000, 60, 2000), 25)?
+  // Without a quota, of one CPU, which may be past 100.
+  assertEqual(cpuPercent(90000000, 60, 1000), 150)?
+  // An hour of half a CPU at full use.
+  assertEqual(cpuPercent(1800000000, 3600, 500), 100)?
+  assertEqual(cpuPercent(5, 60, 0), 0)?
+  assertEqual(pressure(50), "")?
+  assertEqual(pressure(80), " is-warn")?
+  assertEqual(pressure(95), " is-bad")?
+  Ok(())
+}
+
+/// Under `minicloud test` there is no host: no figure is known and no row is
+/// kept, and the page says so rather than drawing zeros.
+test fn thePlatformPageSaysWhatItCannotRead() -> Result<Unit, Error> {
+  let page = platformPage("", asking(Map.of(MapEntry(key: "over", value: "day")))).render()
+  assert(page.contains("<h1>Platform</h1>"))?
+  assert(page.contains("<a href=\"/platform\" aria-current=page>platform</a>"))?
+  assert(page.contains("Nothing to chart for the last day"))?
+  assert(page.contains("the host cannot read its cgroup"))?
+  assert(page.contains("no minute sampled yet"))?
+  assert(page.contains("<span class=big>0 / 0</span>"))?
+  assert(page.contains("<b>the last day</b>"))?
+  assert(page.contains("<a href=\"/platform?over=month\">the last 30 days</a>"))?
+  assert(!page.contains("<svg class=chart"))?
+  Ok(())
+}
+
 test fn writesMicrosecondsAsMilliseconds() -> Result<Unit, Error> {
   assertEqual(millis(0), "0.0")?
   assertEqual(millis(340), "0.3")?

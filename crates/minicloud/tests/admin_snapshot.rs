@@ -199,6 +199,56 @@ fn minute(
     }
 }
 
+/// A minute of the host's own history (the Platform page), its figures a
+/// fixed function of `k`.
+fn host_minute(at_unix: i64, k: u64) -> minicloud::series::HostRow {
+    minicloud::series::HostRow {
+        at_unix,
+        memory_bytes: Some((600 + 40 * k) << 20),
+        memory_max_bytes: Some(2 << 30),
+        rss_bytes: Some((300 + 10 * k) << 20),
+        cpu_usec: Some(3_000_000 * (k % 5)),
+        cpu_throttled_usec: Some(if k % 4 == 3 { 1_500_000 } else { 0 }),
+        cpu_throttled_periods: Some(k % 4 / 3),
+        cpu_quota_millicores: Some(2000),
+        disk_total_bytes: Some(100 << 30),
+        disk_available_bytes: Some((60 << 30) - (k << 28)),
+        store_bytes: Some(1 << 20),
+        load1_milli: Some(200 + 50 * k),
+        host_memory_total_bytes: Some(8 << 30),
+        host_memory_available_bytes: Some((5 << 30) - (k << 26)),
+        in_flight: k % 3,
+        queued: k % 4 / 3,
+        busy: k % 3,
+        workers: 2,
+    }
+}
+
+/// What the host's process and machine are, for every page that shows
+/// them now: fixed, so that the machine the snapshot is taken on never
+/// reaches a page.
+fn fixed_platform() -> minicloud::platform::PlatformSample {
+    minicloud::platform::PlatformSample {
+        memory_bytes: Some(900 << 20),
+        memory_max_bytes: Some(2 << 30),
+        rss_bytes: Some(400 << 20),
+        cpu_usage_usec: Some(123_456_789),
+        cpu_throttled_usec: Some(1_000_000),
+        cpu_throttled_periods: Some(3),
+        cpu_quota_millicores: Some(2000),
+        disk_total_bytes: Some(100 << 30),
+        disk_available_bytes: Some(55 << 30),
+        store_bytes: Some(1 << 20),
+        load1_milli: Some(420),
+        host_memory_total_bytes: Some(8 << 30),
+        host_memory_available_bytes: Some(5 << 30),
+        in_flight: 1,
+        queued: 0,
+        busy: 1,
+        workers: 2,
+    }
+}
+
 /// Writes the history the Metrics tab draws, straight into the host's own
 /// series store, so that the charts are the same every run.
 ///
@@ -215,6 +265,9 @@ fn minute(
 ///   and the day window the minutes; the hour window has nothing.
 /// - `catalog`: one minute, which is "one row so far".
 /// - every other app: no row at all.
+/// - the host itself (the Platform page): a row for every minute of
+///   `hello`, which the hour and the day draw, and the minutes of `notes`
+///   three days earlier, rolled up into the three hours the month draws.
 fn write_history(apps: &Apps) {
     let series =
         minicloud::series::Series::open(&apps.data.join("_host").join("series.sqlite3")).unwrap();
@@ -229,11 +282,22 @@ fn write_history(apps: &Apps) {
             let at = start + hour * 3600 + m * 60;
             let k = (hour * 4 + m / 15) as u64;
             rows.push(minute("notes", at, 10 + k, 0, 400 + 25 * k, 900 + 50 * k));
+            // The host's, three days back: older than the day window, so
+            // that the day draws the recent minutes alone and the points of
+            // neither depend on when in the hour the run is.
+            series.record_host(&host_minute(at - 67 * 3600, k)).unwrap();
         }
     }
     series.record(&rows).unwrap();
     // Every minute before the hour after the last of them is rolled up, and
     // nothing else has been written yet.
+    series
+        .sweep(
+            start + 3 * 3600 - 67 * 3600,
+            minicloud::series::KEEP_MINUTES_SECS,
+            minicloud::series::KEEP_HOURS_SECS,
+        )
+        .unwrap();
     series
         .sweep(
             start + 3 * 3600,
@@ -262,6 +326,7 @@ fn write_history(apps: &Apps) {
         let gap = if i >= 4 { 1 } else { 0 };
         let at = this_minute - (10 - i as i64 - gap) * 60;
         rows.push(minute("hello", at, served, errors, p50, p99));
+        series.record_host(&host_minute(at, i as u64)).unwrap();
     }
     rows.push(minute("catalog", this_minute - 5 * 60, 4, 0, 600, 1100));
     series.record(&rows).unwrap();
@@ -270,6 +335,14 @@ fn write_history(apps: &Apps) {
 /// Rows of `app`'s history the host reads for `over`.
 fn rows(host: &Host, app: &str, over: &str) -> usize {
     let answer = get(host.addr, &format!("/_host/series?app={app}&over={over}"));
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let json: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
+    json["rows"].as_array().map_or(0, Vec::len)
+}
+
+/// Rows of the host's own history the host reads for `over`.
+fn platform_rows(host: &Host, over: &str) -> usize {
+    let answer = get(host.addr, &format!("/_host/platform?over={over}"));
     assert_eq!(answer.status, 200, "{}", answer.body);
     let json: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
     json["rows"].as_array().map_or(0, Vec::len)
@@ -297,6 +370,14 @@ fn check_history(host: &Host) {
             n,
             "`{app}` over {over}: the host's own sampler wrote a row while the snapshot \
              was taken, so the Metrics pages are not the fixed history — run it again"
+        );
+    }
+    for (over, n) in [("hour", 8), ("day", 8), ("month", 3)] {
+        assert_eq!(
+            platform_rows(host, over),
+            n,
+            "the platform over {over}: the host's own sampler wrote a row while the \
+             snapshot was taken, so the Platform pages are not the fixed history — run it again"
         );
     }
 }
@@ -341,6 +422,7 @@ fn every_admin_page() {
     let mut options = options(&apps, 2);
     options.forwarding.public_origin = Some("https://covtools.ramda.io".parse().unwrap());
     let host = Host::start(options).unwrap();
+    host.set_platform_source(std::sync::Arc::new(fixed_platform));
 
     // ------------------------------------------------------------ the data
     //
@@ -455,6 +537,15 @@ fn every_admin_page() {
             );
         }
     }
+    // The platform: each window, and one nobody knows (an hour).
+    for over in ["hour", "day", "month", "decade"] {
+        snap.page(
+            &host,
+            &format!("platform-over-{over}"),
+            &format!("/platform?over={over}"),
+        );
+    }
+    snap.page(&host, "platform", "/platform");
     check_history(&host);
 
     // The store: a page, the next, a prefix, a prefix of nothing, keys.

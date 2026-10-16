@@ -36,6 +36,9 @@ use std.html
 /// - `GET /logs` is **every app's log in one order**, oldest first, each
 ///   line saying which app it came from, with the way to each app's own
 ///   Logs beside it. `?n=` is how many lines, as it is on an app's.
+/// - `GET /platform` is the host itself: its memory against `MemoryMax`, its
+///   CPU against `CPUQuota`, its disk and its workers, now and over the last
+///   hour, day or 30 days (`?over=`). Reading only.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -71,6 +74,9 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if section == "logs" && name == "" && get {
     return htmlResponse(200, allLogsPage(at, request))
+  }
+  if section == "platform" && name == "" && get {
+    return htmlResponse(200, platformPage(at, request))
   }
   if section == "history" && name == "" && get {
     return htmlResponse(200, historyPage(at, host.history(200)))

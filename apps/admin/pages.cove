@@ -68,6 +68,7 @@ fn nav(base: String, here: String) -> Html {
   for item in Vector.of(
     MapEntry(key: "apps", value: "/"),
     MapEntry(key: "logs", value: "/logs"),
+    MapEntry(key: "platform", value: "/platform"),
     MapEntry(key: "secrets", value: "/secrets"),
     MapEntry(key: "history", value: "/history"),
   )
@@ -2446,13 +2447,19 @@ fn metricsSpan(over: String) -> String {
 /// The three windows as the same page with `?over=`, the one being shown
 /// marked and not a link, as the lines of a log page are.
 fn metricsSteps(at: String, over: String) -> Html {
+  windowSteps("{at}/metrics", over)
+}
+
+/// The three windows as links to `page?over=`, the one shown marked: the
+/// row an app's Metrics and the Platform page both carry.
+fn windowSteps(page: String, over: String) -> Html {
   var steps = Vector.of()
   for name in Vector.of("hour", "day", "month").freeze() {
     let label = metricsSpan(name)
     if name == over {
       steps.push(html"<b>{label}</b>")
     } else {
-      steps.push(html"""<a href="{at}/metrics?over={name}">{label}</a>""")
+      steps.push(html"""<a href="{page}?over={name}">{label}</a>""")
     }
   }
   html"<p class=actions><span class=muted>window:</span> {html.join(steps.freeze(), html" ")}</p>"
@@ -2705,6 +2712,300 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
       {head}{lead}{steps}{figures}{covers}
       <h2>Traffic</h2>{traffic}
       <h2>Speed, in milliseconds</h2>{speed}
+      """,
+  )
+}
+
+// ---------------------------------------------------------- platform
+//
+// The host itself: every app runs in one process on one pool of workers, so
+// the limits that bind them all are the process's — the systemd unit's
+// `MemoryMax=` and `CPUQuota=`, the disk the data directory is on, and the
+// workers. The figures are the host's (`host.platformNow`, and the minutes
+// it keeps beside the apps' with `host.platform`); a figure it cannot read —
+// no cgroup, not Linux — is a dash and not a zero.
+
+/// A size as people read one, in GiB past one: a memory limit or a disk is
+/// gigabytes, and `2048.0 MiB` is a number to divide in one's head.
+fn platformBytes(count: Int) -> String {
+  if count < 1073741824 {
+    return text.bytes(count)
+  }
+  "{count / 1073741824}.{count % 1073741824 * 10 / 1073741824} GiB"
+}
+
+/// A size the host may not know: the size, or a dash.
+fn knownBytes(count: Option<Int>) -> String {
+  match count {
+    Some(bytes) => platformBytes(bytes)
+    None => "—"
+  }
+}
+
+/// `part` as a whole percentage of `whole`, or a dash for a whole of
+/// nothing.
+fn percentOf(part: Int, whole: Int) -> String {
+  if whole <= 0 {
+    return "—"
+  }
+  "{part * 100 / whole}%"
+}
+
+/// How the share of a limit is coloured: past 80% is worth a look, past 95%
+/// is trouble.
+fn pressure(percent: Int) -> String {
+  if percent >= 95 {
+    " is-bad"
+  } else if percent >= 80 {
+    " is-warn"
+  } else {
+    ""
+  }
+}
+
+/// The CPU used over `spanSecs`, as a whole percentage of `millicores`
+/// (thousandths of a CPU; the quota, or 1000 — one CPU — where there is
+/// none): 30 s over a minute of a 2-CPU quota is 25%.
+fn cpuPercent(usec: Int, spanSecs: Int, millicores: Int) -> Int {
+  let whole = spanSecs * 10 * millicores
+  if whole <= 0 {
+    return 0
+  }
+  usec / whole
+}
+
+/// Thousandths as a number with two decimals: a load average, a count of
+/// CPUs.
+fn thousandths(milli: Int) -> String {
+  let hundredths = (milli + 5) / 10
+  "{hundredths / 100}.{text.padded(hundredths % 100, 2)}"
+}
+
+/// One figure of the band.
+fn platformFig(label: String, big: String, note: String, level: String) -> Html {
+  html"""
+    <div class="fig{level}">
+      <span class=lbl>{label}</span>
+      <span class=big>{big}</span>
+      <span class=note>{note}</span>
+    </div>
+    """
+}
+
+/// The memory figure: what the cgroup is charged for, of `MemoryMax=`.
+fn memoryFig(now: host.PlatformNow) -> Html {
+  let used = now.memoryBytes.unwrapOr(-1)
+  let max = now.memoryMaxBytes.unwrapOr(0)
+  let note = if used < 0 {
+    "the host cannot read its cgroup"
+  } else if max <= 0 {
+    "no MemoryMax"
+  } else {
+    "of {platformBytes(max)}, {percentOf(used, max)}"
+  }
+  let level = if used >= 0 && max > 0 { pressure(used * 100 / max) } else { "" }
+  platformFig("memory", knownBytes(now.memoryBytes), note, level)
+}
+
+/// The CPU figure: what the cgroup used over the last minute the host
+/// sampled, of its quota.
+fn cpuFig(last: Option<host.PlatformPoint>) -> Html {
+  let point = match last {
+    Some(point) => point
+    None => return platformFig("cpu", "—", "no minute sampled yet", "")
+  }
+  let quota = point.cpuQuotaMillicores.unwrapOr(0)
+  let of = if quota > 0 { quota } else { 1000 }
+  let what = if quota > 0 { "of {thousandths(quota)} CPUs (CPUQuota)" } else { "of one CPU; no CPUQuota" }
+  match point.cpuUsec {
+    Some(usec) => {
+      let percent = cpuPercent(usec, 60, of)
+      let throttled = point.cpuThrottledUsec.unwrapOr(0)
+      let held = if throttled > 0 { ", throttled {throttled / 1000} ms" } else { "" }
+      platformFig("cpu", "{percent}%", "{what}, last minute{held}", pressure(percent))
+    }
+    None => platformFig("cpu", "—", "the host cannot read its cgroup", "")
+  }
+}
+
+/// The disk figure: what is free on the data directory's disk.
+fn diskFig(now: host.PlatformNow) -> Html {
+  let total = now.diskTotalBytes.unwrapOr(0)
+  let free = now.diskAvailableBytes.unwrapOr(0)
+  let history = knownBytes(now.storeBytes)
+  let note = if total > 0 {
+    "free of {platformBytes(total)}; history {history}"
+  } else {
+    "no data directory, or not read"
+  }
+  let level = if total > 0 { pressure((total - free) * 100 / total) } else { "" }
+  platformFig("disk free", knownBytes(now.diskAvailableBytes), note, level)
+}
+
+/// The workers figure: busy of all, with what is waiting.
+fn workersFig(now: host.PlatformNow) -> Html {
+  let level = if now.queued > 0 { " is-warn" } else { "" }
+  platformFig(
+    "workers busy",
+    "{now.busy} / {now.workers}",
+    "{now.inFlight} in flight, {now.queued} queued",
+    level,
+  )
+}
+
+/// The machine's figure: the load average, and what memory it has left.
+fn machineFig(now: host.PlatformNow) -> Html {
+  let load = match now.load1Milli {
+    Some(milli) => thousandths(milli)
+    None => "—"
+  }
+  let memory = match now.hostMemoryAvailableBytes {
+    Some(free) => "{platformBytes(free)} of {knownBytes(now.hostMemoryTotalBytes)} memory free"
+    None => "machine memory unknown"
+  }
+  platformFig("load", load, memory, "")
+}
+
+/// The Platform page: the figures now, then the minutes (or hours) the
+/// host kept of them over the window asked for.
+fn platformPage(base: String, request: web.Request) -> Html {
+  let over = metricsWindow(request)
+  let span = metricsSpan(over)
+  let now = host.platformNow()
+  let recent = host.platform("hour")
+  let last = recent.get(recent.length() - 1)
+  let lead = html"""
+    <p class=lead>The host itself. Every app runs in one process on one pool of workers, so
+    the limits that bind them all are the process's: the service's <code>MemoryMax</code> and
+    <code>CPUQuota</code>, the disk its data directory is on, and its workers. The figures
+    below are now; the charts are what the host sampled once a minute, kept as the apps'
+    are. A dash is a figure the host cannot read here — it reads its cgroup and
+    <code>/proc</code>, which only Linux has.</p>
+    """
+  let figures = html"""
+    <div class=strip>
+      {memoryFig(now)}{cpuFig(last)}{diskFig(now)}{workersFig(now)}{machineFig(now)}
+    </div>
+    """
+  let steps = windowSteps("{base}/platform", over)
+  let points = host.platform(over)
+  if points.length() == 0 {
+    return layout(
+      base,
+      "platform",
+      "platform",
+      html"""
+        <h1>Platform</h1>{lead}{figures}{steps}
+        <p class=muted>Nothing to chart for {span}: either the host has not sampled itself
+        yet — the first minute after a start keeps nothing, as there is nothing yet to take
+        the CPU's difference from — or it keeps no history, which it does not without a data
+        directory.</p>
+        """,
+    )
+  }
+  let seconds = if over == "month" { 3600 } else { 60 }
+  var times = Vector.of()
+  var memory = Vector.of()
+  var limit = Vector.of()
+  var cpu = Vector.of()
+  var throttled = Vector.of()
+  var free = Vector.of()
+  var total = Vector.of()
+  var inFlight = Vector.of()
+  var queued = Vector.of()
+  for point in points {
+    let of = point.cpuQuotaMillicores.unwrapOr(1000)
+    times.push(point.atUnix)
+    memory.push(point.memoryBytes.unwrapOr(0))
+    limit.push(point.memoryMaxBytes.unwrapOr(0))
+    cpu.push(cpuPercent(point.cpuUsec.unwrapOr(0), seconds, of))
+    throttled.push(point.cpuThrottledUsec.unwrapOr(0) / (seconds * 10000))
+    free.push(point.diskAvailableBytes.unwrapOr(0))
+    total.push(point.diskTotalBytes.unwrapOr(0))
+    inFlight.push(point.inFlight)
+    queued.push(point.queued)
+  }
+  let timeRows = times.freeze()
+  let memoryRows = memory.freeze()
+  let limitRows = limit.freeze()
+  let cpuRows = cpu.freeze()
+  let throttledRows = throttled.freeze()
+  let freeRows = free.freeze()
+  let totalRows = total.freeze()
+  let flightRows = inFlight.freeze()
+  let queuedRows = queued.freeze()
+  let each = if over == "month" { "hour" } else { "minute" }
+  let first = timeRows.get(0).unwrapOr(0)
+  let final = timeRows.get(timeRows.length() - 1).unwrapOr(0)
+  let rows = if points.length() == 1 { "1 row" } else { "{points.length()} rows" }
+  let covers = html"""
+    <p class=muted>{rows}, one for each {each} the host sampled, from
+    {text.isoTime(first * 1000)} to {text.isoTime(final * 1000)}. The CPU is what the
+    {each} used of the quota (of one CPU without one); memory, disk and workers are as they
+    were at its end, and an hour is its worst minute.</p>
+    """
+  let memoryLargest = metricsLargest(memoryRows, limitRows)
+  let memoryChart = metricsChart(
+    "memory used and MemoryMax, {span}",
+    platformBytes(memoryLargest),
+    memoryLargest,
+    timeRows,
+    memoryRows,
+    "ln-used",
+    "used",
+    limitRows,
+    "ln-limit",
+    "MemoryMax",
+  )
+  let cpuLargest = metricsLargest(cpuRows, throttledRows)
+  let cpuChart = metricsChart(
+    "CPU used and throttled, percent, {span}",
+    "{cpuLargest}%",
+    cpuLargest,
+    timeRows,
+    cpuRows,
+    "ln-used",
+    "used, % of the quota",
+    throttledRows,
+    "ln-held",
+    "throttled, % of the {each}",
+  )
+  let diskLargest = metricsLargest(freeRows, totalRows)
+  let diskChart = metricsChart(
+    "disk free and disk size, {span}",
+    platformBytes(diskLargest),
+    diskLargest,
+    timeRows,
+    freeRows,
+    "ln-used",
+    "free",
+    totalRows,
+    "ln-limit",
+    "size",
+  )
+  let workLargest = metricsLargest(flightRows, queuedRows)
+  let workChart = metricsChart(
+    "requests in flight and queued, {span}",
+    "{workLargest}",
+    workLargest,
+    timeRows,
+    flightRows,
+    "ln-used",
+    "in flight",
+    queuedRows,
+    "ln-held",
+    "queued",
+  )
+  layout(
+    base,
+    "platform",
+    "platform",
+    html"""
+      <h1>Platform</h1>{lead}{figures}{steps}{covers}
+      <h2>Memory</h2>{memoryChart}
+      <h2>CPU</h2>{cpuChart}
+      <h2>Disk</h2>{diskChart}
+      <h2>Requests</h2>{workChart}
       """,
   )
 }
