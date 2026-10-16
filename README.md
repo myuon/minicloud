@@ -972,6 +972,7 @@ token` secret is the way in. See
 | `GET /_host/stats` | every app's counters as JSON, with the server's totals |
 | `GET /_host/metrics` | the same, in the text format Prometheus scrapes (`version=0.0.4`), with the request times as a histogram |
 | `GET /_host/series?app=&over=hour\|day\|month` | what each app did minute by minute (or, for a month, hour by hour) |
+| `GET /_host/platform?over=hour\|day\|month` | the host itself — its cgroup's memory against `MemoryMax`, CPU against `CPUQuota` and throttling, the data directory's disk, the machine's load and memory, workers busy and requests queued — now, and minute by minute (or hour by hour) |
 | `GET /_host/apps/<app>` | one app as JSON: its limits, every version it has had, its last 50 errors, and on the native tier which functions stayed on the VM and why |
 | `GET /_host/apps/<app>/logs?n=200` | its recent log lines, as text |
 | `GET /_host/apps/<app>/logs?follow=1` | those, and then every line as it is written: server-sent events, until the client goes away |
@@ -1067,11 +1068,32 @@ The first sample after a start writes nothing — there is nothing to take a
 difference from, and a host that counted its running totals as one minute's
 work would show a spike at every restart.
 
+**The host itself** is sampled on the same tick (`platform.rs`): every app
+runs in one process on one pool of workers, so what binds them all is the
+systemd unit's `MemoryMax=` and `CPUQuota=`, the disk and the workers. The
+host reads its cgroup v2 (`memory.current`, `memory.max`, `cpu.stat`,
+`cpu.max`, found through `/proc/self/cgroup`), `/proc/self/status`,
+`/proc/loadavg`, `/proc/meminfo` and `statvfs` of the data directory, and
+keeps a row a minute beside the apps' — the CPU as what it used over the
+minute, the rest as gauges at its end — rolled up into hours with the CPU
+summed, memory and the queues at their largest minute, free disk and free
+memory at their smallest, and the load averaged. A figure it cannot read
+(not Linux, cgroup v1, a sandbox that hides the file) is `null`, never zero.
+
+- `GET /_host/platform?over=hour|day|month` is those rows, and `now`.
+- The admin app's **Platform** page (`/platform`) shows them against their
+  limits, with a chart each for memory, CPU, disk and requests.
+
 **Prometheus** scrapes `GET /_host/metrics`: `minicloud_requests_total`,
 `_requests_ok_total`, `_errors_total` by kind, `_rejected_total` by reason,
 `_worker_seconds_total`, `_in_flight`, `_queued`, `_assets_served_total`,
 `_trigger_runs_total` and `minicloud_request_duration_seconds` as a
-histogram, each labelled by app. With `--ops-listener admin` (as deployed)
+histogram, each labelled by app; and the host's own figures, unlabelled:
+`minicloud_host_memory_current_bytes`, `_memory_max_bytes`, `_rss_bytes`,
+`_cpu_usage_seconds_total`, `_cpu_throttled_seconds_total`,
+`_cpu_quota_cores`, `_disk_available_bytes`, `_disk_total_bytes`, `_load1`,
+`_memory_available_bytes`, `_workers_busy`, `_workers` and `_queued` (a
+figure the host cannot read is left out). With `--ops-listener admin` (as deployed)
 that is on the admin listener, where a scraper on the machine reaches it.
 
 ### Logs

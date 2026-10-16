@@ -160,12 +160,22 @@ pub(crate) struct Front {
     pub(crate) sampled: std::sync::Mutex<
         std::collections::HashMap<String, (crate::series::Sample, crate::histogram::Snapshot)>,
     >,
+    /// Where [`Front::platform_now`] reads the host's process and machine
+    /// from: `None` for the live files ([`crate::platform::read_system`]),
+    /// or what a test put there ([`Host::set_platform_source`]).
+    pub(crate) platform_source: std::sync::RwLock<Option<PlatformSource>>,
+    /// The platform as the last sample saw it, which the next one takes the
+    /// CPU's difference from.
+    pub(crate) platform_sampled: std::sync::Mutex<Option<crate::platform::PlatformSample>>,
     pub(crate) admin_token: String,
     /// Set by [`Host::shutdown`]: new requests are answered 503.
     draining: AtomicBool,
     /// What the public listener accepts with, when it terminates TLS.
     pub(crate) certificates: Option<Arc<crate::tls::Certificates>>,
 }
+
+/// What a test reads the platform from instead of the live files.
+pub type PlatformSource = Arc<dyn Fn() -> crate::platform::PlatformSample + Send + Sync>;
 
 /// Why an update did not happen.
 #[derive(Debug)]
@@ -345,6 +355,8 @@ impl Host {
             certificates,
             series,
             sampled: std::sync::Mutex::new(std::collections::HashMap::new()),
+            platform_source: std::sync::RwLock::new(None),
+            platform_sampled: std::sync::Mutex::new(None),
         });
         control.attach(&front);
         let (listener, admin) = {
@@ -429,6 +441,24 @@ impl Host {
     /// minute's work would show a spike at every restart.
     pub fn sample_now(&self, at_unix: i64) -> usize {
         ops::sample_now(&self.front, at_unix)
+    }
+
+    /// Reads the host's process and machine from `source` from now on,
+    /// instead of the live files and the engine's gauges: what a test does
+    /// so that the platform's figures, in the history and on a page, are
+    /// its own and not the machine's it runs on.
+    pub fn set_platform_source(&self, source: PlatformSource) {
+        *self
+            .front
+            .platform_source
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(source);
+    }
+
+    /// What the host's process and machine look like now
+    /// ([`crate::platform`]).
+    pub fn platform_now(&self) -> crate::platform::PlatformSample {
+        self.front.platform_now()
     }
 
     /// What `GET /_host/stats` answers.
@@ -1019,7 +1049,7 @@ impl Front {
                     // the text exposition format, version 0.0.4.
                     "text/plain; version=0.0.4; charset=utf-8".into(),
                 )],
-                body: Bytes::from(ops::metrics(&self.ops())),
+                body: Bytes::from(ops::metrics(&self.ops(), &self.platform_now())),
                 stream: None,
             };
         }
@@ -1036,6 +1066,16 @@ impl Front {
                 asked.get("app").map(String::as_str),
                 asked.get("over").map(String::as_str).unwrap_or("hour"),
             ));
+        }
+        if path == "/_host/platform" {
+            let over = query
+                .and_then(|query| {
+                    form_urlencoded::parse(query.as_bytes())
+                        .find(|(key, _)| key == "over")
+                        .map(|(_, over)| over.into_owned())
+                })
+                .unwrap_or_else(|| "hour".to_string());
+            return json_reply(&ops::platform(&self.ops(), &self.platform_now(), &over));
         }
         if path == "/_host/ui" {
             return Reply {
@@ -1071,6 +1111,29 @@ impl Front {
             return Reply::text(200, app.logs.tail(lines));
         }
         Reply::text(404, format!("minicloud has nothing at `{path}`\n"))
+    }
+
+    /// What the host's process and machine look like now: what a test put
+    /// in [`Front::platform_source`], or the live files and the engine's
+    /// gauges.
+    pub(crate) fn platform_now(&self) -> crate::platform::PlatformSample {
+        let source = self
+            .platform_source
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(source) = source {
+            return source();
+        }
+        let mut sample = crate::platform::read_system(self.options.data.as_deref());
+        for slot in self.engine.slots() {
+            let (in_flight, queued) = self.engine.queue.gauges(slot.index);
+            sample.in_flight += in_flight as u64;
+            sample.queued += queued as u64;
+        }
+        sample.busy = self.engine.busy() as u64;
+        sample.workers = self.engine.workers() as u64;
+        sample
     }
 
     pub(crate) fn ops_context(&self) -> OpsContext<'_> {

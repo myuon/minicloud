@@ -629,6 +629,16 @@ impl Engine {
         self.running.len()
     }
 
+    /// Workers running a run at this moment ([`crate::platform`]): a run
+    /// that yielded or parked holds none, so this is at most
+    /// [`Engine::workers`] however many requests are in flight.
+    pub fn busy(&self) -> usize {
+        self.running
+            .iter()
+            .filter(|running| running.lock().unwrap().is_some())
+            .count()
+    }
+
     /// Starts the worker threads.
     pub fn start_workers(self: &Arc<Self>) -> Result<Vec<JoinHandle<()>>, String> {
         (0..self.running.len())

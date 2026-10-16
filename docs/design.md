@@ -932,6 +932,22 @@ so a scraper already knows how to read it. Every series is labelled by app,
 because the totals are a sum anyone can do and the per-app numbers are not
 recoverable from them.
 
+**The host is sampled too, because the limits that matter are its.** Every
+app runs in one process on one worker pool, so no app has a memory or CPU
+limit of its own to run into: the systemd unit's `MemoryMax=` and
+`CPUQuota=` are on the process, and when one is reached every app slows or
+dies together. The same tick reads the process's cgroup v2, `/proc` and
+`statvfs` of the data directory (`platform.rs`) and keeps a row beside the
+apps' (`host_minute`, `host_hour`, the same retention). The CPU is a counter
+and is kept as a difference, the first tick keeping nothing, as for the
+apps; the rest are gauges. An hour keeps the *worst* minute of each gauge —
+the most memory, the least free disk — because the question is how close
+the host came to its edge, and an average hides the minute it nearly fell
+off; only the load average, already a mean, is averaged. Every figure from
+a file is optional: macOS, cgroup v1 and a sandbox that hides a file give
+`null`, and the sampler never fails for one. A test replaces the source
+(`Host::set_platform_source`), so nothing it asserts is the machine's.
+
 ## The front door
 
 Until `--tls-cert`, the host could not be reached by a browser without

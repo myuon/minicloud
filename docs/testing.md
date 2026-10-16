@@ -169,6 +169,19 @@ so, and what it asserts is counted.
   histogram's own tests hold the bucketing, the interpolation and the
   difference; the series' hold the upsert, the roll-up (summed counts,
   worst percentiles), the pruning and that sweeping twice does not double;
+- the platform (`platform.rs`, the Platform page in `admin.rs`, and
+  `platform.rs`'s and `series.rs`'s unit tests), with the figures from
+  `Host::set_platform_source` and never the machine's: a minute is the CPU
+  the cgroup used over it and the gauges at its end, the first sample keeps
+  nothing, an unknown figure is `null` and not 0; `/_host/metrics` carries
+  the `minicloud_host_*` lines and leaves out what is unknown; the live read
+  never fails; the Platform page shows memory, CPU, disk and workers
+  against their limits and charts the minutes. The unit tests hold the
+  parsers of `/proc/self/cgroup`, `memory.max` (`max` is no limit),
+  `cpu.max`, `cpu.stat`, `/proc/meminfo`, `VmRSS` and `/proc/loadavg`, a
+  read of fixture files under a root, and the host rows' round trip and
+  roll-up (CPU summed, memory at its largest, free disk at its smallest,
+  load averaged);
 - `[rate]` (`rate.rs`, and `rate.rs`'s unit tests): a caller past its
   allowance is 429 with a `Retry-After` and the app does not run, while its
   neighbour answers; a burst larger than the rate is allowed and then is

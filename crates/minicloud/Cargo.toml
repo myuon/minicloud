@@ -54,6 +54,11 @@ base64 = "0.22"
 # `split`, so the socket task may read and write at once.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
+# `statvfs`, for how full the data directory's disk is
+# ([`minicloud::platform`]).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The WebSocket tests' client.
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
