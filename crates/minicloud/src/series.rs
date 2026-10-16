@@ -19,6 +19,17 @@
 //! belong to remains, kept for [`KEEP_HOURS_SECS`]. That bounds the file: an
 //! app costs 2880 + 2160 rows however long it runs.
 //!
+//! # The host's own rows
+//!
+//! Beside the apps' rows, `host_minute` and `host_hour` keep the host's
+//! process and machine ([`crate::platform`]): one [`HostRow`] a minute, rolled
+//! up and pruned with the apps' rows and kept as long. A row's CPU figures
+//! are what the cgroup's counters grew by over its span; everything else is
+//! a gauge read at the end of it. How an hour is made of its minutes is
+//! [`HOST_COLUMNS`]: the CPU time is summed, memory and the engine's gauges
+//! take the worst (largest) minute, free disk and free memory the worst
+//! (smallest), and the load average the mean.
+//!
 //! Error messages never carry the file path: they reach HTTP responses and
 //! logs that outsiders may read, and the data directory's layout is not
 //! theirs to learn.
@@ -53,6 +64,113 @@ pub struct Sample {
     /// Microseconds, estimated from the request-time histogram.
     pub p50_us: u64,
     pub p99_us: u64,
+}
+
+/// What the host's process and machine looked like over one minute or one
+/// hour ([`crate::platform::PlatformSample`] as the history keeps it).
+///
+/// A figure the host could not read is `None` (a `NULL` in the store), which
+/// is not zero: a host on macOS has no cgroup, and a graph should say so
+/// rather than draw a floor.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HostRow {
+    /// The minute (or hour) this covers, as seconds since the epoch.
+    pub at_unix: i64,
+    pub memory_bytes: Option<u64>,
+    pub memory_max_bytes: Option<u64>,
+    pub rss_bytes: Option<u64>,
+    /// CPU time the cgroup used over the span, in microseconds.
+    pub cpu_usec: Option<u64>,
+    /// Time the quota held the cgroup back over the span, in microseconds.
+    pub cpu_throttled_usec: Option<u64>,
+    /// Periods the quota ran out in over the span.
+    pub cpu_throttled_periods: Option<u64>,
+    pub cpu_quota_millicores: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    pub disk_available_bytes: Option<u64>,
+    pub store_bytes: Option<u64>,
+    pub load1_milli: Option<u64>,
+    pub host_memory_total_bytes: Option<u64>,
+    pub host_memory_available_bytes: Option<u64>,
+    pub in_flight: u64,
+    pub queued: u64,
+    pub busy: u64,
+    pub workers: u64,
+}
+
+/// The host rows' columns after `at`, in [`HostRow`]'s order, each with how
+/// an hour is made of its minutes. SQLite's aggregates skip `NULL`, so an
+/// hour with some unknown minutes is made of the known ones, and an hour of
+/// none is `NULL` again.
+pub const HOST_COLUMNS: [(&str, &str); 17] = [
+    ("memory_bytes", "MAX"),
+    ("memory_max_bytes", "MAX"),
+    ("rss_bytes", "MAX"),
+    ("cpu_usec", "SUM"),
+    ("cpu_throttled_usec", "SUM"),
+    ("cpu_throttled_periods", "SUM"),
+    ("cpu_quota_millicores", "MAX"),
+    ("disk_total_bytes", "MAX"),
+    ("disk_available_bytes", "MIN"),
+    ("store_bytes", "MAX"),
+    ("load1_milli", "AVG"),
+    ("host_memory_total_bytes", "MAX"),
+    ("host_memory_available_bytes", "MIN"),
+    ("in_flight", "MAX"),
+    ("queued", "MAX"),
+    ("busy", "MAX"),
+    ("workers", "MAX"),
+];
+
+/// The four engine gauges, which are always known.
+const HOST_NOT_NULL: [&str; 4] = ["in_flight", "queued", "busy", "workers"];
+
+impl HostRow {
+    /// The values after `at`, in [`HOST_COLUMNS`]' order.
+    fn values(&self) -> [Option<u64>; 17] {
+        [
+            self.memory_bytes,
+            self.memory_max_bytes,
+            self.rss_bytes,
+            self.cpu_usec,
+            self.cpu_throttled_usec,
+            self.cpu_throttled_periods,
+            self.cpu_quota_millicores,
+            self.disk_total_bytes,
+            self.disk_available_bytes,
+            self.store_bytes,
+            self.load1_milli,
+            self.host_memory_total_bytes,
+            self.host_memory_available_bytes,
+            Some(self.in_flight),
+            Some(self.queued),
+            Some(self.busy),
+            Some(self.workers),
+        ]
+    }
+
+    fn from_values(at_unix: i64, v: [Option<u64>; 17]) -> HostRow {
+        HostRow {
+            at_unix,
+            memory_bytes: v[0],
+            memory_max_bytes: v[1],
+            rss_bytes: v[2],
+            cpu_usec: v[3],
+            cpu_throttled_usec: v[4],
+            cpu_throttled_periods: v[5],
+            cpu_quota_millicores: v[6],
+            disk_total_bytes: v[7],
+            disk_available_bytes: v[8],
+            store_bytes: v[9],
+            load1_milli: v[10],
+            host_memory_total_bytes: v[11],
+            host_memory_available_bytes: v[12],
+            in_flight: v[13].unwrap_or(0),
+            queued: v[14].unwrap_or(0),
+            busy: v[15].unwrap_or(0),
+            workers: v[16].unwrap_or(0),
+        }
+    }
 }
 
 /// How far back `over` reaches, in seconds, and whether the hour table is the
@@ -137,7 +255,103 @@ impl Series {
             ))
             .map_err(fail)?;
         }
+        for table in ["host_minute", "host_hour"] {
+            let columns: Vec<String> = HOST_COLUMNS
+                .iter()
+                .map(|(name, _)| {
+                    let null = if HOST_NOT_NULL.contains(name) {
+                        " NOT NULL"
+                    } else {
+                        ""
+                    };
+                    format!("{name} INTEGER{null}")
+                })
+                .collect();
+            conn.execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (
+                    at INTEGER PRIMARY KEY NOT NULL,
+                    {}
+                );",
+                columns.join(",\n")
+            ))
+            .map_err(fail)?;
+        }
         Ok(Series { conn })
+    }
+
+    /// Writes the host's row for one minute, replacing one already there.
+    pub fn record_host(&self, row: &HostRow) -> Result<(), String> {
+        let names: Vec<&str> = HOST_COLUMNS.iter().map(|(name, _)| *name).collect();
+        let holes: Vec<String> = (2..=HOST_COLUMNS.len() + 1)
+            .map(|i| format!("?{i}"))
+            .collect();
+        let updates: Vec<String> = names
+            .iter()
+            .map(|name| format!("{name} = excluded.{name}"))
+            .collect();
+        let sql = format!(
+            "INSERT INTO host_minute (at, {}) VALUES (?1, {})
+             ON CONFLICT(at) DO UPDATE SET {}",
+            names.join(", "),
+            holes.join(", "),
+            updates.join(", ")
+        );
+        let mut args: Vec<rusqlite::types::Value> = vec![floor_to(row.at_unix, MINUTE).into()];
+        for value in row.values() {
+            args.push(match value {
+                Some(n) => to_sql(n).into(),
+                None => rusqlite::types::Value::Null,
+            });
+        }
+        self.conn
+            .prepare_cached(&sql)
+            .map_err(fail)?
+            .execute(params_from_iter(args))
+            .map_err(fail)?;
+        Ok(())
+    }
+
+    /// The host's minutes from `since_unix` onwards, oldest first.
+    pub fn host_minutes(&self, since_unix: i64) -> Result<Vec<HostRow>, String> {
+        self.read_host("host_minute", since_unix)
+    }
+
+    /// The same from the hour table.
+    pub fn host_hours(&self, since_unix: i64) -> Result<Vec<HostRow>, String> {
+        self.read_host("host_hour", since_unix)
+    }
+
+    fn read_host(&self, table: &str, since: i64) -> Result<Vec<HostRow>, String> {
+        let names: Vec<&str> = HOST_COLUMNS.iter().map(|(name, _)| *name).collect();
+        let sql = format!(
+            "SELECT at, {} FROM {table} WHERE at >= ?1 ORDER BY at",
+            names.join(", ")
+        );
+        let mut statement = self.conn.prepare_cached(&sql).map_err(fail)?;
+        let rows = statement
+            .query_map(params![since], |row| {
+                let mut values = [None; 17];
+                for (i, value) in values.iter_mut().enumerate() {
+                    *value = row.get::<_, Option<i64>>(i + 1)?.map(|v| v.max(0) as u64);
+                }
+                Ok(HostRow::from_values(row.get(0)?, values))
+            })
+            .map_err(fail)?;
+        rows.collect::<Result<_, _>>().map_err(fail)
+    }
+
+    /// How many rows the host's two tables hold: minutes, then hours.
+    pub fn host_rows(&self) -> Result<(u64, u64), String> {
+        Ok((self.count("host_minute")?, self.count("host_hour")?))
+    }
+
+    fn count(&self, table: &str) -> Result<u64, String> {
+        self.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as u64)
+            .map_err(fail)
     }
 
     /// Writes one minute's samples. A minute already written for an app is
@@ -215,14 +429,49 @@ impl Series {
             params![this_hour],
         )
         .map_err(fail)?;
-        let minutes = tx
-            .execute("DELETE FROM minute WHERE at < ?1", params![minutes_before])
-            .map_err(fail)?;
-        let hours = tx
-            .execute("DELETE FROM hour WHERE at < ?1", params![hours_before])
-            .map_err(fail)?;
+        // The host's rows, by [`HOST_COLUMNS`]: the mean of the load is the
+        // one aggregate that is not a whole number, and is rounded to one.
+        let names: Vec<&str> = HOST_COLUMNS.iter().map(|(name, _)| *name).collect();
+        let rolled: Vec<String> = HOST_COLUMNS
+            .iter()
+            .map(|(name, how)| match *how {
+                "AVG" => format!("CAST(ROUND(AVG({name})) AS INTEGER)"),
+                how => format!("{how}({name})"),
+            })
+            .collect();
+        let updates: Vec<String> = names
+            .iter()
+            .map(|name| format!("{name} = excluded.{name}"))
+            .collect();
+        tx.execute(
+            &format!(
+                "INSERT INTO host_hour (at, {})
+                 SELECT at / 3600 * 3600, {} FROM host_minute WHERE at < ?1
+                 GROUP BY at / 3600 * 3600
+                 ON CONFLICT(at) DO UPDATE SET {}",
+                names.join(", "),
+                rolled.join(", "),
+                updates.join(", ")
+            ),
+            params![this_hour],
+        )
+        .map_err(fail)?;
+        let mut dropped = 0;
+        for (table, before) in [
+            ("minute", minutes_before),
+            ("hour", hours_before),
+            ("host_minute", minutes_before),
+            ("host_hour", hours_before),
+        ] {
+            dropped += tx
+                .execute(
+                    &format!("DELETE FROM {table} WHERE at < ?1"),
+                    params![before],
+                )
+                .map_err(fail)?;
+        }
         tx.commit().map_err(fail)?;
-        Ok((minutes + hours) as u64)
+        Ok(dropped as u64)
     }
 
     /// The minutes of `app` (or every app, for `None`) from `since_unix`
@@ -267,15 +516,7 @@ impl Series {
     /// How many rows each table holds, for the operations views: minutes,
     /// then hours.
     pub fn rows(&self) -> Result<(u64, u64), String> {
-        let count = |table: &str| -> Result<u64, String> {
-            self.conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
-                    r.get::<_, i64>(0)
-                })
-                .map(|n| n as u64)
-                .map_err(fail)
-        };
-        Ok((count("minute")?, count("hour")?))
+        Ok((self.count("minute")?, self.count("hour")?))
     }
 }
 
@@ -408,5 +649,86 @@ mod tests {
         s.sweep(H + 3600, KEEP_MINUTES_SECS, KEEP_HOURS_SECS)
             .unwrap();
         assert_eq!(s.rows().unwrap(), (2, 2));
+    }
+
+    fn host(at: i64, memory: u64, cpu: u64, load: Option<u64>) -> HostRow {
+        HostRow {
+            at_unix: at,
+            memory_bytes: Some(memory),
+            memory_max_bytes: Some(1000),
+            cpu_usec: Some(cpu),
+            cpu_throttled_usec: Some(cpu / 10),
+            cpu_throttled_periods: Some(1),
+            cpu_quota_millicores: Some(2000),
+            disk_total_bytes: Some(500),
+            disk_available_bytes: Some(400 - memory / 10),
+            load1_milli: load,
+            in_flight: memory / 100,
+            queued: 1,
+            busy: 1,
+            workers: 2,
+            ..HostRow::default()
+        }
+    }
+
+    #[test]
+    fn host_rows_round_trip_with_their_unknowns() {
+        let s = Series::in_memory().unwrap();
+        let a = host(H + 61, 300, 50, None);
+        s.record_host(&a).unwrap();
+        let got = s.host_minutes(0).unwrap();
+        assert_eq!(
+            got,
+            vec![HostRow {
+                at_unix: H + 60,
+                ..a
+            }]
+        );
+        assert_eq!(got[0].rss_bytes, None, "a NULL stays unknown");
+        // The same minute again replaces it.
+        s.record_host(&host(H + 60, 700, 9, Some(5))).unwrap();
+        let got = s.host_minutes(0).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].memory_bytes, Some(700));
+        assert_eq!(got[0].load1_milli, Some(5));
+        assert_eq!(s.host_minutes(H + 120).unwrap(), vec![]);
+        assert_eq!(s.host_rows().unwrap(), (1, 0));
+        assert_eq!(s.rows().unwrap(), (0, 0), "the apps' tables are apart");
+    }
+
+    #[test]
+    fn host_hours_sum_the_cpu_and_keep_the_worst_gauge() {
+        let s = Series::in_memory().unwrap();
+        for row in [
+            host(H, 300, 1000, Some(1000)),
+            host(H + 60, 900, 2000, Some(2000)),
+            host(H + 120, 600, 3000, None),
+            host(H + 3600, 100, 1, Some(9)),
+        ] {
+            s.record_host(&row).unwrap();
+        }
+        s.sweep(H + 3600 + 30, KEEP_MINUTES_SECS, KEEP_HOURS_SECS)
+            .unwrap();
+        // Twice, which must not double it.
+        s.sweep(H + 3600 + 30, KEEP_MINUTES_SECS, KEEP_HOURS_SECS)
+            .unwrap();
+        let hours = s.host_hours(0).unwrap();
+        assert_eq!(hours.len(), 1);
+        let h = &hours[0];
+        assert_eq!(h.at_unix, H);
+        assert_eq!(h.cpu_usec, Some(6000));
+        assert_eq!(h.cpu_throttled_usec, Some(600));
+        assert_eq!(h.cpu_throttled_periods, Some(3));
+        assert_eq!(h.memory_bytes, Some(900));
+        assert_eq!(h.memory_max_bytes, Some(1000));
+        assert_eq!(h.disk_available_bytes, Some(310), "the least free");
+        assert_eq!(h.load1_milli, Some(1500), "the mean of the known");
+        assert_eq!(h.rss_bytes, None, "unknown all hour");
+        assert_eq!(h.in_flight, 9);
+        assert_eq!(h.workers, 2);
+        // And the host's rows go with the apps' when they are old.
+        let dropped = s.sweep(H + 10 * 3600, 3600, 3600).unwrap();
+        assert_eq!(dropped, 6, "four minutes and the two hours they made");
+        assert_eq!(s.host_rows().unwrap(), (0, 0));
     }
 }

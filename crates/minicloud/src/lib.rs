@@ -49,6 +49,7 @@ pub mod logs;
 pub mod manage;
 pub mod ops;
 pub mod overrides;
+pub mod platform;
 pub mod proxy;
 pub mod queue;
 pub mod queue_host;
