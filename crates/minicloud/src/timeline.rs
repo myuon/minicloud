@@ -555,7 +555,7 @@ impl Recorder {
         let track = self.track(id, app, method, path, arrived, Some(queued), None, queued);
         Tracker {
             track,
-            shared: Arc::clone(&self.shared),
+            started: self.shared.started,
             done: false,
             meter: None,
         }
@@ -603,6 +603,15 @@ impl Recorder {
         }
         drop(gone);
         all
+    }
+
+    /// Forgets what is past the bounds in the shard of request `id`, as of
+    /// `at`: what the engine does where a request ends — on a worker, after
+    /// its answer has gone — and not where one is admitted, on the HTTP
+    /// side, which is what a host answering small requests runs out of
+    /// first. Admission trims too, but only a ring twice its bound.
+    pub fn trim(&self, id: u64, at: impl At) {
+        self.shared.forget(id, self.ns(at));
     }
 
     /// How many requests are kept, in flight and finished.
@@ -736,9 +745,14 @@ fn cut(text: &str, bytes: usize) -> &str {
 /// its events. Dropped without an end — the flight went down with a
 /// panicking job, or the queue was closed under it — it ends the record
 /// itself, as the HTTP side answers it: 500.
+///
+/// It holds the record and not the recorder: a count on the recorder that
+/// every request took on the HTTP side and gave back on a worker would be
+/// one cache line every thread fights over. Who ends a request keeps the
+/// bounds with [`Recorder::trim`].
 pub struct Tracker {
     track: Arc<Track>,
-    shared: Arc<Shared>,
+    started: Instant,
     done: bool,
     /// What its run came to: instructions and heap words.
     meter: Option<(u64, u64)>,
@@ -750,7 +764,7 @@ impl Tracker {
     }
 
     fn push(&self, at: impl At, what: What) {
-        let at_ns = at.ns(self.shared.started);
+        let at_ns = at.ns(self.started);
         self.track
             .state
             .with(|state| state.events.push(Event { at_ns, what }));
@@ -796,13 +810,13 @@ impl Tracker {
         reason: Option<&'static str>,
         worker: Duration,
     ) {
-        self.close(at.ns(self.shared.started), status, reason, false, worker);
+        self.close(at.ns(self.started), status, reason, false, worker);
     }
 
     /// The request was turned away at its app's queue.
     pub fn reject(&mut self, at: impl At, status: u16, reason: &'static str) {
         self.close(
-            at.ns(self.shared.started),
+            at.ns(self.started),
             status,
             Some(reason),
             true,
@@ -837,9 +851,6 @@ impl Tracker {
         };
         self.track.state.with(|state| state.end = Some(end));
         self.track.ended_ns.store(at_ns, Ordering::Release);
-        // The bounds are kept here, where a request ends — on a worker —
-        // and not where one is admitted, on the HTTP side.
-        self.shared.forget(self.track.id, at_ns);
     }
 }
 
@@ -851,7 +862,7 @@ impl Drop for Tracker {
             } else {
                 "dropped"
             };
-            let now = Instant::now().ns(self.shared.started);
+            let now = Instant::now().ns(self.started);
             self.close(now, 500, Some(reason), false, Duration::ZERO);
         }
     }
@@ -1650,6 +1661,7 @@ mod tests {
         for id in 0..1000 {
             let mut t = rec.admit(id, rec.app("a"), "GET", "/", 0u64, 0u64);
             t.end(0u64, 200, None, Duration::ZERO);
+            rec.trim(id, 0u64);
         }
         assert_eq!(rec.len(), 64);
         assert!(rec.request(935).is_none());

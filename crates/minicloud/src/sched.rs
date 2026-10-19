@@ -850,12 +850,10 @@ impl Engine {
     ) {
         // Before the answer goes, so that a client holding it finds it
         // recorded.
-        flight.track.end(
-            Instant::now(),
-            reply.status,
-            Some(kind.name()),
-            flight.tally.worker,
-        );
+        let ended = Instant::now();
+        flight
+            .track
+            .end(ended, reply.status, Some(kind.name()), flight.tally.worker);
         let app = &flight.version;
         app.counters.error(kind);
         app.counters
@@ -868,6 +866,7 @@ impl Engine {
         flight.reply.answer(reply);
         flight.reply.finish();
         self.queue.finished(flight.app);
+        self.timeline.trim(flight.id, ended);
     }
 
     /// What a run came to: an answer to send, a park to hand on, or a yield
@@ -926,6 +925,7 @@ impl Engine {
                         flight.reply.answer(reply);
                         flight.reply.finish();
                         self.queue.finished(flight.app);
+                        self.timeline.trim(flight.id, ended);
                     }
                     Err((kind, body)) => {
                         let line = format!(
