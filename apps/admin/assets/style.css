@@ -352,6 +352,9 @@ p.legend .key{display:inline-flex;align-items:center;gap:.5em}
 p.legend .ln{vector-effect:none}
 /* the largest value the chart is scaled to, at the far end of the key: a line with no number anywhere is a shape nobody can size, and the <title> is a hover a phone does not have */
 p.legend .peak{margin-left:auto;color:var(--muted)}
+/* the Live page: a worker busy or idle */
+.busy{color:var(--ok);background:var(--ok-bg)}
+.idle{color:var(--off);background:var(--off-bg)}
 /* the app's tabs on a narrow screen: seven tabs do not fit a phone in one row, and a row that scrolls sideways hides the ones that matter behind a gesture. A folder tab cannot wrap, because the line it sits on is at the bottom of the row and the tabs above it would hang in the air. So they are pills: the same words, the same order, the chosen one filled. */
 @media (max-width:560px){
 /* four figures are two rows of two, not three and an orphan */

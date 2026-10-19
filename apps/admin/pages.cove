@@ -69,6 +69,7 @@ fn nav(base: String, here: String) -> Html {
     MapEntry(key: "apps", value: "/"),
     MapEntry(key: "logs", value: "/logs"),
     MapEntry(key: "platform", value: "/platform"),
+    MapEntry(key: "live", value: "/live"),
     MapEntry(key: "secrets", value: "/secrets"),
     MapEntry(key: "history", value: "/history"),
   )
@@ -113,14 +114,19 @@ fn assetQuery(version: String) -> String {
 ///
 /// What it answers is still `Html`: [`htmlResponse`] is where a page becomes
 /// the text of a body.
-fn layout(base: String, here: String, title: String, content: Html) -> Html {
+///
+/// `refresh` is the seconds after which the browser loads the page again
+/// (`<meta http-equiv=refresh>`, which is HTML and not a script, so the CSP
+/// has nothing to say about it); 0, the default, never.
+fn layout(base: String, here: String, title: String, content: Html, refresh: Int = 0) -> Html {
   let v = assetQuery(host.selfVersion())
+  let again = html.only(refresh > 0, html"""<meta http-equiv=refresh content="{refresh}">""")
   html"""
     <!doctype html>
     <html lang=en>
     <head>
       <meta charset=utf-8>
-      <meta name=viewport content="width=device-width,initial-scale=1">
+      <meta name=viewport content="width=device-width,initial-scale=1">{again}
       <title>{title} · minicloud admin</title>
       <link rel=stylesheet href="{base}/style.css{v}">
       <link rel=icon href="{base}/favicon.svg{v}" type="image/svg+xml">

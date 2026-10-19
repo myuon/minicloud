@@ -39,6 +39,9 @@ use std.html
 /// - `GET /platform` is the host itself: its memory against `MemoryMax`, its
 ///   CPU against `CPUQuota`, its disk and its workers, now and over the last
 ///   hour, day or 30 days (`?over=`). Reading only.
+/// - `GET /live` is what is in flight now — each request waiting, running
+///   or parked, and on what, and each worker with the request it runs — and
+///   reloads itself every 2 seconds.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -77,6 +80,9 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if section == "platform" && name == "" && get {
     return htmlResponse(200, platformPage(at, request))
+  }
+  if section == "live" && name == "" && get {
+    return htmlResponse(200, livePage(at))
   }
   if section == "history" && name == "" && get {
     return htmlResponse(200, historyPage(at, host.history(200)))
