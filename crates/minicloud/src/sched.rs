@@ -68,6 +68,7 @@ use crate::hosts::PendingWork;
 use crate::logs::LogRing;
 use crate::stats::AppCounters;
 use crate::stats::{ErrorKind, Rejection};
+use crate::timeline::{Began, By, Recorder, Tracker};
 
 /// The response header naming the app version that answered.
 pub const VERSION_HEADER: &str = "x-cove-app-version";
@@ -89,6 +90,8 @@ pub struct Flight {
     pub cancel: Cancel,
     /// What the run has cost so far, for its answer's [`RUN_HEADERS`].
     pub tally: Tally,
+    /// Its record in the request timeline ([`crate::timeline`]).
+    pub track: Tracker,
 }
 
 /// What one request's run cost, counted across its slices and parks.
@@ -246,15 +249,16 @@ impl RunQueue {
         self.ready.notify_all();
     }
 
-    /// Queues a request, or says why not.
-    pub fn admit(&self, app: usize, start: Box<Start>) -> Result<(), Rejection> {
+    /// Queues a request, or says why not — and hands it back, so that its
+    /// timeline record says so too.
+    pub fn admit(&self, app: usize, start: Box<Start>) -> Result<(), (Rejection, Box<Start>)> {
         let mut state = self.state.lock().unwrap();
         if state.closed || state.admitted >= self.max_admitted {
-            return Err(Rejection::ServerBusy);
+            return Err((Rejection::ServerBusy, start));
         }
         let queue = &mut state.apps[app];
         if queue.starts.len() >= queue.max_queued {
-            return Err(Rejection::QueueFull);
+            return Err((Rejection::QueueFull, start));
         }
         queue.starts.push_back(start);
         state.admitted += 1;
@@ -485,6 +489,8 @@ pub struct Engine {
     /// Where pending host work runs.
     io: tokio::runtime::Handle,
     requests: AtomicU64,
+    /// Where each request waited, ran and parked ([`crate::timeline`]).
+    pub timeline: Recorder,
 }
 
 impl Engine {
@@ -503,6 +509,7 @@ impl Engine {
             slice,
             io,
             requests: AtomicU64::new(0),
+            timeline: Recorder::new(workers.max(1)),
         };
         for app in apps {
             engine.install(app);
@@ -552,7 +559,11 @@ impl Engine {
             None => {
                 let slot = Arc::new(Slot {
                     name: app.name.clone(),
-                    index: self.queue.add_app(&app.limits),
+                    index: {
+                        let index = self.queue.add_app(&app.limits);
+                        self.timeline.set_app(index, &app.name);
+                        index
+                    },
                     current: RwLock::new(None),
                     history: Mutex::new(Vec::new()),
                     counters: Arc::clone(&app.counters),
@@ -715,16 +726,24 @@ impl Engine {
                     Budget::with_cancellation(app.limits.run.clone(), flight.cancel.clone());
                 let signal = vm.yield_request();
                 let answering = Arc::clone(&flight.reply);
-                let step = self.sliced(worker, &app, &mut flight.tally, signal, &answering, || {
-                    let argument = request_value(&request);
-                    vm.invoke_within_parkable(
-                        budget,
-                        &ready.module,
-                        &ready.function,
-                        vec![argument],
-                    )
-                });
-                self.settle(step, flight);
+                let (step, ended) = self.sliced(
+                    worker,
+                    &app,
+                    &mut flight,
+                    Began::Start,
+                    signal,
+                    &answering,
+                    || {
+                        let argument = request_value(&request);
+                        vm.invoke_within_parkable(
+                            budget,
+                            &ready.module,
+                            &ready.function,
+                            vec![argument],
+                        )
+                    },
+                );
+                self.settle(step, flight, ended);
             }
             Job::Resume(resume) => {
                 let Resume {
@@ -732,7 +751,7 @@ impl Engine {
                     answer,
                     mut flight,
                 } = *resume;
-                let step = match answer {
+                let (step, ended) = match answer {
                     Some(answer) => {
                         let signal = parked.yield_request();
                         let version = Arc::clone(&flight.version);
@@ -740,7 +759,8 @@ impl Engine {
                         self.sliced(
                             worker,
                             &version,
-                            &mut flight.tally,
+                            &mut flight,
+                            Began::Resume,
                             signal,
                             &answering,
                             || parked.resume(answer),
@@ -748,10 +768,10 @@ impl Engine {
                     }
                     None => {
                         let (vm, error) = parked.cancel();
-                        Step::Answered(vm, Err(error))
+                        (Step::Answered(vm, Err(error)), Instant::now())
                     }
                 };
-                self.settle(step, flight);
+                self.settle(step, flight, ended);
             }
             Job::Continue(cont) => {
                 let Continue {
@@ -761,31 +781,36 @@ impl Engine {
                 let signal = yielded.yield_request();
                 let version = Arc::clone(&flight.version);
                 let answering = Arc::clone(&flight.reply);
-                let step = self.sliced(
+                let (step, ended) = self.sliced(
                     worker,
                     &version,
-                    &mut flight.tally,
+                    &mut flight,
+                    Began::Continue,
                     signal,
                     &answering,
                     || yielded.resume(),
                 );
-                self.settle(step, flight);
+                self.settle(step, flight, ended);
             }
         }
     }
 
     /// Runs `step` as this worker's current run, where the monitor can see it,
-    /// and charges the time to the app.
+    /// and charges the time to the app; records the slice's start in the
+    /// timeline, and answers when it ended, which `settle` records.
+    #[allow(clippy::too_many_arguments)]
     fn sliced(
         &self,
         worker: usize,
         app: &Arc<App>,
-        tally: &mut Tally,
+        flight: &mut Flight,
+        began: Began,
         signal: YieldRequest,
         answering: &Arc<crate::stream::Answering>,
         step: impl FnOnce() -> Step,
-    ) -> Step {
+    ) -> (Step, Instant) {
         let since = Instant::now();
+        flight.track.run(since, worker, began);
         if self.slice.is_some() {
             *self.running[worker].lock().unwrap() = Some(Running {
                 version: Arc::clone(app),
@@ -801,12 +826,13 @@ impl Engine {
         if self.slice.is_some() {
             *self.running[worker].lock().unwrap() = None;
         }
-        let held = since.elapsed();
-        tally.worker += held;
+        let ended = Instant::now();
+        let held = ended.saturating_duration_since(since);
+        flight.tally.worker += held;
         app.counters
             .worker_ns
             .fetch_add(held.as_nanos() as u64, Ordering::Relaxed);
-        step
+        (step, ended)
     }
 
     /// Answers `flight` with `reply`, counted as `kind`.
@@ -817,11 +843,17 @@ impl Engine {
     /// [`Engine::fail`], for a run that got as far as running: its meter.
     fn fail_metered(
         &self,
-        flight: Flight,
+        mut flight: Flight,
         kind: ErrorKind,
         reply: Reply,
         meter: Option<(u64, u64)>,
     ) {
+        // Before the answer goes, so that a client holding it finds it
+        // recorded.
+        let ended = Instant::now();
+        flight
+            .track
+            .end(ended, reply.status, Some(kind.name()), flight.tally.worker);
         let app = &flight.version;
         app.counters.error(kind);
         app.counters
@@ -834,11 +866,12 @@ impl Engine {
         flight.reply.answer(reply);
         flight.reply.finish();
         self.queue.finished(flight.app);
+        self.timeline.trim(flight.id, ended);
     }
 
     /// What a run came to: an answer to send, a park to hand on, or a yield
     /// to queue.
-    fn settle(self: &Arc<Self>, step: Step, mut flight: Flight) {
+    fn settle(self: &Arc<Self>, step: Step, mut flight: Flight, ended: Instant) {
         let app = Arc::clone(&flight.version);
         let counters = &app.counters;
         match step {
@@ -849,6 +882,7 @@ impl Engine {
                     .instructions
                     .fetch_add(vm.instructions(), Ordering::Relaxed);
                 note_progress(&mut flight.tally, counters, heap, vm.yields_declined());
+                flight.track.meter(vm.instructions(), heap);
                 let answered = match outcome {
                     // The heap's capacity is the app's `max_heap_words`
                     // (`Ready::isolate`), so a run that needed more has
@@ -883,11 +917,15 @@ impl Engine {
                         counters.ok.fetch_add(1, Ordering::Relaxed);
                         let reply = with_run_headers(reply, &flight, Some(meter))
                             .with_header(VERSION_HEADER, app.version.as_str());
+                        flight
+                            .track
+                            .end(ended, reply.status, None, flight.tally.worker);
                         // A run that opened its answer has already sent it: this reply
                         // is not sent, and what ends the body is the run ending.
                         flight.reply.answer(reply);
                         flight.reply.finish();
                         self.queue.finished(flight.app);
+                        self.timeline.trim(flight.id, ended);
                     }
                     Err((kind, body)) => {
                         let line = format!(
@@ -922,6 +960,7 @@ impl Engine {
                 counters.parked.fetch_add(1, Ordering::Relaxed);
                 match parked.take_request().map(|r| r.downcast::<PendingWork>()) {
                     Some(Ok(work)) => {
+                        flight.track.park(ended, work.op);
                         // The deadline, or "never" for a run without one.
                         let left = parked.time_left().unwrap_or(Duration::MAX);
                         // The run's own flag tells this wait when the client
@@ -935,11 +974,12 @@ impl Engine {
                             let work = *work;
                             // Whichever comes first. The losers are dropped:
                             // a fetch's connection is closed with its future.
-                            let answer = tokio::select! {
-                                answer = work.answer => Some(answer),
-                                () = sleep_at_most(left) => None,
-                                Ok(()) = cancelled => None,
+                            let (answer, by) = tokio::select! {
+                                answer = work.answer => (Some(answer), By::Answer),
+                                () = sleep_at_most(left) => (None, By::Deadline),
+                                Ok(()) = cancelled => (None, By::Cancel),
                             };
+                            flight.track.ready(Instant::now(), by);
                             engine.resume(parked, answer, flight);
                         });
                     }
@@ -947,6 +987,8 @@ impl Engine {
                         let answer = Err(RuntimeError::new(
                             "the host parked with a request minicloud does not know",
                         ));
+                        flight.track.park(ended, "unknown");
+                        flight.track.ready(ended, By::Answer);
                         self.resume(parked, Some(answer), flight);
                     }
                 }
@@ -960,6 +1002,7 @@ impl Engine {
                 );
                 flight.tally.yields += 1;
                 counters.yields.fetch_add(1, Ordering::Relaxed);
+                flight.track.yielded(ended);
                 let app = flight.app;
                 self.queue
                     .push_run(app, Job::Continue(Box::new(Continue { yielded, flight })));

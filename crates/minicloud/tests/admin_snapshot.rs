@@ -423,6 +423,11 @@ fn every_admin_page() {
     options.forwarding.public_origin = Some("https://covtools.ramda.io".parse().unwrap());
     let host = Host::start(options).unwrap();
     host.set_platform_source(std::sync::Arc::new(fixed_platform));
+    // The request timeline the Live, Timeline and request pages draw: fixed
+    // times, and not the requests this run makes — the admin's own among
+    // them. The trackers of those in flight are kept to the end.
+    let (timeline, _in_flight) = fixed_timeline();
+    host.set_timeline_source(timeline);
 
     // ------------------------------------------------------------ the data
     //
@@ -546,6 +551,44 @@ fn every_admin_page() {
         );
     }
     snap.page(&host, "platform", "/platform");
+    // The request timeline: what is in flight, each window, one app's and
+    // an app with nothing, and a window nobody knows (a minute).
+    snap.page(&host, "live", "/live");
+    for (name, query) in [
+        ("timeline", ""),
+        ("timeline-over-10s", "?over=10s"),
+        ("timeline-over-1m", "?over=1m"),
+        ("timeline-over-5m", "?over=5m"),
+        ("timeline-over-decade", "?over=decade"),
+        ("timeline-app-slow", "?app=slow&over=10s"),
+        ("timeline-app-notes-5m", "?app=notes&over=5m"),
+        ("timeline-app-nobody", "?app=nobody"),
+        ("timeline-app-hostile", &format!("?app={HOSTILE_ENCODED}")),
+    ] {
+        snap.page(&host, name, &format!("/timeline{query}"));
+    }
+    // One request of each kind: parked and moved, parked on a fetch, yielded
+    // and moved, past its deadline, cancelled, rejected at its queue and
+    // before it, in flight, and ids the timeline does not have.
+    for (name, id) in [
+        ("parked-moved", "102"),
+        ("fetch", "103"),
+        ("yielded", "104"),
+        ("deadline", "105"),
+        ("cancelled", "106"),
+        ("queue-full", "107"),
+        ("rate-limited", "108"),
+        ("in-flight-parked", "109"),
+        ("in-flight-waiting", "111"),
+        ("unknown", "424242"),
+        ("not-a-number", HOSTILE_ENCODED),
+    ] {
+        snap.page(
+            &host,
+            &format!("requests-{name}"),
+            &format!("/requests/{id}"),
+        );
+    }
     check_history(&host);
 
     // The store: a page, the next, a prefix, a prefix of nothing, keys.
@@ -826,6 +869,9 @@ fn every_admin_page() {
         ("not-found-secrets", "/secrets/set"),
         ("not-found-logs-deeper", "/logs/hello"),
         ("not-found-history-deeper", "/history/1"),
+        ("not-found-requests", "/requests"),
+        ("not-found-requests-deeper", "/requests/102/more"),
+        ("not-found-live-deeper", "/live/1"),
     ] {
         snap.page(&host, name, path);
     }

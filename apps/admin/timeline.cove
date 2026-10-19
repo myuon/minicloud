@@ -1,0 +1,885 @@
+use web
+use host
+use text
+use std.html
+use std.html.Html
+
+// The request timeline: where each request waited, ran, parked and resumed,
+// and what the workers were doing meanwhile. The host keeps it in memory —
+// the last 5 minutes, at most 20,000 requests, a path without its query
+// string — and a restart empties it (`host.timeline`, `host.request`,
+// `host.live`). Three pages read it: what is in flight now (Live), a
+// picture of a window of it (Timeline), and one request's phases in words.
+//
+// The picture is drawn as the edge example of Cove draws its own: worker
+// swimlanes on top, a bar wherever a worker runs a request, coloured by its
+// app; three small strips under them of workers running, runs parked on a
+// host call and requests waiting for a worker; then one lane per request, in
+// arrival order, on the same time axis — a bar where it ran, a thin line in
+// its app's colour where it was parked, grey where it waited for a worker, a
+// diamond where it resumed on another worker than the one before, a tick
+// where it yielded, a red cross where its deadline answered 504. Colour is
+// an app's identity and nothing else: a status is a mark.
+//
+// Every number is an `Int`: times are microseconds, and a coordinate is the
+// time scaled across the picture's width with the division last.
+
+// ---------------------------------------------------------------- live
+
+/// How a request in flight is, in words: `parked` says on what.
+fn liveState(state: String, op: String) -> String {
+  if state == "waiting" {
+    "waiting for a worker"
+  } else if state == "running" {
+    "running"
+  } else if state == "parked" {
+    "parked on {op}"
+  } else if state == "resuming" {
+    "answered, waiting for a worker to resume it"
+  } else if state == "yielded" {
+    "yielded, waiting for a worker to continue it"
+  } else {
+    state
+  }
+}
+
+/// A worker by its number, or a dash for none.
+fn workerName(worker: Int) -> String {
+  if worker < 0 {
+    return "–"
+  }
+  "#{worker}"
+}
+
+/// A request's id as the way to its phases.
+fn requestLink(base: String, id: Int) -> Html {
+  html"""<a href="{base}/requests/{id}"><code>{id}</code></a>"""
+}
+
+/// The requests in flight, oldest first.
+fn liveTable(base: String, live: host.Live) -> Html {
+  if live.requests.length() == 0 {
+    return html"<p class=muted>Nothing is in flight.</p>"
+  }
+  var rows = Vector.of()
+  for row in live.requests {
+    rows.push(html"""
+      <tr>
+        <td class=title data-label=id>{requestLink(base, row.id)}</td>
+        <td data-label=app><code>{row.app}</code></td>
+        <td data-label=request><code>{row.method} {row.path}</code></td>
+        <td data-label=state>{liveState(row.state, row.op)}</td>
+        <td class=nums data-label=worker>{workerName(row.worker)}</td>
+        <td class=nums data-label=elapsed>{millis(live.nowUs - row.arrivedUs)} ms</td>
+        <td class=nums data-label="in this state">{millis(live.nowUs - row.sinceUs)} ms</td>
+      </tr>
+      """)
+  }
+  html"""
+    <div class="scroll cardwrap">
+      <table class=cards>
+        <tr class=head>
+          <th>id</th><th>app</th><th>request</th><th>state</th><th>worker</th>
+          <th>elapsed</th><th>in this state</th>
+        </tr>
+        {rows.freeze()}
+      </table>
+    </div>
+    """
+}
+
+/// What a worker is running, or that it is idle.
+fn workerRun(base: String, worker: host.LiveWorker) -> Html {
+  if worker.busy {
+    html"""{requestLink(base, worker.id)} <code>{worker.app}</code> <code>{worker.method} {worker.path}</code>"""
+  } else {
+    html"<span class=muted>–</span>"
+  }
+}
+
+/// Every worker, busy or idle, and what it runs.
+fn workersTable(base: String, live: host.Live) -> Html {
+  var rows = Vector.of()
+  for worker in live.workers {
+    let state = if worker.busy { "busy" } else { "idle" }
+    let since = if worker.busy { "{millis(live.nowUs - worker.sinceUs)} ms" } else { "–" }
+    rows.push(html"""
+      <tr>
+        <td class=title data-label=worker>#{worker.worker}</td>
+        <td data-label=state>{badge(state)}</td>
+        <td data-label=running>{workerRun(base, worker)}</td>
+        <td class=nums data-label=for>{since}</td>
+      </tr>
+      """)
+  }
+  html"""
+    <div class="scroll cardwrap">
+      <table class=cards>
+        <tr class=head><th>worker</th><th>state</th><th>running</th><th>for</th></tr>
+        {rows.freeze()}
+      </table>
+    </div>
+    """
+}
+
+/// The Live page: the requests in flight now and where each is, then each
+/// worker and what it runs. It reloads itself every 2 seconds — a `<meta>`
+/// refresh, which is HTML and no script.
+fn livePage(base: String) -> Html {
+  let live = host.live()
+  let listed = live.requests.length()
+  let more = html.only(
+    live.total > listed,
+    html"<p class=muted>{live.total} requests are in flight; the oldest {listed} are listed.</p>",
+  )
+  let summary = html"What is in flight now, and what each worker runs. It reloads every 2 seconds."
+  let said = html"""
+    A request is <b>waiting</b> for a worker, <b>running</b> on one, <b>parked</b> at a host
+    call that answered pending (a sleep, a fetch, a change of the admin's) — holding no worker
+    — or answered or yielded and waiting for a worker to take it up again. Elapsed is from its
+    arrival. An id is the way to its phases. The host keeps this in memory, the last
+    {timelineKeep()}, and a path without its query string.
+    """
+  layout(
+    base,
+    "live",
+    "live",
+    html"""
+      <h1>Live</h1>
+      {about(summary, said)}
+      <h2>In flight</h2>{liveTable(base, live)}{more}
+      <h2>Workers</h2>{workersTable(base, live)}
+      <p class=actions><a href="{base}/timeline">the timeline →</a></p>
+      """,
+    2,
+  )
+}
+
+/// What the timeline keeps (`crate::timeline::KEEP` and `KEEP_REQUESTS`).
+fn timelineKeep() -> String {
+  "5 minutes, at most 20,000 requests"
+}
+
+// ------------------------------------------------------------ timeline
+
+/// Which window `?over=` asks for: `10s`, `1m` or `5m`, and a minute for
+/// anything else.
+fn timelineWindow(request: web.Request) -> String {
+  let asked = request.query.get("over").unwrapOr("").trim()
+  if asked == "10s" || asked == "5m" {
+    return asked
+  }
+  "1m"
+}
+
+/// The window's seconds, as `host.timeline` takes them.
+fn timelineSecs(over: String) -> Int {
+  if over == "10s" {
+    10
+  } else if over == "5m" {
+    300
+  } else {
+    60
+  }
+}
+
+/// What a window is called in a sentence.
+fn timelineSpan(over: String) -> String {
+  if over == "10s" {
+    "the last 10 seconds"
+  } else if over == "5m" {
+    "the last 5 minutes"
+  } else {
+    "the last minute"
+  }
+}
+
+/// The Timeline page of `app` (`""` for every app) over `over`.
+fn timelineLink(base: String, app: String, over: String) -> String {
+  if app == "" {
+    return "{base}/timeline?over={over}"
+  }
+  "{base}/timeline?app={text.urlEncode(app)}&over={over}"
+}
+
+/// The three windows, the one shown marked: the row Metrics and Platform
+/// carry, with this page's windows.
+fn timelineSteps(base: String, app: String, over: String) -> Html {
+  var steps = Vector.of()
+  for name in Vector.of("10s", "1m", "5m").freeze() {
+    let label = timelineSpan(name)
+    if name == over {
+      steps.push(html"<b>{label}</b>")
+    } else {
+      steps.push(html"""<a href="{timelineLink(base, app, name)}">{label}</a>""")
+    }
+  }
+  html"<p class=actions><span class=muted>window:</span> {html.join(steps.freeze(), html" ")}</p>"
+}
+
+/// `all apps`, then every app with a request in the window: the one shown
+/// filled.
+fn timelineChips(base: String, apps: Array<String>, app: String, over: String) -> Html {
+  var out = Vector.of()
+  out.push(html"""<a href="{timelineLink(base, "", over)}"{current(app == "")}>all apps</a>""")
+  out.push(html.only(apps.length() > 0, html"<span class=sep></span>"))
+  for name in apps {
+    out.push(html"""<a href="{timelineLink(base, name, over)}"{current(name == app)}>{name}</a>""")
+  }
+  html"<nav class=pick><span class=lbl>app</span>{out.freeze()}</nav>"
+}
+
+/// Where `t` falls across `width`, for a window from `since` to `until`: 0
+/// at its start, `width` at its end, and a time outside it at the edge it
+/// is past. A window of no length is all at 0.
+fn scaleX(t: Int, since: Int, until: Int, width: Int) -> Int {
+  let span = until - since
+  if span <= 0 {
+    return 0
+  }
+  let at = if t < since { since } else if t > until { until } else { t }
+  (at - since) * width / span
+}
+
+/// The picture's width, its left margin (the labels) and the width the
+/// time axis takes, in the units of its `viewBox`.
+fn tlWidth() -> Int {
+  1000
+}
+
+fn tlLeft() -> Int {
+  64
+}
+
+fn tlPlot() -> Int {
+  900
+}
+
+/// `t` as an x in the picture.
+fn tlX(t: Int, since: Int, until: Int) -> Int {
+  tlLeft() + scaleX(t, since, until, tlPlot())
+}
+
+/// A tick's spacing for a span of `spanUs` with about `count` ticks: 1, 2
+/// or 5 of a power of ten microseconds.
+fn tickStep(spanUs: Int, count: Int) -> Int {
+  let raw = if count > 0 { spanUs / count } else { spanUs }
+  if raw < 1 {
+    return 1
+  }
+  var magnitude = 1
+  while magnitude * 10 <= raw {
+    magnitude = magnitude * 10
+  }
+  for factor in [1, 2, 5] {
+    if factor * magnitude >= raw {
+      return factor * magnitude
+    }
+  }
+  magnitude * 10
+}
+
+/// A tick's label: the time from the window's start, in milliseconds, or
+/// in whole seconds where the ticks are whole seconds apart — every label
+/// of an axis in one unit.
+fn tickLabel(us: Int, step: Int) -> String {
+  if step % 1000000 == 0 {
+    return "{us / 1000000} s"
+  }
+  if step % 1000 == 0 {
+    return "{us / 1000} ms"
+  }
+  "{millis(us)} ms"
+}
+
+/// How many colours an app may have before the rest are grey.
+fn paletteSize() -> Int {
+  6
+}
+
+/// An app's colour, `0` to `5` by its place in `order`, and `x` (grey) past
+/// the sixth or for an app not in it. The class is `tl-c<slot>` for a fill
+/// and `tl-l<slot>` for a line.
+fn paletteSlot(order: Array<String>, app: String) -> String {
+  match order.indexOf(app) {
+    Some(at) => if at < paletteSize() { "{at}" } else { "x" }
+    None => "x"
+  }
+}
+
+/// The apps in the order their colours go: the summary's, then any other
+/// app a lane or a run has (one with nothing ended in the window yet).
+fn timelineOrder(timeline: host.Timeline) -> Array<String> {
+  var order = Vector.of()
+  for app in timeline.apps {
+    order.push(app.app)
+  }
+  for lane in timeline.lanes {
+    if !order.contains(lane.app) {
+      order.push(lane.app)
+    }
+  }
+  for segment in timeline.segments {
+    if !order.contains(segment.app) {
+      order.push(segment.app)
+    }
+  }
+  order.freeze()
+}
+
+/// How a request ended, as a status and why: `in flight`, `200`,
+/// `504 deadline`, `429 rejected: queue_full`.
+fn requestStatus(request: host.TimelineRequest) -> String {
+  let status = match request.status {
+    Some(code) => "{code}"
+    None => ""
+  }
+  if request.outcome == "in_flight" {
+    "in flight"
+  } else if request.outcome == "rejected" {
+    "{status} rejected: {request.reason}"
+  } else if request.reason != "" {
+    "{status} {request.reason}"
+  } else {
+    status
+  }
+}
+
+/// From arrival to answer, or to now while it is in flight.
+fn requestLatency(request: host.TimelineRequest) -> String {
+  match request.latencyUs {
+    Some(us) => "{millis(us)} ms"
+    None => "{millis(request.nowUs - request.arrivedUs)} ms so far"
+  }
+}
+
+/// A small ink diamond centred at `x`, `y`: a run that resumed or
+/// continued on another worker than the one before.
+fn diamond(x: Int, y: Int, r: Int) -> Html {
+  html"""<path class=tl-moved d="M{x},{y - r} L{x + r},{y} L{x},{y + r} L{x - r},{y} Z"/>"""
+}
+
+/// A short tick at `x`: where a run yielded at the end of its slice.
+fn yieldTick(x: Int, y: Int, r: Int) -> Html {
+  html"""<line class=tl-yield x1="{x}" y1="{y - r - 1}" x2="{x}" y2="{y + r + 1}"/>"""
+}
+
+/// The mark at the end of a request that did not end well: a red cross for
+/// its deadline (504), a ring for another error of the host's, a square for
+/// one turned away before it ran. Nothing for an answer or one in flight.
+fn endMark(request: host.TimelineRequest, x: Int, y: Int, r: Int) -> Option<Html> {
+  if request.reason == "deadline" {
+    Some(html"""<path class=tl-crit d="M{x - r},{y - r} L{x + r},{y + r} M{x - r},{y + r} L{x + r},{y - r}"/>""")
+  } else if request.outcome == "rejected" {
+    Some(html"""<rect class=tl-rej x="{x - r}" y="{y - r}" width="{r * 2}" height="{r * 2}"/>""")
+  } else if request.outcome == "error" {
+    Some(html"""<circle class=tl-err cx="{x}" cy="{y}" r="{r}"/>""")
+  } else {
+    None
+  }
+}
+
+/// One request's lane between `since` and `until`, `row` high from `top`:
+/// grey where it waited, a bar where it ran, a line in its app's colour
+/// where it was parked, and the marks over them.
+fn laneMarks(request: host.TimelineRequest, since: Int, until: Int, top: Int, row: Int, slot: String) -> Array<Html> {
+  var marks = Vector.of()
+  var over = Vector.of()
+  let mid = top + row / 2
+  let bar = if row > 3 { row - 2 } else { row }
+  let r = if row < 6 { 2 } else if row > 9 { 4 } else { row / 2 }
+  for phase in request.phases {
+    if phase.toUs < since || phase.fromUs > until {
+      continue
+    }
+    let x0 = tlX(phase.fromUs, since, until)
+    let x1 = tlX(phase.toUs, since, until)
+    if phase.kind == "run" {
+      let width = if x1 - x0 < 2 { 2 } else { x1 - x0 }
+      marks.push(html"""<rect class="tl-c{slot}" x="{x0}" y="{mid - bar / 2}" width="{width}" height="{bar}"/>""")
+      over.push(html.only(phase.moved, diamond(x0, mid, r)))
+    } else if phase.kind == "park" {
+      marks.push(html"""<line class="tl-park tl-l{slot}" x1="{x0}" y1="{mid}" x2="{x1}" y2="{mid}"/>""")
+    } else {
+      marks.push(html"""<line class=tl-wait x1="{x0}" y1="{mid}" x2="{x1}" y2="{mid}"/>""")
+      over.push(html.only(phase.after == "yield", yieldTick(x0, mid, r)))
+    }
+  }
+  match request.endedUs {
+    Some(ended) => {
+      if ended >= since && ended <= until {
+        over.push(html"{endMark(request, tlX(ended, since, until), mid, r)}")
+      }
+    }
+    None => {}
+  }
+  for mark in over {
+    marks.push(mark)
+  }
+  marks.freeze()
+}
+
+/// What a lane says on hover: which request, how it ended, how long.
+fn laneTitle(request: host.TimelineRequest) -> String {
+  "#{request.id} {request.app}: {request.method} {request.path} — {requestStatus(request)}, {requestLatency(request)}"
+}
+
+/// A lane as the way to its request: the whole row is the link, and the
+/// faint band under it is what a pointer finds.
+fn lane(base: String, request: host.TimelineRequest, since: Int, until: Int, top: Int, row: Int, slot: String) -> Html {
+  let end = match request.endedUs {
+    Some(ended) => ended
+    None => request.nowUs
+  }
+  let x0 = tlX(request.arrivedUs, since, until)
+  let x1 = tlX(end, since, until)
+  let width = if x1 - x0 < 4 { 4 } else { x1 - x0 }
+  html"""
+    <a href="{base}/requests/{request.id}"><title>{laneTitle(request)}</title><rect class=tl-hit x="{x0 - 2}" y="{top}" width="{width + 4}" height="{row}"/>{laneMarks(request, since, until, top, row, slot)}</a>
+    """
+}
+
+/// A strip's outline: a step for each bucket, its value scaled so that
+/// `top` is `height` above `base`, closed along the base so it can be
+/// filled.
+fn stripPath(values: Array<Int>, top: Int, base: Int, height: Int) -> String {
+  let n = values.length()
+  if n == 0 || top <= 0 {
+    return "M{tlLeft()},{base} L{tlLeft() + tlPlot()},{base}"
+  }
+  var out = Vector.of("M{tlLeft()},{base}")
+  var at = 0
+  for value in values {
+    let y = base - value * height / top
+    out.push("L{tlLeft() + at * tlPlot() / n},{y}")
+    out.push("L{tlLeft() + (at + 1) * tlPlot() / n},{y}")
+    at = at + 1
+  }
+  out.push("L{tlLeft() + tlPlot()},{base} Z")
+  " ".join(out.freeze())
+}
+
+/// The largest of `values`.
+fn largestOf(values: Array<Int>) -> Int {
+  metricsLargest(values, [])
+}
+
+/// A count in thousandths rounded up to a whole one, and at least one: the
+/// top of a strip's scale.
+fn wholeAbove(milli: Int) -> Int {
+  let whole = (milli + 999) / 1000 * 1000
+  if whole < 1000 { 1000 } else { whole }
+}
+
+/// One strip: its title, its scale at the left, and the means drawn as
+/// steps over a light area.
+fn strip(label: String, values: Array<Int>, top: Int, y: Int, height: Int) -> Html {
+  let base = y + 18 + height
+  html"""
+    <text class=tl-head x="{tlLeft()}" y="{y + 12}">{label}, up to {thousandths(largestOf(values))}</text>
+    <text x="{tlLeft() - 6}" y="{y + 22}" text-anchor=end>{top / 1000}</text>
+    <text x="{tlLeft() - 6}" y="{base}" text-anchor=end>0</text>
+    <line class=tl-base x1="{tlLeft()}" y1="{base}" x2="{tlLeft() + tlPlot()}" y2="{base}"/>
+    <path class=tl-area d="{stripPath(values, top, base, height)}"/>
+    """
+}
+
+/// The ticks of the time axis, as grid lines from `from` to `to` and a
+/// label at each of `labelYs` — above the workers, and again above the
+/// requests, which are far below them.
+fn axis(since: Int, until: Int, from: Int, to: Int, labelYs: Array<Int>) -> Html {
+  let span = until - since
+  let step = tickStep(span, 6)
+  var out = Vector.of()
+  var at = 0
+  while at <= span {
+    let x = tlX(since + at, since, until)
+    out.push(html"""<line class=tl-grid x1="{x}" y1="{from}" x2="{x}" y2="{to}"/>""")
+    for y in labelYs {
+      out.push(html"""<text x="{x}" y="{y}" text-anchor=middle>{tickLabel(at, step)}</text>""")
+    }
+    at = at + step
+  }
+  html"{out.freeze()}"
+}
+
+/// The picture of a window: the workers, the three strips, the requests.
+fn timelinePicture(base: String, timeline: host.Timeline, order: Array<String>) -> Html {
+  let since = timeline.sinceUs
+  let until = timeline.untilUs
+  let workerLane = 20
+  let workersTop = 42
+  var y = workersTop + timeline.workers * workerLane + 6
+  var workers = Vector.of()
+  var w = 0
+  while w < timeline.workers {
+    let top = workersTop + w * workerLane
+    workers.push(html"""
+      <text x="{tlLeft() - 6}" y="{top + workerLane / 2 + 4}" text-anchor=end>#{w}</text>
+      <line class=tl-base x1="{tlLeft()}" y1="{top + workerLane - 1}" x2="{tlLeft() + tlPlot()}" y2="{top + workerLane - 1}"/>
+      """)
+    w = w + 1
+  }
+  for segment in timeline.segments {
+    let x0 = tlX(segment.fromUs, since, until)
+    let x1 = tlX(segment.toUs, since, until)
+    let width = if x1 - x0 < 2 { 2 } else { x1 - x0 }
+    let merged = if segment.runs > 1 { ", {segment.runs} runs close together, the first #{segment.id}" } else { "" }
+    workers.push(html"""
+      <a href="{base}/requests/{segment.id}"><rect class="tl-c{paletteSlot(order, segment.app)}" x="{x0}" y="{workersTop + segment.worker * workerLane + 3}" width="{width}" height="{workerLane - 6}"><title>{segment.app} #{segment.id}, {millis(segment.toUs - segment.fromUs)} ms on worker #{segment.worker}{merged}</title></rect></a>
+      """)
+  }
+  let each = "means over {millis(timeline.bucketUs)} ms"
+  let runningHeight = if timeline.workers * 12 > 24 { timeline.workers * 12 } else { 24 }
+  let running = strip(
+    "Workers running, of {timeline.workers}; {each}",
+    timeline.running,
+    timeline.workers * 1000,
+    y,
+    runningHeight,
+  )
+  y = y + 18 + runningHeight + 8
+  let parked = strip(
+    "Runs parked on a host call, holding no worker",
+    timeline.parked,
+    wholeAbove(largestOf(timeline.parked)),
+    y,
+    30,
+  )
+  y = y + 18 + 30 + 8
+  let waiting = strip(
+    "Requests waiting for a worker",
+    timeline.waiting,
+    wholeAbove(largestOf(timeline.waiting)),
+    y,
+    30,
+  )
+  y = y + 18 + 30 + 8
+  let requestsTop = y + 40
+  let count = timeline.lanes.length()
+  let fits = if count > 0 { 600 / count } else { 12 }
+  let row = if fits < 4 { 4 } else if fits > 12 { 12 } else { fits }
+  var lanes = Vector.of()
+  var at = 0
+  for request in timeline.lanes {
+    lanes.push(lane(base, request, since, until, requestsTop + at * row, row, paletteSlot(order, request.app)))
+    at = at + 1
+  }
+  let height = requestsTop + count * row + 8
+  html"""
+    <svg class=timeline viewBox="0 0 {tlWidth()} {height}" role=img aria-label="the workers and the requests over the window">
+      {axis(since, until, 16, height - 4, [12, requestsTop - 24])}
+      <text class=tl-head x="{tlLeft()}" y="{workersTop - 8}">Workers: a bar wherever one runs a request, in its app's colour</text>
+      {workers.freeze()}
+      {running}{parked}{waiting}
+      <text class=tl-head x="{tlLeft()}" y="{requestsTop - 8}">Requests, in arrival order: bar = running, thin line = parked, grey = waiting for a worker</text>
+      <text x="{tlLeft() - 6}" y="{requestsTop + row}" text-anchor=end>first</text>
+      <text x="{tlLeft() - 6}" y="{requestsTop + count * row}" text-anchor=end>last</text>
+      {lanes.freeze()}
+    </svg>
+    """
+}
+
+/// An app's colour as a key: a swatch and its name.
+fn appKey(slot: String, name: String) -> Html {
+  html"""
+    <span class=key>
+      <svg width=12 height=12 viewBox="0 0 12 12" aria-hidden=true><rect class="tl-c{slot}" width=12 height=12 rx=2 /></svg>
+      {name}
+    </span>
+    """
+}
+
+/// A mark as a key: `mark` drawn in a box 16 by 12, and what it means.
+fn markKey(mark: Html, name: String) -> Html {
+  html"""
+    <span class=key>
+      <svg width=16 height=12 viewBox="0 0 16 12" aria-hidden=true>{mark}</svg>
+      {name}
+    </span>
+    """
+}
+
+/// What the colours and the marks are.
+fn timelineLegend(order: Array<String>) -> Html {
+  var keys = Vector.of()
+  for app in order {
+    keys.push(appKey(paletteSlot(order, app), app))
+  }
+  keys.push(markKey(html"<line class=tl-wait x1=0 y1=6 x2=16 y2=6 />", "waiting for a worker"))
+  keys.push(markKey(html"<line class=\"tl-park tl-lx\" x1=0 y1=6 x2=16 y2=6 />", "parked (its app's colour)"))
+  keys.push(markKey(diamond(8, 6, 4), "resumed on another worker"))
+  keys.push(markKey(yieldTick(8, 6, 4), "yielded"))
+  keys.push(markKey(html"<path class=tl-crit d=\"M4,2 L12,10 M4,10 L12,2\"/>", "504, its deadline"))
+  keys.push(markKey(html"<circle class=tl-err cx=8 cy=6 r=4 />", "another error"))
+  keys.push(markKey(html"<rect class=tl-rej x=4 y=2 width=8 height=8 />", "rejected"))
+  html"<p class=legend>{keys.freeze()}</p>"
+}
+
+/// Each app's requests in the window: how many ended, how many of those
+/// were errors or turned away, and how long the answered took.
+fn timelineApps(base: String, timeline: host.Timeline, order: Array<String>, over: String) -> Html {
+  if timeline.apps.length() == 0 {
+    return html"<p class=muted>No request ended in this window yet.</p>"
+  }
+  var rows = Vector.of()
+  for app in timeline.apps {
+    rows.push(html"""
+      <tr>
+        <td class=title data-label=app><a href="{timelineLink(base, app.app, over)}">{appKey(paletteSlot(order, app.app), app.app)}</a></td>
+        <td class=nums data-label=requests>{app.requests}</td>
+        <td class=nums data-label=errors>{app.errors}</td>
+        <td class=nums data-label=rejected>{app.rejected}</td>
+        <td class=nums data-label="p50 (ms)">{millis(app.p50Us)}</td>
+        <td class=nums data-label="p99 (ms)">{millis(app.p99Us)}</td>
+      </tr>
+      """)
+  }
+  html"""
+    <div class="scroll cardwrap">
+      <table class=cards>
+        <tr class=head>
+          <th>app</th><th>requests</th><th>errors</th><th>rejected</th><th>p50 (ms)</th><th>p99 (ms)</th>
+        </tr>
+        {rows.freeze()}
+      </table>
+    </div>
+    """
+}
+
+/// Thousandths as a percentage with one decimal: a worker busy for 1.6% of
+/// five minutes is not 0%.
+fn tenthsPercent(milli: Int) -> String {
+  "{milli / 10}.{milli % 10}%"
+}
+
+/// The figures of a window: requests, rejected, and how busy the workers
+/// were.
+fn timelineFigures(timeline: host.Timeline) -> Html {
+  let rejected = if timeline.rejected > 0 { " is-warn" } else { "" }
+  html"""
+    <div class=strip>
+      {platformFig("requests", "{timeline.requests}", "in the window, in flight included", "")}
+      {platformFig("rejected", "{timeline.rejected}", "turned away before they ran", rejected)}
+      {platformFig("workers busy", tenthsPercent(timeline.utilisationMilli), "of {timeline.workers} workers' time", pressure(timeline.utilisationMilli / 10))}
+    </div>
+    """
+}
+
+/// The Timeline page: the picture of `?over=` (10 s, a minute, 5 minutes)
+/// of every app's requests or `?app=`'s, then the figures and each app's.
+fn timelinePage(base: String, request: web.Request) -> Html {
+  let over = timelineWindow(request)
+  let app = request.query.get("app").unwrapOr("").trim()
+  let span = timelineSpan(over)
+  // Every app's window as well as the one asked for: its apps are the
+  // chips, and their order is the colours, so an app is the same colour
+  // whichever of them is shown.
+  let all = host.timeline("", timelineSecs(over))
+  let timeline = if app == "" { all } else { host.timeline(app, timelineSecs(over)) }
+  let order = timelineOrder(all)
+  let summary = html"Where each request waited, ran, parked and resumed, over {span}."
+  let said = html"""
+    The host records every request in memory — the last {timelineKeep()}, its path without
+    the query string — and a restart empties it. Above, the workers, a bar wherever one runs a
+    request; under them how many workers ran, how many runs were parked at a host call (a
+    sleep, a fetch) holding no worker, and how many requests waited for a worker; then the
+    newest requests, one lane each in arrival order. Hover a bar or a lane for what it is; a
+    lane is the way to its request's phases. Times are from the window's start.
+    """
+  let head = html"""
+    <h1>Timeline</h1>
+    {about(summary, said)}
+    {timelineChips(base, order, app, over)}
+    {timelineSteps(base, app, over)}
+    """
+  if timeline.requests == 0 {
+    let whose = if app == "" { "" } else { " of {app}" }
+    return layout(
+      base,
+      "timeline",
+      "timeline",
+      html"""
+        {head}
+        <p class=muted>No request{whose} in {span}: nothing arrived, ran or ended in it that the
+        host still keeps.</p>
+        """,
+    )
+  }
+  let shown = timeline.lanes.length()
+  let newest = html.only(
+    timeline.requests > shown,
+    html"<p class=muted>Showing the newest {shown} of {timeline.requests} requests in the window.</p>",
+  )
+  layout(
+    base,
+    "timeline",
+    "timeline",
+    html"""
+      {head}
+      {timelineFigures(timeline)}
+      {timelineLegend(order)}
+      {timelinePicture(base, timeline, order)}
+      {newest}
+      <h2>Apps</h2>{timelineApps(base, timeline, order, over)}
+      """,
+  )
+}
+
+// ---------------------------------------------------------- a request
+
+/// How long a phase lasted, or has lasted so far.
+fn phaseLength(phase: host.Phase) -> String {
+  let length = "{millis(phase.toUs - phase.fromUs)} ms"
+  if phase.open {
+    return "{length} so far"
+  }
+  length
+}
+
+/// What ended a park.
+fn parkEnd(phase: host.Phase) -> String {
+  if phase.open {
+    "still parked"
+  } else if phase.by == "answer" {
+    "answered"
+  } else if phase.by == "deadline" {
+    "the deadline"
+  } else if phase.by == "cancel" {
+    "cancelled"
+  } else {
+    "ended"
+  }
+}
+
+/// One phase in words.
+fn phaseWords(phase: host.Phase) -> String {
+  let length = phaseLength(phase)
+  if phase.kind == "wait" {
+    if phase.after == "park" {
+      "waited {length} for a worker to resume it"
+    } else if phase.after == "yield" {
+      "yielded, waited {length} for a worker to continue it"
+    } else {
+      "waited for a worker {length}"
+    }
+  } else if phase.kind == "park" {
+    "parked on {phase.op} {length} ({parkEnd(phase)})"
+  } else {
+    let moved = if phase.moved { " (moved)" } else { "" }
+    if phase.began == "resume" {
+      "resumed on #{phase.worker}{moved}, ran {length}"
+    } else if phase.began == "continue" {
+      "continued on #{phase.worker}{moved}, ran {length}"
+    } else {
+      "ran {length} on worker #{phase.worker}"
+    }
+  }
+}
+
+/// A request's phases as one sentence, each step an arrow from the last.
+fn phaseSentence(phases: Array<host.Phase>) -> String {
+  var words = Vector.of()
+  for phase in phases {
+    words.push(phaseWords(phase))
+  }
+  " → ".join(words.freeze())
+}
+
+/// The kind of a phase, as the badge in front of its words.
+fn phaseBadge(kind: String) -> Html {
+  html"""<span class="ph ph-{kind}">{kind}</span>"""
+}
+
+/// A request's phases, in order, each from its start after the arrival.
+fn phaseList(request: host.TimelineRequest) -> Html {
+  if request.phases.length() == 0 {
+    return html"<p class=muted>No phases: it was turned away before it waited for a worker.</p>"
+  }
+  var items = Vector.of()
+  for phase in request.phases {
+    items.push(html"""
+      <li>{phaseBadge(phase.kind)} <span class="nums muted">+{millis(phase.fromUs - request.arrivedUs)} ms</span> {phaseWords(phase)}</li>
+      """)
+  }
+  html"<ol class=phases>{items.freeze()}</ol>"
+}
+
+/// A number the host may not know, or a dash.
+fn knownCount(count: Option<Int>) -> String {
+  match count {
+    Some(n) => "{n}"
+    None => "—"
+  }
+}
+
+/// The request alone, as one lane from its arrival to its end (or now).
+fn requestPicture(request: host.TimelineRequest) -> Html {
+  let until = match request.endedUs {
+    Some(ended) => ended
+    None => request.nowUs
+  }
+  let since = request.arrivedUs
+  html"""
+    <svg class=timeline viewBox="0 0 {tlWidth()} 40" role=img aria-label="the request's phases">
+      {axis(since, until, 16, 38, [12])}
+      {laneMarks(request, since, until, 20, 14, "0")}
+    </svg>
+    """
+}
+
+/// One request of the timeline: its phases, in words and drawn, and what
+/// it came to.
+fn requestPage(base: String, request: host.TimelineRequest) -> Html {
+  let facts = html"""
+    <div class="scroll narrow">
+      <table class=facts>
+        <tr><th>app</th><td><a href="{timelineLink(base, request.app, "1m")}"><code>{request.app}</code></a></td></tr>
+        <tr><th>request</th><td><code>{request.method} {request.path}</code></td></tr>
+        <tr><th>status</th><td>{requestStatus(request)}</td></tr>
+        <tr><th>outcome</th><td>{request.outcome}</td></tr>
+        <tr><th>latency</th><td class=nums>{requestLatency(request)}</td></tr>
+        <tr><th>worker time</th><td class=nums>{millis(request.workerUs)} ms</td></tr>
+        <tr><th>instructions</th><td class=nums>{knownCount(request.instructions)}</td></tr>
+        <tr><th>heap words</th><td class=nums>{knownCount(request.heapWords)}</td></tr>
+        <tr><th>yields</th><td class=nums>{request.yields}</td></tr>
+        <tr><th>parks</th><td class=nums>{request.parks}</td></tr>
+        <tr><th>moves</th><td class=nums>{request.moves} <span class=muted>(a run on another worker than the one before)</span></td></tr>
+      </table>
+    </div>
+    """
+  layout(
+    base,
+    "timeline",
+    "request {request.id}",
+    html"""
+      <p class=crumb><a href="{timelineLink(base, request.app, "1m")}">timeline of {request.app}</a> / request</p>
+      <h1>Request {request.id}</h1>
+      <p class=sub><code>{request.method} {request.path}</code> · {requestStatus(request)} · {requestLatency(request)}</p>
+      <p class=lead>{phaseSentence(request.phases)}</p>
+      {requestPicture(request)}
+      <h2>Phases</h2>{phaseList(request)}
+      <h2>What it came to</h2>{facts}
+      """,
+  )
+}
+
+/// `GET /requests/<id>`: the request's page, or a 404 that says why — an
+/// id the timeline no longer keeps, or not a number at all.
+fn requestAnswer(base: String, id: String) -> web.Response {
+  let back = html"""<p class=actions><a href="{base}/timeline">← the timeline</a></p>"""
+  let number = match Int.parse(id) {
+    Ok(number) => number
+    Err(_) => return htmlResponse(
+      404,
+      layout(base, "timeline", "request", html"<h1>Request</h1>{notRead(html"", "`{id}` is not a request's id", back)}"),
+    )
+  }
+  match host.request(number) {
+    Ok(request) => htmlResponse(200, requestPage(base, request))
+    Err(error) => htmlResponse(
+      404,
+      layout(base, "timeline", "request {number}", html"<h1>Request {number}</h1>{notRead(html"", error.message, back)}"),
+    )
+  }
+}

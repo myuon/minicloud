@@ -287,3 +287,111 @@ pub fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+/// A request timeline of fixed times, for the admin's Live, Timeline and
+/// request pages ([`minicloud::timeline::Recorder::fixed`]): two workers, a
+/// clock standing at 400 s, and four apps' requests — most of them in the
+/// last 8 s, one at 330 s and one at 200 s so that the windows differ.
+///
+/// | id | app | what it did |
+/// | --- | --- | --- |
+/// | 80, 90 | notes, hello | answered long ago |
+/// | 101 | hello | ran on #0, answered |
+/// | 102 | slow | parked on `timer.sleep`, resumed on #1 (moved) |
+/// | 103 | proxy | parked on `fetch`, resumed on the same worker |
+/// | 104 | notes | yielded twice, continued on #0 and then on #1 (moved) |
+/// | 105 | slow | parked on `fetch` until its deadline: 504 |
+/// | 106 | hello | parked on `timer.sleep`, cancelled: 499 |
+/// | 107 | hello | turned away at its queue: 503 `queue_full` |
+/// | 108 | notes | turned away before it: 429 `rate_limited` |
+/// | 109 | slow | in flight, parked on `timer.sleep` |
+/// | 110 | hello | in flight, running on #1 |
+/// | 111 | notes | in flight, waiting for a worker |
+///
+/// The trackers of the three in flight are answered with the recorder, and
+/// must be kept as long as it is looked at: a dropped one ends its request.
+pub fn fixed_timeline() -> (
+    minicloud::timeline::Recorder,
+    Vec<minicloud::timeline::Tracker>,
+) {
+    use minicloud::timeline::{Began, By, Recorder};
+    const MS: u64 = 1_000_000;
+    let rec = Recorder::fixed(2, 1_790_000_000_000, 400_000 * MS);
+    let hello = rec.app("hello");
+    let notes = rec.app("notes");
+    let slow = rec.app("slow");
+    let proxy = rec.app("proxy");
+    let at = |ms: u64| 392_000 * MS + ms * MS;
+    let ok = |t: &mut minicloud::timeline::Tracker, end: u64, worker_ms: u64| {
+        t.meter(1_000 * worker_ms + 345, 120 + worker_ms);
+        t.end(end, 200, None, Duration::from_millis(worker_ms));
+    };
+
+    let mut old = rec.admit(80, notes, "GET", "/notes/old", 200_000 * MS, 200_000 * MS);
+    old.run(200_002 * MS, 1, Began::Start);
+    ok(&mut old, 200_010 * MS, 8);
+    let mut old = rec.admit(90, hello, "GET", "/", 330_000 * MS, 330_000 * MS);
+    old.run(330_005 * MS, 0, Began::Start);
+    ok(&mut old, 330_020 * MS, 15);
+
+    let mut t = rec.admit(101, hello, "GET", "/", at(100), at(100));
+    t.run(at(200), 0, Began::Start);
+    ok(&mut t, at(260), 60);
+
+    let mut t = rec.admit(102, slow, "GET", "/slow/sleep", at(300), at(300));
+    t.run(at(310), 0, Began::Start);
+    t.park(at(330), "timer.sleep");
+    t.ready(at(1330), By::Answer);
+    t.run(at(1350), 1, Began::Resume);
+    ok(&mut t, at(1380), 50);
+
+    let mut t = rec.admit(103, proxy, "GET", "/proxy/fetch", at(500), at(500));
+    t.run(at(520), 1, Began::Start);
+    t.park(at(540), "fetch");
+    t.ready(at(1540), By::Answer);
+    t.run(at(1560), 1, Began::Resume);
+    ok(&mut t, at(1600), 60);
+
+    let mut t = rec.admit(104, notes, "POST", "/notes/crunch", at(1700), at(1700));
+    t.run(at(1710), 0, Began::Start);
+    t.yielded(at(2710));
+    t.run(at(2730), 0, Began::Continue);
+    t.yielded(at(3730));
+    t.run(at(3740), 1, Began::Continue);
+    ok(&mut t, at(4000), 2260);
+
+    let mut t = rec.admit(105, slow, "GET", "/slow/forever", at(2000), at(2000));
+    t.run(at(2010), 1, Began::Start);
+    t.park(at(2030), "fetch");
+    t.ready(at(4030), By::Deadline);
+    t.run(at(4040), 1, Began::Resume);
+    t.end(at(4050), 504, Some("deadline"), Duration::from_millis(30));
+
+    let mut t = rec.admit(106, hello, "GET", "/hello/gone", at(2500), at(2500));
+    t.run(at(2520), 1, Began::Start);
+    t.park(at(2540), "timer.sleep");
+    t.ready(at(3000), By::Cancel);
+    t.run(at(3010), 0, Began::Resume);
+    t.end(at(3020), 499, Some("cancelled"), Duration::from_millis(30));
+
+    let mut t = rec.admit(107, hello, "GET", "/", at(2600), at(2600));
+    t.reject(at(2600), 503, "queue_full");
+    rec.rejected(
+        108,
+        notes,
+        "GET",
+        "/notes/x",
+        at(2700),
+        at(2700),
+        429,
+        "rate_limited",
+    );
+
+    let parked = rec.admit(109, slow, "GET", "/slow/sleep", at(7000), at(7000));
+    parked.run(at(7010), 0, Began::Start);
+    parked.park(at(7030), "timer.sleep");
+    let running = rec.admit(110, hello, "GET", "/hello/spin", at(7500), at(7500));
+    running.run(at(7600), 1, Began::Start);
+    let waiting = rec.admit(111, notes, "GET", "/notes/", at(7800), at(7800));
+    (rec, vec![parked, running, waiting])
+}

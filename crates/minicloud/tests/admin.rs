@@ -1277,3 +1277,104 @@ fn the_platform_page_shows_the_host_against_its_limits() {
         "the figures are now"
     );
 }
+
+#[test]
+fn the_timeline_pages_show_where_each_request_was() {
+    let apps = ui_apps();
+    let host = deployed(&apps);
+    // A recorder of fixed times, so that the admin's own requests are not
+    // what is drawn; the trackers of those in flight are kept to the end.
+    let (recorder, _in_flight) = fixed_timeline();
+    host.set_timeline_source(recorder);
+
+    let live = ui(&host, "GET", "/live", &authed(), "");
+    assert_eq!(live.status, 200, "{}", live.body);
+    for expected in [
+        "<meta http-equiv=refresh content=\"2\">",
+        "<a href=\"/live\" aria-current=page>live</a>",
+        "<a href=\"/timeline\">timeline</a>",
+        "<a href=\"/platform\">platform</a>",
+        // Oldest first: the parked one, the running one, the waiting one.
+        "<a href=\"/requests/109\"><code>109</code></a>",
+        "parked on timer.sleep",
+        "<td class=nums data-label=elapsed>1000.0 ms</td>",
+        "waiting for a worker",
+        // Worker #1 runs 110; #0 is idle, its last request parked.
+        "<span class=\"state busy\">busy</span>",
+        "<span class=\"state idle\">idle</span>",
+    ] {
+        assert!(
+            live.body.contains(expected),
+            "no `{expected}` in:\n{}",
+            live.body
+        );
+    }
+    let order: Vec<usize> = ["/requests/109\"", "/requests/110\"", "/requests/111\""]
+        .iter()
+        .map(|id| live.body.find(id).unwrap())
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "oldest first");
+
+    let picture = ui(&host, "GET", "/timeline?over=10s", &authed(), "");
+    assert_eq!(picture.status, 200, "{}", picture.body);
+    for expected in [
+        "<a href=\"/timeline\" aria-current=page>timeline</a>",
+        "<b>the last 10 seconds</b>",
+        "<svg class=timeline",
+        // A lane is the way to its request, with what it is on hover.
+        "<a href=\"/requests/102\"><title>#102 slow: GET /slow/sleep — 200, 1080.0 ms</title>",
+        // 102 resumed on another worker; 105's deadline; 107 turned away.
+        "class=tl-moved",
+        "class=tl-crit",
+        "class=tl-rej",
+        "class=tl-yield",
+        "<line class=\"tl-park tl-l",
+        // Each app's figures, and a chip each.
+        "<a href=\"/timeline?app=slow&amp;over=10s\">slow</a>",
+    ] {
+        assert!(
+            picture.body.contains(expected),
+            "no `{expected}` in:\n{}",
+            picture.body
+        );
+    }
+    // The old requests are in the 5 minutes and not in the 10 seconds.
+    assert!(!picture.body.contains("/requests/80\""));
+    let wide = ui(&host, "GET", "/timeline?over=5m", &authed(), "").body;
+    assert!(wide.contains("/requests/80\""), "{wide}");
+    // One app's: only its lanes.
+    let slow = ui(&host, "GET", "/timeline?app=slow&over=10s", &authed(), "").body;
+    assert!(slow.contains("/requests/105\""), "{slow}");
+    assert!(!slow.contains("/requests/101\""), "{slow}");
+
+    let moved = ui(&host, "GET", "/requests/102", &authed(), "");
+    assert_eq!(moved.status, 200, "{}", moved.body);
+    for expected in [
+        "<h1>Request 102</h1>",
+        "parked on timer.sleep 1000.0 ms (answered)",
+        "resumed on #1 (moved), ran 30.0 ms",
+        "<a href=\"/timeline?app=slow&amp;over=1m\">timeline of slow</a>",
+    ] {
+        assert!(
+            moved.body.contains(expected),
+            "no `{expected}` in:\n{}",
+            moved.body
+        );
+    }
+    let late = ui(&host, "GET", "/requests/105", &authed(), "").body;
+    assert!(
+        late.contains("parked on fetch 2000.0 ms (the deadline)"),
+        "{late}"
+    );
+    assert!(late.contains("504 deadline"), "{late}");
+    let unknown = ui(&host, "GET", "/requests/424242", &authed(), "");
+    assert_eq!(unknown.status, 404);
+    assert!(
+        unknown.body.contains("no request 424242 in the timeline"),
+        "{}",
+        unknown.body
+    );
+    assert_eq!(ui(&host, "GET", "/requests/abc", &authed(), "").status, 404);
+    // The pages only read.
+    assert_eq!(ui(&host, "POST", "/live", &same_site(), "").status, 404);
+}

@@ -124,6 +124,9 @@ pub fn admit_with(
         .into_owned()
         .collect();
     let (reply, answer) = oneshot::channel();
+    let id = engine.next_id();
+    let now = Instant::now();
+    let track = engine.timeline.admit(id, slot, method, path, now, now);
     let start = Box::new(Start {
         request: AppRequest {
             method: method.to_string(),
@@ -133,19 +136,24 @@ pub fn admit_with(
             body,
         },
         flight: Flight {
-            id: engine.next_id(),
+            id,
             app: slot,
             version: Arc::clone(app),
-            accepted: Instant::now(),
+            accepted: now,
             reply: crate::stream::Answering::new(reply),
             cancel: Cancel::new(),
             tally: Default::default(),
+            track,
         },
     });
     match engine.queue.admit(slot, start) {
         Ok(()) => Ok(answer),
-        Err(why) => {
+        Err((why, mut start)) => {
             app.counters.rejected(why);
+            start
+                .flight
+                .track
+                .reject(Instant::now(), why.status(), why.name());
             Err(why)
         }
     }

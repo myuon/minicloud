@@ -7,7 +7,7 @@ The tests run Cove programs, so they run optimised (`--profile checked`, as
 in Cove's own repository); a bare `cargo test` works, more slowly. The
 integration tests (`crates/minicloud/tests/host.rs`, `services.rs` and
 `updates.rs`, `deploying.rs`, `admin.rs`, `access.rs`, `secrets.rs`,
-`assets.rs`, `triggers.rs`, and one
+`assets.rs`, `triggers.rs`, `timeline.rs`, and one
 per real example: `webhooks.rs`, `ledger.rs`, `algo.rs`) start the host
 in-process on a free port and ask it over TCP. None asserts a duration: where
 a test needs the host in some state it waits for the host's own stats to say
@@ -182,6 +182,24 @@ so, and what it asserts is counted.
   read of fixture files under a root, and the host rows' round trip and
   roll-up (CPU summed, memory at its largest, free disk at its smallest,
   load averaged);
+- the request timeline (`timeline.rs`, and `timeline.rs`'s unit tests): a
+  request that sleeps twice is a run, a park at `timer.sleep` ended by its
+  answer, a resume — three times — its phases following each other without
+  a gap, a move counted only where a resume is on another worker, its path
+  kept without its query string; its detail is the same request, and an id
+  not kept is 404; a spinner on one worker yields and is continued, never
+  moving; a parked request is listed by `/_host/live` with its host call,
+  holds no worker, is in flight in the window with its park open, and the
+  client going away ends the park `by` cancel and the request 499; a
+  request over its `[rate]` is recorded as rejected, why, and with no
+  phases. The unit tests hold the assembly of phases, the live states, the
+  count bound keeping the newest and the age bound forgetting what ended
+  long ago (and not what is in flight), the strips and the utilisation of a
+  window, the merging of segments, rejections and cancels with their
+  reason, and a dropped tracker ending its request. The admin's Live,
+  Timeline and request pages are drawn from a recorder the test fills with
+  fixed times (`Host::set_timeline_source`), so neither their snapshots nor
+  `admin.rs` see the host's own requests;
 - `[rate]` (`rate.rs`, and `rate.rs`'s unit tests): a caller past its
   allowance is 429 with a `Retry-After` and the app does not run, while its
   neighbour answers; a burst larger than the rate is allowed and then is

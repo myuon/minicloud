@@ -164,6 +164,9 @@ pub(crate) struct Front {
     /// from: `None` for the live files ([`crate::platform::read_system`]),
     /// or what a test put there ([`Host::set_platform_source`]).
     pub(crate) platform_source: std::sync::RwLock<Option<PlatformSource>>,
+    /// What the timeline views read instead of the engine's own recorder,
+    /// when a test put one there ([`Host::set_timeline_source`]).
+    pub(crate) timeline_source: std::sync::RwLock<Option<crate::timeline::Recorder>>,
     /// The platform as the last sample saw it, which the next one takes the
     /// CPU's difference from.
     pub(crate) platform_sampled: std::sync::Mutex<Option<crate::platform::PlatformSample>>,
@@ -356,6 +359,7 @@ impl Host {
             series,
             sampled: std::sync::Mutex::new(std::collections::HashMap::new()),
             platform_source: std::sync::RwLock::new(None),
+            timeline_source: std::sync::RwLock::new(None),
             platform_sampled: std::sync::Mutex::new(None),
         });
         control.attach(&front);
@@ -459,6 +463,19 @@ impl Host {
     /// ([`crate::platform`]).
     pub fn platform_now(&self) -> crate::platform::PlatformSample {
         self.front.platform_now()
+    }
+
+    /// Shows `recorder` in the timeline views (`/_host/timeline`,
+    /// `/_host/live`, `host.timeline` and the rest) from now on, instead of
+    /// what the engine records: what a test does so that a page of the
+    /// timeline is drawn from requests and times of its own
+    /// ([`crate::timeline::Recorder::fixed`]). The engine goes on recording.
+    pub fn set_timeline_source(&self, recorder: crate::timeline::Recorder) {
+        *self
+            .front
+            .timeline_source
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(recorder);
     }
 
     /// What `GET /_host/stats` answers.
@@ -762,6 +779,9 @@ impl Front {
     }
 
     async fn reply(&self, request: Request<Incoming>, from: std::net::IpAddr) -> Reply {
+        // When the request arrived, for the timeline ([`crate::timeline`]):
+        // before routing and the body, so that reading a slow body shows.
+        let arrived = Instant::now();
         if self.draining.load(Ordering::Relaxed) {
             return Reply::text(503, "minicloud is shutting down; try again shortly\n")
                 .with_header("retry-after", "1")
@@ -804,8 +824,23 @@ impl Front {
             self.counters.not_found.fetch_add(1, Ordering::Relaxed);
             return Reply::text(404, format!("no app named `{}`\n", route.app));
         };
+        // A request turned away before its app's queue, in the timeline.
+        let verb = request.method().clone();
+        let turned_away = |why: Rejection| {
+            app.counters.rejected(why);
+            self.engine.timeline.rejected(
+                self.engine.next_id(),
+                index,
+                verb.as_str(),
+                &path,
+                arrived,
+                Instant::now(),
+                why.status(),
+                why.name(),
+            );
+        };
         if !enabled {
-            app.counters.rejected(Rejection::Disabled);
+            turned_away(Rejection::Disabled);
             return Reply::text(
                 503,
                 format!("app `{}` is disabled by the administrator\n", app.name),
@@ -837,7 +872,7 @@ impl Front {
             if let crate::rate::Allowance::Refused { retry_after_secs } =
                 self.rates.check(&app.name, &who, limit)
             {
-                app.counters.rejected(Rejection::RateLimited);
+                turned_away(Rejection::RateLimited);
                 return Reply::text(
                     429,
                     format!(
@@ -868,7 +903,7 @@ impl Front {
 
         let limit = app.limits.max_request_bytes;
         let too_large = || {
-            app.counters.rejected(Rejection::TooLarge);
+            turned_away(Rejection::TooLarge);
             Reply::text(
                 413,
                 format!(
@@ -941,12 +976,12 @@ impl Front {
             Ok(collected) => collected.to_bytes(),
             Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => return too_large(),
             Err(error) => {
-                app.counters.rejected(Rejection::BadRequest);
+                turned_away(Rejection::BadRequest);
                 return Reply::text(400, format!("cannot read the request body: {error}\n"));
             }
         };
         let Ok(body) = String::from_utf8(body.to_vec()) else {
-            app.counters.rejected(Rejection::BadRequest);
+            turned_away(Rejection::BadRequest);
             return Reply::text(400, "the request body is not UTF-8\n");
         };
 
@@ -956,6 +991,12 @@ impl Front {
         if let (Some(upgrade), Some(key)) = (upgrade, websocket) {
             answering.upgradable(upgrade, key);
         }
+        let id = self.engine.next_id();
+        let queued = Instant::now();
+        let track = self
+            .engine
+            .timeline
+            .admit(id, index, &method, &path, arrived, queued);
         let start = Box::new(Start {
             request: AppRequest {
                 method,
@@ -965,17 +1006,22 @@ impl Front {
                 body,
             },
             flight: Flight {
-                id: self.engine.next_id(),
+                id,
                 app: index,
                 version: Arc::clone(&app),
-                accepted: Instant::now(),
+                accepted: queued,
                 reply: answering,
                 cancel: cancel.clone(),
                 tally: Default::default(),
+                track,
             },
         });
-        if let Err(why) = self.engine.queue.admit(index, start) {
+        if let Err((why, mut start)) = self.engine.queue.admit(index, start) {
             app.counters.rejected(why);
+            start
+                .flight
+                .track
+                .reject(Instant::now(), why.status(), why.name());
             return match why {
                 Rejection::QueueFull => Reply::text(
                     429,
@@ -1030,6 +1076,10 @@ impl Front {
             out.push_str("  /_host/stats  per-app counters, queues and work, as JSON\n");
             out.push_str("  /_host/apps/<app>  one app, its versions and recent errors, as JSON\n");
             out.push_str("  /_host/apps/<app>/logs?n=200  an app's recent log lines\n");
+            out.push_str(
+                "  /_host/timeline?app=&over=60s  where each request waited, ran and parked\n",
+            );
+            out.push_str("  /_host/live  the requests in flight, and what each worker runs\n");
         }
         out
     }
@@ -1076,6 +1126,48 @@ impl Front {
                 })
                 .unwrap_or_else(|| "hour".to_string());
             return json_reply(&ops::platform(&self.ops(), &self.platform_now(), &over));
+        }
+        if path == "/_host/timeline" {
+            let asked: BTreeMap<String, String> = query
+                .map(|query| {
+                    form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let number = |key: &str| asked.get(key).and_then(|n| n.parse::<u64>().ok());
+            let window = crate::timeline::asked_window(
+                &self.timeline(),
+                asked
+                    .get("app")
+                    .map(String::as_str)
+                    .filter(|app| !app.is_empty()),
+                number("since"),
+                number("until"),
+                asked.get("over").map(String::as_str),
+            );
+            return json_reply(&window.to_json());
+        }
+        if let Some(id) = path.strip_prefix("/_host/timeline/") {
+            return match id
+                .parse::<u64>()
+                .ok()
+                .and_then(|id| self.timeline().request(id))
+            {
+                Some(span) => json_reply(&span.to_json()),
+                None => Reply::text(
+                    404,
+                    format!(
+                        "no request `{id}` in the timeline: it keeps the last {} s, at most {} \
+                         requests\n",
+                        crate::timeline::KEEP.as_secs(),
+                        crate::timeline::KEEP_REQUESTS
+                    ),
+                ),
+            };
+        }
+        if path == "/_host/live" {
+            return json_reply(&self.timeline().live().to_json());
         }
         if path == "/_host/ui" {
             return Reply {
@@ -1134,6 +1226,16 @@ impl Front {
         sample.busy = self.engine.busy() as u64;
         sample.workers = self.engine.workers() as u64;
         sample
+    }
+
+    /// The recorder the timeline views read: what a test put in
+    /// [`Front::timeline_source`], or the engine's own.
+    pub(crate) fn timeline(&self) -> crate::timeline::Recorder {
+        self.timeline_source
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.engine.timeline.clone())
     }
 
     pub(crate) fn ops_context(&self) -> OpsContext<'_> {

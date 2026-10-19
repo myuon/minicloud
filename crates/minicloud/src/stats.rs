@@ -104,6 +104,30 @@ pub enum Rejection {
     RateLimited,
 }
 
+impl Rejection {
+    /// The name the timeline gives it ([`crate::timeline`]).
+    pub fn name(self) -> &'static str {
+        match self {
+            Rejection::QueueFull => "queue_full",
+            Rejection::ServerBusy => "server_busy",
+            Rejection::TooLarge => "too_large",
+            Rejection::BadRequest => "bad_request",
+            Rejection::Disabled => "disabled",
+            Rejection::RateLimited => "rate_limited",
+        }
+    }
+
+    /// The status it is answered with.
+    pub fn status(self) -> u16 {
+        match self {
+            Rejection::QueueFull | Rejection::RateLimited => 429,
+            Rejection::ServerBusy | Rejection::Disabled => 503,
+            Rejection::TooLarge => 413,
+            Rejection::BadRequest => 400,
+        }
+    }
+}
+
 /// One app's counters.
 #[derive(Default)]
 pub struct AppCounters {

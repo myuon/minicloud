@@ -973,6 +973,9 @@ token` secret is the way in. See
 | `GET /_host/metrics` | the same, in the text format Prometheus scrapes (`version=0.0.4`), with the request times as a histogram |
 | `GET /_host/series?app=&over=hour\|day\|month` | what each app did minute by minute (or, for a month, hour by hour) |
 | `GET /_host/platform?over=hour\|day\|month` | the host itself — its cgroup's memory against `MemoryMax`, CPU against `CPUQuota` and throttling, the data directory's disk, the machine's load and memory, workers busy and requests queued — now, and minute by minute (or hour by hour) |
+| `GET /_host/timeline?app=&over=10s\|1m\|5m` | **where each request went**: when it arrived, how long it waited for a worker, each run on which worker, each park at which host call and what ended it, each yield, and how it ended — with the workers' run segments, three strips (workers running, runs parked, requests waiting) and p50/p99 per app; `since=`/`until=` (Unix milliseconds) instead of `over`. See [The request timeline](#the-request-timeline) |
+| `GET /_host/timeline/<id>` | one request of it, its phases whole; 404 once it is no longer kept |
+| `GET /_host/live` | the requests in flight now — waiting for a worker, running on worker N, parked at `fetch` since t, yielded — and what each worker is running |
 | `GET /_host/apps/<app>` | one app as JSON: its limits, every version it has had, its last 50 errors, and on the native tier which functions stayed on the VM and why |
 | `GET /_host/apps/<app>/logs?n=200` | its recent log lines, as text |
 | `GET /_host/apps/<app>/logs?follow=1` | those, and then every line as it is written: server-sent events, until the client goes away |
@@ -1095,6 +1098,54 @@ histogram, each labelled by app; and the host's own figures, unlabelled:
 `_memory_available_bytes`, `_workers_busy`, `_workers` and `_queued` (a
 figure the host cannot read is left out). With `--ops-listener admin` (as deployed)
 that is on the admin listener, where a scraper on the machine reaches it.
+
+### The request timeline
+
+The counters say how much; the timeline says **where a request's time
+went**. The host records every request an app is asked — off a connection,
+or by a trigger, a queue or `defer` — always, in memory, with no setting:
+
+- when it **arrived** (the top of the HTTP side, before routing and the
+  body) and when it was **queued**;
+- each **run** on a worker — its first, a **resume** after a park, a
+  **continue** after a yield — and which worker, so a resume on another
+  worker than the run before is seen as one;
+- each **park** at a host call that answers later (`fetch`,
+  `timer.sleep`, `stream.send`, `socket.send`/`receive`,
+  `auth.identity`, the admin's changes) and what ended it: the answer, the
+  deadline, or the client going away;
+- each **yield**, its slice up and others waiting;
+- how it **ended**: the status, the error kind (`deadline`, `cancelled`,
+  `queue_timeout`, …), its worker time, instructions and heap; or that it
+  was **turned away** before its app's queue, and why (`rate_limited`,
+  `queue_full`, `server_busy`, `too_large`, `bad_request`, `disabled`).
+
+It keeps the **last 5 minutes, and at most 20,000 requests** (about 8 MB),
+the oldest forgotten first; a request still in flight is kept until it ends.
+Nothing of it is written to disk, so a restart starts it empty. **The query
+string is not recorded** — only the method and the path, cut at 256 bytes —
+and neither are headers or bodies. `kv` and `sql` calls answer inside the
+run, so their time **counts as running**, as does a host call that blocks;
+files served from an app's `assets/` never run and are not in it.
+
+- `GET /_host/timeline?app=&over=1m` is a window of it as JSON: per
+  request its `phases` (`wait` — after `arrival`, `park` or `yield` —, `run`
+  with its `worker` and whether it `moved`, `park` with its `op` and `by`),
+  the workers' `segments`, the `strips`, and the `summary`. Times are
+  microseconds since the host started (`started_unix_ms`). At most the
+  newest 2,000 requests and 10,000 segments are answered; the summary and
+  the strips count all of them.
+- `GET /_host/timeline/<id>` is one request; `GET /_host/live` the ones in
+  flight, and what each worker is running.
+- The admin app draws them: **Live** (refreshed every 2 s), **Timeline** —
+  worker swimlanes above, a lane per request below (the newest 200), as the
+  Cove repository's edge sample draws its timeline — and a request's own
+  page from either, its phases in words.
+
+Recording costs nothing measurable: under 1% of `hello`'s capacity with
+keep-alive, the worst case, within the spread between rounds, and nothing
+on a mixed load
+([docs/measurements.md](docs/measurements.md#what-the-request-timeline-costs)).
 
 ### Logs
 

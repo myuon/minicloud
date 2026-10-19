@@ -1006,3 +1006,251 @@ test fn theWorstCardsComeFirst() -> Result<Unit, Error> {
   assertEqual(anyBad([]), false)?
   Ok(())
 }
+
+// ------------------------------------------------- the request timeline
+
+fn aPhase(
+  kind: String,
+  fromUs: Int,
+  toUs: Int,
+  worker: Int = -1,
+  began: String = "",
+  moved: Bool = false,
+  op: String = "",
+  by: String = "",
+  after: String = "",
+  open: Bool = false,
+) -> host.Phase {
+  host.Phase(
+    kind: kind,
+    fromUs: fromUs,
+    toUs: toUs,
+    open: open,
+    worker: worker,
+    began: began,
+    moved: moved,
+    op: op,
+    by: by,
+    after: after,
+  )
+}
+
+fn aRequest(
+  id: Int,
+  phases: Array<host.Phase>,
+  outcome: String = "ok",
+  status: Option<Int> = Some(200),
+  reason: String = "",
+  endedUs: Option<Int> = Some(28000),
+) -> host.TimelineRequest {
+  host.TimelineRequest(
+    id: id,
+    app: "slow",
+    method: "GET",
+    path: "/slow/<b>",
+    arrivedUs: 10000,
+    queuedUs: Some(11000),
+    endedUs: endedUs,
+    status: status,
+    outcome: outcome,
+    reason: reason,
+    latencyUs: match endedUs {
+      Some(ended) => Some(ended - 10000)
+      None => None
+    },
+    workerUs: 3000,
+    instructions: Some(1234),
+    heapWords: Some(56),
+    yields: 1,
+    parks: 1,
+    moves: 1,
+    nowUs: 100000,
+    phases: phases,
+  )
+}
+
+/// The request of `timeline.rs`'s first unit test: it waits, runs on #0,
+/// sleeps, resumes on #1, yields and continues there.
+fn parkedAndMoved() -> Array<host.Phase> {
+  [
+    aPhase("wait", 11000, 12000, after: "arrival"),
+    aPhase("run", 12000, 13000, worker: 0, began: "start"),
+    aPhase("park", 13000, 23000, op: "timer.sleep", by: "answer"),
+    aPhase("wait", 23000, 25000, after: "park"),
+    aPhase("run", 25000, 26000, worker: 1, began: "resume", moved: true),
+    aPhase("wait", 26000, 27000, after: "yield"),
+    aPhase("run", 27000, 28000, worker: 1, began: "continue"),
+  ]
+}
+
+test fn scalesATimeAcrossThePicture() -> Result<Unit, Error> {
+  assertEqual(scaleX(0, 0, 1000, 900), 0)?
+  assertEqual(scaleX(500, 0, 1000, 900), 450)?
+  assertEqual(scaleX(1000, 0, 1000, 900), 900)?
+  // Outside the window, at the edge it is past.
+  assertEqual(scaleX(-5, 0, 1000, 900), 0)?
+  assertEqual(scaleX(5000, 0, 1000, 900), 900)?
+  // A window of no length divides by nothing.
+  assertEqual(scaleX(7, 7, 7, 900), 0)?
+  assertEqual(tlX(300000000, 0, 300000000), tlLeft() + tlPlot())?
+  Ok(())
+}
+
+test fn putsTicksAtOneTwoOrFiveOfAPowerOfTen() -> Result<Unit, Error> {
+  assertEqual(tickStep(10000000, 6), 2000000)?
+  assertEqual(tickStep(60000000, 6), 10000000)?
+  assertEqual(tickStep(300000000, 6), 50000000)?
+  assertEqual(tickStep(0, 6), 1)?
+  // Every label of an axis in the unit its step is whole in.
+  assertEqual(tickLabel(0, 2000000), "0 s")?
+  assertEqual(tickLabel(4000000, 2000000), "4 s")?
+  assertEqual(tickLabel(1000000, 500000), "1000 ms")?
+  assertEqual(tickLabel(1500, 500), "1.5 ms")?
+  Ok(())
+}
+
+test fn colorsAnAppByItsPlaceInTheSummary() -> Result<Unit, Error> {
+  let order = ["hello", "notes", "a", "b", "c", "d", "e"]
+  assertEqual(paletteSlot(order, "hello"), "0")?
+  assertEqual(paletteSlot(order, "notes"), "1")?
+  assertEqual(paletteSlot(order, "d"), "5")?
+  // Past the sixth, and an app not there, are grey.
+  assertEqual(paletteSlot(order, "e"), "x")?
+  assertEqual(paletteSlot(order, "nobody"), "x")?
+  Ok(())
+}
+
+test fn choosesAWindowOfTheTimeline() -> Result<Unit, Error> {
+  assertEqual(timelineWindow(asking(Map.of())), "1m")?
+  assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "10s")))), "10s")?
+  assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "5m")))), "5m")?
+  assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "1h")))), "1m")?
+  assertEqual(timelineSecs("10s"), 10)?
+  assertEqual(timelineSecs("1m"), 60)?
+  assertEqual(timelineSecs("5m"), 300)?
+  assertEqual(timelineLink("", "", "5m"), "/timeline?over=5m")?
+  assertEqual(timelineLink("/x", "a b", "10s"), "/x/timeline?app=a%20b&over=10s")?
+  let steps = timelineSteps("", "hello", "10s").render()
+  assert(steps.contains("<b>the last 10 seconds</b>"))?
+  assert(steps.contains("<a href=\"/timeline?app=hello&amp;over=5m\">the last 5 minutes</a>"))?
+  let chips = timelineChips("", ["hello", "notes"], "notes", "1m").render()
+  assert(chips.contains("<a href=\"/timeline?over=1m\">all apps</a>"))?
+  assert(chips.contains("<a href=\"/timeline?app=notes&amp;over=1m\" aria-current=page>notes</a>"))?
+  Ok(())
+}
+
+test fn saysWhereARequestInFlightIs() -> Result<Unit, Error> {
+  assertEqual(liveState("waiting", ""), "waiting for a worker")?
+  assertEqual(liveState("running", ""), "running")?
+  assertEqual(liveState("parked", "fetch"), "parked on fetch")?
+  assertEqual(liveState("resuming", ""), "answered, waiting for a worker to resume it")?
+  assertEqual(liveState("yielded", ""), "yielded, waiting for a worker to continue it")?
+  assertEqual(workerName(-1), "–")?
+  assertEqual(workerName(3), "#3")?
+  Ok(())
+}
+
+test fn writesEachPhaseInWords() -> Result<Unit, Error> {
+  let phases = parkedAndMoved()
+  assertEqual(phaseWords(phases.get(0).unwrapOr(aPhase("", 0, 0))), "waited for a worker 1.0 ms")?
+  assertEqual(phaseWords(phases.get(1).unwrapOr(aPhase("", 0, 0))), "ran 1.0 ms on worker #0")?
+  assertEqual(phaseWords(phases.get(2).unwrapOr(aPhase("", 0, 0))), "parked on timer.sleep 10.0 ms (answered)")?
+  assertEqual(phaseWords(phases.get(3).unwrapOr(aPhase("", 0, 0))), "waited 2.0 ms for a worker to resume it")?
+  assertEqual(phaseWords(phases.get(4).unwrapOr(aPhase("", 0, 0))), "resumed on #1 (moved), ran 1.0 ms")?
+  assertEqual(phaseWords(phases.get(5).unwrapOr(aPhase("", 0, 0))), "yielded, waited 1.0 ms for a worker to continue it")?
+  assertEqual(phaseWords(phases.get(6).unwrapOr(aPhase("", 0, 0))), "continued on #1, ran 1.0 ms")?
+  assertEqual(phaseWords(aPhase("park", 0, 30000, op: "fetch", by: "deadline")), "parked on fetch 30.0 ms (the deadline)")?
+  assertEqual(phaseWords(aPhase("park", 0, 500, op: "fetch", by: "cancel")), "parked on fetch 0.5 ms (cancelled)")?
+  assertEqual(phaseWords(aPhase("park", 0, 2000, op: "fetch", open: true)), "parked on fetch 2.0 ms so far (still parked)")?
+  let sentence = phaseSentence(phases)
+  assert(sentence.startsWith("waited for a worker 1.0 ms → ran 1.0 ms on worker #0 → parked on timer.sleep"))?
+  assert(sentence.endsWith("→ continued on #1, ran 1.0 ms"))?
+  assertEqual(phaseSentence([]), "")?
+  Ok(())
+}
+
+test fn saysHowARequestEnded() -> Result<Unit, Error> {
+  assertEqual(requestStatus(aRequest(1, [])), "200")?
+  assertEqual(requestLatency(aRequest(1, [])), "18.0 ms")?
+  assertEqual(requestStatus(aRequest(2, [], outcome: "error", status: Some(504), reason: "deadline")), "504 deadline")?
+  assertEqual(requestStatus(aRequest(3, [], outcome: "rejected", status: Some(429), reason: "queue_full")), "429 rejected: queue_full")?
+  let flying = aRequest(4, [], outcome: "in_flight", status: None, endedUs: None)
+  assertEqual(requestStatus(flying), "in flight")?
+  assertEqual(requestLatency(flying), "90.0 ms so far")?
+  Ok(())
+}
+
+test fn drawsALaneWithItsMarks() -> Result<Unit, Error> {
+  let marks = html"{laneMarks(aRequest(7, parkedAndMoved()), 0, 100000, 0, 10, "2")}".render()
+  // Three runs, a park in the app's colour, three waits.
+  assertEqual(marks.split("<rect class=\"tl-c2\"").length() - 1, 3)?
+  assert(marks.contains("<line class=\"tl-park tl-l2\""))?
+  assertEqual(marks.split("<line class=tl-wait").length() - 1, 3)?
+  // One move, one yield, and an answer has no end mark.
+  assertEqual(marks.split("class=tl-moved").length() - 1, 1)?
+  assertEqual(marks.split("class=tl-yield").length() - 1, 1)?
+  assert(!marks.contains("tl-crit"))?
+  let late = html"{laneMarks(aRequest(8, [], outcome: "error", status: Some(504), reason: "deadline"), 0, 100000, 0, 10, "0")}".render()
+  assert(late.contains("class=tl-crit"))?
+  let turned = html"{laneMarks(aRequest(9, [], outcome: "rejected", status: Some(429), reason: "queue_full"), 0, 100000, 0, 10, "0")}".render()
+  assert(turned.contains("class=tl-rej"))?
+  let gone = html"{laneMarks(aRequest(10, [], outcome: "error", status: Some(499), reason: "cancelled"), 0, 100000, 0, 10, "0")}".render()
+  assert(gone.contains("class=tl-err"))?
+  // A lane is the way to its request, and says what it is on hover.
+  let one = lane("/x", aRequest(7, parkedAndMoved()), 0, 100000, 0, 10, "0").render()
+  assert(one.contains("<a href=\"/x/requests/7\"><title>#7 slow: GET /slow/&lt;b&gt; — 200, 18.0 ms</title>"))?
+  Ok(())
+}
+
+test fn drawsAStripAsSteps() -> Result<Unit, Error> {
+  // Two buckets across the plot: 1 of a top of 2, then 2.
+  let path = stripPath([1000, 2000], 2000, 100, 40)
+  assertEqual(path, "M64,100 L64,80 L514,80 L514,60 L964,60 L964,100 Z")?
+  assertEqual(stripPath([], 1000, 100, 40), "M64,100 L964,100")?
+  assertEqual(tenthsPercent(16), "1.6%")?
+  assertEqual(tenthsPercent(1000), "100.0%")?
+  assertEqual(wholeAbove(0), 1000)?
+  assertEqual(wholeAbove(1500), 2000)?
+  assertEqual(wholeAbove(3000), 3000)?
+  Ok(())
+}
+
+/// Under `minicloud test` the timeline is empty: nothing in flight, no
+/// request in the window, and no request kept.
+test fn theTimelinePagesSayWhatTheyHaveNot() -> Result<Unit, Error> {
+  let live = livePage("").render()
+  assert(live.contains("<h1>Live</h1>"))?
+  assert(live.contains("<a href=\"/live\" aria-current=page>live</a>"))?
+  assert(live.contains("<meta http-equiv=refresh content=\"2\">"))?
+  assert(live.contains("Nothing is in flight."))?
+  assert(live.contains("<td class=title data-label=worker>#0</td>"))?
+  assert(live.contains("<span class=\"state idle\">idle</span>"))?
+  let page = timelinePage("", asking(Map.of(MapEntry(key: "over", value: "10s")))).render()
+  assert(page.contains("<h1>Timeline</h1>"))?
+  assert(page.contains("<a href=\"/timeline\" aria-current=page>timeline</a>"))?
+  assert(page.contains("No request in the last 10 seconds"))?
+  assert(page.contains("<b>the last 10 seconds</b>"))?
+  assert(!page.contains("<svg class=timeline"))?
+  assert(!page.contains("http-equiv"))?
+  let missing = requestAnswer("", "42")
+  assertEqual(missing.status, 404)?
+  assert(missing.body.contains("no request 42 in the timeline"))?
+  assert(missing.body.contains("<h1>Request 42</h1>"))?
+  let nan = requestAnswer("", "<b>")
+  assertEqual(nan.status, 404)?
+  assert(nan.body.contains("`&lt;b&gt;` is not a request&#39;s id"))?
+  Ok(())
+}
+
+test fn showsARequestsPhasesAndWhatItCameTo() -> Result<Unit, Error> {
+  let page = requestPage("", aRequest(7, parkedAndMoved())).render()
+  assert(page.contains("<h1>Request 7</h1>"))?
+  assert(page.contains("<a href=\"/timeline?app=slow&amp;over=1m\">timeline of slow</a>"))?
+  assert(page.contains("resumed on #1 (moved), ran 1.0 ms"))?
+  assert(page.contains("<span class=\"ph ph-park\">park</span> <span class=\"nums muted\">+3.0 ms</span> parked on timer.sleep 10.0 ms (answered)"))?
+  assert(page.contains("<td class=nums>1234</td>"))?
+  assert(page.contains("<svg class=timeline"))?
+  let turned = requestPage("", aRequest(9, [], outcome: "rejected", status: Some(429), reason: "queue_full")).render()
+  assert(turned.contains("No phases"))?
+  Ok(())
+}

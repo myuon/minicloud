@@ -39,6 +39,15 @@ use std.html
 /// - `GET /platform` is the host itself: its memory against `MemoryMax`, its
 ///   CPU against `CPUQuota`, its disk and its workers, now and over the last
 ///   hour, day or 30 days (`?over=`). Reading only.
+/// - `GET /live` is what is in flight now — each request waiting, running
+///   or parked, and on what, and each worker with the request it runs — and
+///   reloads itself every 2 seconds.
+/// - `GET /timeline` is a picture of where every request (`?app=`, one
+///   app's) waited, ran, parked and resumed, and what the workers ran, over
+///   the last 10 seconds, minute or 5 minutes (`?over=10s|1m|5m`), with
+///   each app's figures. Reading only, from the host's in-memory timeline.
+/// - `GET /requests/<id>` is one request's phases in words, and what it
+///   came to; a 404 for one the timeline no longer keeps.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -77,6 +86,15 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if section == "platform" && name == "" && get {
     return htmlResponse(200, platformPage(at, request))
+  }
+  if section == "live" && name == "" && get {
+    return htmlResponse(200, livePage(at))
+  }
+  if section == "timeline" && name == "" && get {
+    return htmlResponse(200, timelinePage(at, request))
+  }
+  if section == "requests" && name != "" && parts.length() == 3 && get {
+    return requestAnswer(at, name)
   }
   if section == "history" && name == "" && get {
     return htmlResponse(200, historyPage(at, host.history(200)))
