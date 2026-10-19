@@ -762,6 +762,9 @@ impl Front {
     }
 
     async fn reply(&self, request: Request<Incoming>, from: std::net::IpAddr) -> Reply {
+        // When the request arrived, for the timeline ([`crate::timeline`]):
+        // before routing and the body, so that reading a slow body shows.
+        let arrived = Instant::now();
         if self.draining.load(Ordering::Relaxed) {
             return Reply::text(503, "minicloud is shutting down; try again shortly\n")
                 .with_header("retry-after", "1")
@@ -804,8 +807,23 @@ impl Front {
             self.counters.not_found.fetch_add(1, Ordering::Relaxed);
             return Reply::text(404, format!("no app named `{}`\n", route.app));
         };
+        // A request turned away before its app's queue, in the timeline.
+        let verb = request.method().clone();
+        let turned_away = |why: Rejection| {
+            app.counters.rejected(why);
+            self.engine.timeline.rejected(
+                self.engine.next_id(),
+                &app.name,
+                verb.as_str(),
+                &path,
+                arrived,
+                Instant::now(),
+                why.status(),
+                why.name(),
+            );
+        };
         if !enabled {
-            app.counters.rejected(Rejection::Disabled);
+            turned_away(Rejection::Disabled);
             return Reply::text(
                 503,
                 format!("app `{}` is disabled by the administrator\n", app.name),
@@ -837,7 +855,7 @@ impl Front {
             if let crate::rate::Allowance::Refused { retry_after_secs } =
                 self.rates.check(&app.name, &who, limit)
             {
-                app.counters.rejected(Rejection::RateLimited);
+                turned_away(Rejection::RateLimited);
                 return Reply::text(
                     429,
                     format!(
@@ -868,7 +886,7 @@ impl Front {
 
         let limit = app.limits.max_request_bytes;
         let too_large = || {
-            app.counters.rejected(Rejection::TooLarge);
+            turned_away(Rejection::TooLarge);
             Reply::text(
                 413,
                 format!(
@@ -941,12 +959,12 @@ impl Front {
             Ok(collected) => collected.to_bytes(),
             Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => return too_large(),
             Err(error) => {
-                app.counters.rejected(Rejection::BadRequest);
+                turned_away(Rejection::BadRequest);
                 return Reply::text(400, format!("cannot read the request body: {error}\n"));
             }
         };
         let Ok(body) = String::from_utf8(body.to_vec()) else {
-            app.counters.rejected(Rejection::BadRequest);
+            turned_away(Rejection::BadRequest);
             return Reply::text(400, "the request body is not UTF-8\n");
         };
 
@@ -956,6 +974,12 @@ impl Front {
         if let (Some(upgrade), Some(key)) = (upgrade, websocket) {
             answering.upgradable(upgrade, key);
         }
+        let id = self.engine.next_id();
+        let queued = Instant::now();
+        let track = self
+            .engine
+            .timeline
+            .admit(id, &app.name, &method, &path, arrived, queued);
         let start = Box::new(Start {
             request: AppRequest {
                 method,
@@ -965,17 +989,22 @@ impl Front {
                 body,
             },
             flight: Flight {
-                id: self.engine.next_id(),
+                id,
                 app: index,
                 version: Arc::clone(&app),
-                accepted: Instant::now(),
+                accepted: queued,
                 reply: answering,
                 cancel: cancel.clone(),
                 tally: Default::default(),
+                track,
             },
         });
-        if let Err(why) = self.engine.queue.admit(index, start) {
+        if let Err((why, mut start)) = self.engine.queue.admit(index, start) {
             app.counters.rejected(why);
+            start
+                .flight
+                .track
+                .reject(Instant::now(), why.status(), why.name());
             return match why {
                 Rejection::QueueFull => Reply::text(
                     429,
