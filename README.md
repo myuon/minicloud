@@ -976,6 +976,7 @@ token` secret is the way in. See
 | `GET /_host/timeline?app=&over=10s\|1m\|5m` | **where each request went**: when it arrived, how long it waited for a worker, each run on which worker, each park at which host call and what ended it, each yield, and how it ended — with the workers' run segments, three strips (workers running, runs parked, requests waiting) and p50/p99 per app; `since=`/`until=` (Unix milliseconds) instead of `over`. See [The request timeline](#the-request-timeline) |
 | `GET /_host/timeline/<id>` | one request of it, its phases whole; 404 once it is no longer kept |
 | `GET /_host/live` | the requests in flight now — waiting for a worker, running on worker N, parked at `fetch` since t, yielded — and what each worker is running |
+| `GET /_host/load` | the host's own load run — `running`, the `current` and the `last` run with what it sent and how it was answered, and the `limits`. Started and stopped on the admin listener only. See [Load from the admin](#load-from-the-admin) |
 | `GET /_host/apps/<app>` | one app as JSON: its limits, every version it has had, its last 50 errors, and on the native tier which functions stayed on the VM and why |
 | `GET /_host/apps/<app>/logs?n=200` | its recent log lines, as text |
 | `GET /_host/apps/<app>/logs?follow=1` | those, and then every line as it is written: server-sent events, until the client goes away |
@@ -1146,6 +1147,56 @@ Recording costs nothing measurable: under 1% of `hello`'s capacity with
 keep-alive, the worst case, within the spread between rounds, and nothing
 on a mixed load
 ([docs/measurements.md](docs/measurements.md#what-the-request-timeline-costs)).
+
+### Load from the admin
+
+The host can put load on its own apps, to see the timeline and the counters
+move. One run at a time, held by the host; it needs no tool outside it.
+
+- A **mix**: `light` (`hello`, `/hello/?name=load`), `cpu` (`crunch`,
+  `/crunch/?n=` 20000, 50000, 100000 and 150000 in turn), `wait` (`slow`,
+  `/slow/?ms=60&times=3`, which parks on a timer three times) or `mixed`
+  (the three in turn).
+- A **rate** in requests a second, at most 500, open loop: each latency is
+  measured from when its request was due. Rate 0 is closed loop on
+  `connections` kept-alive connections (at most 64; they also bound an
+  open-loop run). `seconds` is 1 to 60. The defaults are `light`, 0, 8, 10.
+- The requests are real HTTP/1.1 over loopback to the address the public
+  listener bound, so they go through routing, the queues and the workers,
+  and show in `/_host/live` and `/_host/timeline`. Each carries
+  `x-minicloud-load: 1`. A run occupies no worker itself. When time is up,
+  requests in flight get 10 s and are then dropped. A public listener that
+  terminates TLS is refused: the runner speaks plain HTTP.
+- **The apps share the workers with the run**, so on a deployed host
+  (two workers) they slow down while it lasts.
+- The targets are the example apps `hello`, `crunch` and `slow`, and must be
+  deployed. One the host does not have is reported as `target app X is not
+  deployed` (`not_deployed` and `problems`), is not asked again, and a run
+  with none left ends early.
+
+`GET /_host/load` is `{"running", "current", "last", "limits"}`; a run has
+its `mix`, `rate`, `connections`, `seconds`, `state` (`running`, `finished`
+or `stopped`), `elapsed_ms`, `sent`, `answered`, how they were answered
+(`ok`, `client_errors`, `too_many`, `unavailable`, `server_errors`,
+`other`), `errors` (no answer), `p50_us` and `p99_us` (within about 2%),
+`targets`, `not_deployed` and `problems`. Starting and stopping are on the
+**admin listener** whatever `--ops-listener` says, with the admin token (a
+cross-site form could otherwise post to a loopback address); the public
+listener answers 405:
+
+```
+$ curl -s -H "Authorization: Bearer $(cat data/admin.token)" \
+    -d '{"mix":"mixed","rate":50,"seconds":20}' http://127.0.0.1:8791/_host/load
+$ curl -s http://127.0.0.1:8791/_host/load
+$ curl -s -X POST -H "Authorization: Bearer $(cat data/admin.token)" \
+    http://127.0.0.1:8791/_host/load/stop
+```
+
+A second start while one runs, or a stop with none, is 409; a figure past
+its cap is 422; TLS is 503. The admin app's **Load** page does the same
+from a form, and the admin module has `host.loadStart`, `host.loadStop` and
+`host.loadStatus`. `minicloud-load` keeps its behaviour and shares the mixes
+and the connection with the runner.
 
 ### Logs
 

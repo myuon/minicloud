@@ -11,6 +11,7 @@
 //! | `GET /_host/timeline?app=&over=\|since=&until=` | where each request of the window waited, ran on which worker, parked at which host call and resumed ([`crate::timeline`]), with the workers' run segments, three strips and a summary, as JSON; `since`/`until` are Unix milliseconds, `over` `10s`, `1m`, `5m` or seconds (a minute by default) |
 //! | `GET /_host/timeline/<id>` | one request of it, its phases whole |
 //! | `GET /_host/live` | the requests in flight now and where each is, and what each worker is running |
+//! | `GET /_host/load` | the load run going on ([`crate::load`]) and the last one: its figures, what it has sent and how each was answered, p50/p99 so far, and the targets the host has no app for. Started and stopped with `POST /_host/load` and `/_host/load/stop` on the admin listener, with its token ([`crate::admin`]) |
 //! | `GET /_host/apps/<app>/logs?n=` | its recent log lines, as text |
 //! | `GET /_host/apps/<app>/logs?follow=1` | the same, and then every line as it is written, as server-sent events |
 //! | `GET /_host/ui` | a page of all of it; every value from an app is escaped |

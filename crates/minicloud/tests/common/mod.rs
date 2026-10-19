@@ -395,3 +395,30 @@ pub fn fixed_timeline() -> (
     let waiting = rec.admit(111, notes, "GET", "/notes/", at(7800), at(7800));
     (rec, vec![parked, running, waiting])
 }
+
+/// A load run's status of fixed figures, for the admin's Load page
+/// ([`minicloud::Host::set_load_status`]): a mixed run at 50 a second, `crunch`
+/// missing.
+pub fn fixed_load_run(state: &str) -> minicloud::load::RunStatus {
+    minicloud::load::RunStatus {
+        mix: "mixed".into(),
+        rate: 50,
+        connections: 4,
+        seconds: 20,
+        state: state.into(),
+        started_unix_ms: 1_700_000_000_000,
+        elapsed_ms: 12_345,
+        sent: 600,
+        ok: 580,
+        client_errors: 0,
+        too_many: 9,
+        unavailable: 0,
+        server_errors: 1,
+        other: 0,
+        errors: 0,
+        p50_us: Some(2_500),
+        p99_us: Some(181_000),
+        targets: vec!["hello".into(), "crunch".into(), "slow".into()],
+        not_deployed: vec!["crunch".into()],
+    }
+}

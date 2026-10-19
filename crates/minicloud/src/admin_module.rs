@@ -29,6 +29,9 @@
 //! | `host.timeline(app, overSecs)` | `host.Timeline`: what every app's requests (or `app`'s; `""` is every app) did over the last `overSecs` seconds (1–[`crate::timeline::KEEP`]), from the in-memory request timeline ([`crate::timeline`]): the summary (requests, rejected, worker utilisation, p50/p99 per app), the three strips (workers running, runs parked, requests waiting for a worker, each a mean in thousandths over [`crate::timeline::STRIP_BUCKETS`] buckets), the workers' run segments — those of one worker less than a thousandth of the window apart merged, at most [`TIMELINE_SEGMENTS`], the newest — and the newest [`crate::timeline::LANES`] requests with their phases, in arrival order. Times are microseconds since the host started (`startedUnixMs`). Empty where there is no host (`minicloud test`) |
 //! | `host.request(id)` | `Result<host.TimelineRequest, Error>`: one request of the timeline, its phases whole; an `Err` for one it no longer keeps |
 //! | `host.live()` | `host.Live`: the requests in flight now, oldest first (at most [`crate::timeline::LIVE_ROWS`]), each with where it is — waiting for a worker, running, parked at a host call, resuming, yielded — and since when; and each worker with the request it is running |
+//! | `host.loadStart(mix, rate, connections, seconds)` | `Result<String, Error>`: starts a load run on the host's own apps ([`crate::load`]) — `mix` `light`, `cpu`, `wait` or `mixed`; `rate` requests a second, 0 for closed loop; `connections` and `seconds` — real requests over loopback to the public listener, on the I/O runtime; an `Err` for a figure past its cap or while a run is going on |
+//! | `host.loadStop()` | `Result<String, Error>`: stops it; an `Err` when none is going on |
+//! | `host.loadStatus()` | `host.LoadStatus`: the run going on and the last that ended, each a `host.LoadRun` — its figures, state, what it sent, how each was answered by class (429 and 503 apart), what had no answer, p50/p99 so far, and the targets the host has no app for. Idle where there is no host (`minicloud test`) |
 //! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
 //! | `host.allLogs(limit)` | `host.AllLogs`: every app's log as one sequence — the last `limit` lines of it, oldest first, each saying which app it came from — and `apps`, every app whose ring holds a line. The host merges the rings, and "the last `limit`" is the last `limit` of its whole log, so one app that is talking fills it ([`crate::manage`]) |
 //! | `host.setEnabled(app, enabled, who)` | `Result<String, Error>`: routes to the app again, or stops; nothing is reloaded |
@@ -258,6 +261,21 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             Effect::Read,
         ),
         op("live", &[], HostType::Named("host.Live"), Effect::Read),
+        // Load on the host's own apps ([`crate::load`]): a change of nothing
+        // kept, but work that cannot be taken back once sent.
+        op(
+            "loadStart",
+            &[STR, INT, INT, INT],
+            CHANGED,
+            Effect::IrreversibleWrite,
+        ),
+        op("loadStop", &[], CHANGED, Effect::IrreversibleWrite),
+        op(
+            "loadStatus",
+            &[],
+            HostType::Named("host.LoadStatus"),
+            Effect::Read,
+        ),
         op(
             "queues",
             &[STR],
@@ -737,6 +755,53 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("worker", INT),
                 field("op", STR),
                 field("sinceUs", INT),
+            ],
+        },
+        // The load run going on, and the last that ended.
+        TypeSchema {
+            name: "LoadStatus",
+            cases: &[],
+            fields: &[
+                field("running", HostType::Bool),
+                field(
+                    "current",
+                    HostType::Option(&HostType::Named("host.LoadRun")),
+                ),
+                field("last", HostType::Option(&HostType::Named("host.LoadRun"))),
+                field("maxRate", INT),
+                field("maxConnections", INT),
+                field("maxSeconds", INT),
+            ],
+        },
+        // One load run ([`crate::load::RunStatus`]): `state` is `running`,
+        // `finished` or `stopped`; `rate` 0 is closed loop. `ok` is 2xx,
+        // `clientErrors` 4xx but 429, `tooMany` 429, `unavailable` 503,
+        // `serverErrors` 5xx but 503; `errors` had no answer. The latencies
+        // are of the answered, from when each was due (open loop) or sent.
+        TypeSchema {
+            name: "LoadRun",
+            cases: &[],
+            fields: &[
+                field("mix", STR),
+                field("rate", INT),
+                field("connections", INT),
+                field("seconds", INT),
+                field("state", STR),
+                field("startedUnixMs", INT),
+                field("elapsedMs", INT),
+                field("sent", INT),
+                field("answered", INT),
+                field("ok", INT),
+                field("clientErrors", INT),
+                field("tooMany", INT),
+                field("unavailable", INT),
+                field("serverErrors", INT),
+                field("other", INT),
+                field("errors", INT),
+                field("p50Us", OPT_INT),
+                field("p99Us", OPT_INT),
+                field("targets", STRINGS),
+                field("notDeployed", STRINGS),
             ],
         },
         // The same figures now ([`crate::platform::PlatformSample`]), the
@@ -1354,6 +1419,52 @@ fn live_value(live: &crate::timeline::Live) -> Value {
     )
 }
 
+fn load_run_value(run: &crate::load::RunStatus) -> Value {
+    Value::structure(
+        "host.LoadRun",
+        vec![
+            ("mix", Value::string(run.mix.clone())),
+            ("rate", int(run.rate)),
+            ("connections", int(run.connections)),
+            ("seconds", int(run.seconds)),
+            ("state", Value::string(run.state.clone())),
+            ("startedUnixMs", int(run.started_unix_ms)),
+            ("elapsedMs", int(run.elapsed_ms)),
+            ("sent", int(run.sent)),
+            ("answered", int(run.answered())),
+            ("ok", int(run.ok)),
+            ("clientErrors", int(run.client_errors)),
+            ("tooMany", int(run.too_many)),
+            ("unavailable", int(run.unavailable)),
+            ("serverErrors", int(run.server_errors)),
+            ("other", int(run.other)),
+            ("errors", int(run.errors)),
+            ("p50Us", maybe(run.p50_us)),
+            ("p99Us", maybe(run.p99_us)),
+            ("targets", strings(run.targets.iter().cloned())),
+            ("notDeployed", strings(run.not_deployed.iter().cloned())),
+        ],
+    )
+}
+
+fn load_status_value(status: &crate::load::Status) -> Value {
+    let run = |run: &Option<crate::load::RunStatus>| match run {
+        Some(run) => Value::some(load_run_value(run)),
+        None => Value::none(),
+    };
+    Value::structure(
+        "host.LoadStatus",
+        vec![
+            ("running", Value::bool(status.running())),
+            ("current", run(&status.current)),
+            ("last", run(&status.last)),
+            ("maxRate", int(crate::load::MAX_RATE)),
+            ("maxConnections", int(crate::load::MAX_CONNECTIONS)),
+            ("maxSeconds", int(crate::load::MAX_SECONDS)),
+        ],
+    )
+}
+
 fn queue_value(queue: QueueInfo) -> Value {
     Value::structure(
         "host.Queue",
@@ -1685,6 +1796,52 @@ impl HostApi for AdminHost {
                     }
                 }
                 _ => live_value(&recorder.live()),
+            });
+        }
+        // Load on the host's own apps. Where there is no host (`minicloud
+        // test`) the status is idle, and a start or a stop is refused.
+        if op == "loadStatus" || op == "loadStart" || op == "loadStop" {
+            let front = self.control.as_ref().and_then(|control| control.front());
+            if op == "loadStatus" {
+                let status = front.map(|front| front.load_status()).unwrap_or_default();
+                return Ok(load_status_value(&status));
+            }
+            let Some(front) = front else {
+                return Ok(Value::err(Value::error(
+                    "there is no host to put load on (only the app `admin` of a running host has \
+                     one)",
+                )));
+            };
+            let answer = if op == "loadStop" {
+                front
+                    .loader
+                    .stop()
+                    .map(|_| "the load run is stopping".to_string())
+            } else {
+                let number = |at: usize| args.get(at).and_then(Value::as_int).unwrap_or(-1);
+                crate::load::Params::new(
+                    args.first().and_then(Value::as_str).unwrap_or_default(),
+                    number(1),
+                    number(2),
+                    number(3),
+                )
+                .and_then(|params| {
+                    front
+                        .loader
+                        .start(params)
+                        .map(|_| {
+                            format!(
+                                "a {} load run of {} s has started",
+                                params.mix.name(),
+                                params.seconds
+                            )
+                        })
+                        .map_err(|why| why.to_string())
+                })
+            };
+            return Ok(match answer {
+                Ok(message) => Value::ok(Value::string(message)),
+                Err(why) => Value::err(Value::error(why)),
             });
         }
         // The host's own history and its figures now: absences are answers
