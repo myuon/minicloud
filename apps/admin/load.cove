@@ -1,0 +1,277 @@
+use web
+use host
+use text
+use std.html
+use std.html.Html
+
+// Load the host puts on its own apps (`host.loadStart`, `host.loadStop`,
+// `host.loadStatus`), so that Live and Timeline have something to show:
+// real requests over loopback to the host's public listener, through the
+// router, the queues and the workers like anybody's. One run at a time; the
+// host holds it, and this page only starts it, stops it and reads it.
+
+/// The four mixes, in the order the form offers them.
+fn loadMixes() -> Array<String> {
+  Vector.of("light", "cpu", "wait", "mixed").freeze()
+}
+
+/// What a mix asks, in words.
+fn loadMixSaid(mix: String) -> Html {
+  if mix == "light" {
+    html"<code>hello</code>: next to no work — what a request costs the host itself"
+  } else if mix == "cpu" {
+    html"<code>crunch</code>: primes up to 20,000 to 150,000 in turn — each holds a worker for milliseconds"
+  } else if mix == "wait" {
+    html"<code>slow</code>: three sleeps of 60 ms — parked, holding no worker while it waits"
+  } else if mix == "mixed" {
+    html"<code>hello</code>, <code>crunch</code> and <code>slow</code> in turn"
+  } else {
+    html"<code>{mix}</code>"
+  }
+}
+
+/// How a run sends: open loop at its rate, or closed loop.
+fn loadMode(rate: Int, connections: Int) -> String {
+  if rate == 0 {
+    return "closed loop on {connections} connections"
+  }
+  "{rate} requests a second on up to {connections} connections"
+}
+
+/// Milliseconds as seconds, to a tenth.
+fn loadSeconds(ms: Int) -> String {
+  "{ms / 1000}.{ms % 1000 / 100} s"
+}
+
+/// A latency the run may not have yet.
+fn loadLatency(us: Option<Int>) -> String {
+  match us {
+    Some(n) => "{millis(n)} ms"
+    None => "–"
+  }
+}
+
+/// A form field's value: what was posted, or `fallback`.
+fn loadField(form: Map<String, String>, name: String, fallback: String) -> String {
+  form.get(name).unwrapOr(fallback).trim()
+}
+
+/// A whole number a form field holds, or what is wrong with it.
+fn loadNumber(form: Map<String, String>, name: String) -> Result<Int, String> {
+  let written = loadField(form, name, "")
+  match Int.parse(written) {
+    Ok(n) => Ok(n)
+    Err(_) => Err("{name} is a whole number, not “{written}”")
+  }
+}
+
+/// The form: what to ask, how hard and for how long — the last run's
+/// figures, or what was posted.
+fn loadForm(base: String, form: Map<String, String>, status: host.LoadStatus) -> Html {
+  let chosen = loadField(form, "mix", "light")
+  var options = Vector.of()
+  for mix in loadMixes() {
+    let mark = html.only(mix == chosen, html" selected")
+    options.push(html"""<option value="{mix}"{mark}>{mix}</option>""")
+  }
+  let rate = loadField(form, "rate", "0")
+  let connections = loadField(form, "connections", "8")
+  let seconds = loadField(form, "seconds", "10")
+  html"""
+    <div class=panel>
+      <form method=post action="{base}/load/start">
+        <div class=fields>
+          <div class=field>
+            <label for=mix>mix</label>
+            <select id=mix name=mix>{options.freeze()}</select>
+          </div>
+          <div class=field>
+            <label for=rate>requests a second (0: closed loop, at most {status.maxRate})</label>
+            <input id=rate name=rate value="{rate}" inputmode=numeric required>
+          </div>
+          <div class=field>
+            <label for=connections>connections (at most {status.maxConnections})</label>
+            <input id=connections name=connections value="{connections}" inputmode=numeric required>
+          </div>
+          <div class=field>
+            <label for=seconds>seconds (at most {status.maxSeconds})</label>
+            <input id=seconds name=seconds value="{seconds}" inputmode=numeric required>
+          </div>
+        </div>
+        <div class=actions><button class=primary>Start</button></div>
+      </form>
+    </div>
+    """
+}
+
+/// What a run has done, as a band of figures and a table of the answers.
+fn loadRun(base: String, run: host.LoadRun) -> Html {
+  let rejected = run.tooMany + run.unavailable
+  let failed = run.serverErrors + run.errors
+  let turnedAway = loadLevel(rejected, " is-warn")
+  let badly = loadLevel(failed, " is-bad")
+  let missing = html.only(
+    run.notDeployed.length() > 0,
+    loadMissing(run.notDeployed),
+  )
+  let elapsed = if run.state == "running" {
+    "{loadSeconds(run.elapsedMs)} of {run.seconds} s"
+  } else {
+    "took {loadSeconds(run.elapsedMs)}"
+  }
+  html"""
+    <p><b>{run.mix}</b> — {loadMixSaid(run.mix)}; {loadMode(run.rate, run.connections)}, for
+    {run.seconds} s. Started {atTime(run.startedUnixMs)}, {badge(run.state)} — {elapsed}.</p>
+    {missing}
+    <div class=strip>
+      <div class=fig>
+        <span class=lbl>sent</span>
+        <span class=big>{run.sent}</span>
+        <span class=note>{run.answered} answered</span>
+      </div>
+      <div class=fig>
+        <span class=lbl>ok</span>
+        <span class=big>{run.ok}</span>
+        <span class=note>2xx</span>
+      </div>
+      <div class="fig{turnedAway}">
+        <span class=lbl>turned away</span>
+        <span class=big>{rejected}</span>
+        <span class=note>{run.tooMany} × 429, {run.unavailable} × 503</span>
+      </div>
+      <div class="fig{badly}">
+        <span class=lbl>failed</span>
+        <span class=big>{failed}</span>
+        <span class=note>{run.serverErrors} × 5xx, {run.errors} unanswered</span>
+      </div>
+      <div class=fig>
+        <span class=lbl>latency</span>
+        <span class=big>{loadLatency(run.p50Us)}</span>
+        <span class=note>p50; p99 {loadLatency(run.p99Us)}</span>
+      </div>
+    </div>
+    <table class=facts>
+      <tr><th>asks</th><td>{names(run.targets)}</td></tr>
+      <tr><th>4xx but 429</th><td>{run.clientErrors}</td></tr>
+      <tr><th>any other status</th><td>{run.other}</td></tr>
+    </table>
+    """
+}
+
+/// ` is-warn` or ` is-bad` for a figure that is not 0.
+fn loadLevel(count: Int, level: String) -> String {
+  if count == 0 {
+    return ""
+  }
+  level
+}
+
+/// The targets the host has no app for.
+fn loadMissing(apps: Array<String>) -> Html {
+  var items = Vector.of()
+  for app in apps {
+    items.push(html"<li>target app <code>{app}</code> is not deployed</li>")
+  }
+  html"""
+    <div class=problem>
+      <b>Not asked:</b> the host answered “no app named” for<ul>{items.freeze()}</ul>
+      The run leaves them alone, and ends early when nothing is left to ask.
+    </div>
+    """
+}
+
+/// The run going on, with the way to stop it; or the last one; or that
+/// there has been none.
+fn loadState(base: String, status: host.LoadStatus) -> Html {
+  match status.current {
+    Some(run) => html"""
+      <h2>Running</h2>
+      <div class=panel>
+        {loadRun(base, run)}
+        <form method=post action="{base}/load/stop">
+          <div class=actions>
+            <button class=danger>Stop</button>
+            <span class=muted>Drops its connections, and what they have in flight.</span>
+          </div>
+        </form>
+      </div>
+      """
+    None => match status.last {
+      Some(run) => html"""<h2>Last run</h2><div class=panel>{loadRun(base, run)}</div>"""
+      None => html"<p class=muted>No load has been run since the host started.</p>"
+    }
+  }
+}
+
+/// The Load page. While a run goes on it reloads every 2 seconds, as Live
+/// does; `notice` is said above everything, and `form` fills the form.
+fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<String, String>) -> Html {
+  let summary = html"Puts load on this host's own apps, so that Live and Timeline have something to show."
+  let said = html"""
+    The host sends real requests to its own public listener, over loopback — through the
+    router, the queues and the workers like anybody's — each with <code>x-minicloud-load: 1</code>.
+    <b>light</b> asks {loadMixSaid("light")}; <b>cpu</b> asks {loadMixSaid("cpu")};
+    <b>wait</b> asks {loadMixSaid("wait")}; <b>mixed</b> asks {loadMixSaid("mixed")}. A rate
+    sends that many a second whether or not the last were answered, and times each from when
+    it was due; 0 sends the next as soon as a connection has its answer. One run at a time,
+    for at most {status.maxSeconds} s. The apps are examples, and a mix asks only what this
+    host has deployed. <b>Every app on this host shares its workers with the run</b> — two in
+    production — so they all slow down while it lasts.
+    """
+  let refresh = if status.running { 2 } else { 0 }
+  layout(
+    base,
+    "load",
+    "load",
+    html"""
+      <h1>Load</h1>
+      {about(summary, said)}
+      {notice}
+      {loadState(base, status)}
+      <p class=actions>
+        <a href="{base}/live">what is in flight →</a>
+        <a href="{base}/timeline?over=1m">the last minute's timeline →</a>
+      </p>
+      <h2>Start a run</h2>
+      {loadForm(base, form, status)}
+      """,
+    refresh,
+  )
+}
+
+/// `POST /load/start` (`mix`, `rate`, `connections`, `seconds`) or
+/// `/load/stop`. Started or stopped, back to the page; refused, the page
+/// with the host's reason and the form as it was posted.
+fn changeLoad(at: String, action: String, form: Map<String, String>) -> web.Response {
+  if action == "stop" {
+    return loadAnswer(at, action, host.loadStop(), form)
+  }
+  if action != "start" {
+    return textResponse(404, "no such page\n")
+  }
+  var problems = Vector.of()
+  var figures = Vector.of()
+  for name in Vector.of("rate", "connections", "seconds").freeze() {
+    match loadNumber(form, name) {
+      Ok(n) => figures.push(n)
+      Err(why) => problems.push(why)
+    }
+  }
+  if problems.length() > 0 {
+    return htmlResponse(422, loadPage(at, host.loadStatus(), problemsNotice(problems.freeze()), form))
+  }
+  let started = host.loadStart(
+    loadField(form, "mix", ""),
+    figures.get(0).unwrapOr(-1),
+    figures.get(1).unwrapOr(-1),
+    figures.get(2).unwrapOr(-1),
+  )
+  loadAnswer(at, action, started, form)
+}
+
+fn loadAnswer(at: String, action: String, result: Result<String, Error>, form: Map<String, String>) -> web.Response {
+  match result {
+    Ok(_) => redirect("{at}/load")
+    Err(error) => htmlResponse(422, loadPage(at, host.loadStatus(), refusedNotice(action, error.message), form))
+  }
+}

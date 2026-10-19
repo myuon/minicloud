@@ -48,6 +48,11 @@ use std.html
 ///   each app's figures. Reading only, from the host's in-memory timeline.
 /// - `GET /requests/<id>` is one request's phases in words, and what it
 ///   came to; a 404 for one the timeline no longer keeps.
+/// - `GET /load` puts load on the host's own apps — `light`, `cpu`, `wait`
+///   or `mixed`, at a rate or closed loop, for at most a minute — so that
+///   Live and Timeline have something to show; `POST /load/start` and
+///   `POST /load/stop` start and stop the one run there may be. While it
+///   goes on the page reloads itself every 2 seconds.
 /// - `GET /history` is the change history.
 /// - `POST /apps/<app>/enable|disable|configure|reset` make the changes.
 /// - `GET /secrets` lists the host's secret store — names, whether each is
@@ -95,6 +100,15 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if section == "requests" && name != "" && parts.length() == 3 && get {
     return requestAnswer(at, name)
+  }
+  if section == "load" {
+    if name == "" && get {
+      return htmlResponse(200, loadPage(at, host.loadStatus(), html"", Map.of()))
+    }
+    if get || parts.length() > 3 {
+      return textResponse(404, "no such page\n")
+    }
+    return changeLoad(at, name, text.parseForm(request.body))
   }
   if section == "history" && name == "" && get {
     return htmlResponse(200, historyPage(at, host.history(200)))

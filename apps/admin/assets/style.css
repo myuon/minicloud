@@ -164,7 +164,7 @@ label.cap .note{color:var(--muted);font-size:12px}
 .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(15em,23rem));gap:.8em}
 .field{display:flex;flex-direction:column;justify-content:flex-end;gap:.3em}
 .field label{color:var(--muted);font-size:13px}
-input,textarea{width:100%;padding:.5em .65em;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--text);font-size:15px}
+input,textarea,select{width:100%;padding:.5em .65em;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--text);font-size:15px}
 input[type=checkbox]{width:auto;min-width:1.05em;height:1.05em;margin:0;accent-color:var(--brand-2)}
 textarea{max-width:52rem;min-height:7em;line-height:1.5;resize:vertical}
 button{min-height:2.6em;padding:.5em 1.1em;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--text);font:inherit;font-size:14px;font-weight:600;cursor:pointer}
@@ -355,6 +355,10 @@ p.legend .peak{margin-left:auto;color:var(--muted)}
 /* the Live page: a worker busy or idle */
 .busy{color:var(--ok);background:var(--ok-bg)}
 .idle{color:var(--off);background:var(--off-bg)}
+/* the Load page: a run going on, done, or stopped */
+.state.running{color:var(--warn);background:var(--warn-bg)}
+.state.finished{color:var(--ok);background:var(--ok-bg)}
+.state.stopped{color:var(--off);background:var(--off-bg)}
 /* the Timeline page: colour for an app's identity only, six of them in a fixed order and grey past them, each a fill (a run) and a stroke (a park); a status is a mark — a red cross for a deadline, a ring for another error, a square for a rejection — and never a colour alone. The picture is one SVG as wide as the page; its text is in the units of its viewBox, about a pixel each on a desk. */
 :root{--tl-0:#2a78d6;--tl-1:#eb6834;--tl-2:#1baf7a;--tl-3:#eda100;--tl-4:#e87ba4;--tl-5:#008300;--tl-x:#8a8984}
 @media (prefers-color-scheme:dark){:root{--tl-0:#3987e5;--tl-1:#d95926;--tl-2:#199e70;--tl-3:#c98500;--tl-4:#d55181;--tl-5:#2f9a2f;--tl-x:#8a8984}}

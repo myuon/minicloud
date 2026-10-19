@@ -71,6 +71,7 @@ fn nav(base: String, here: String) -> Html {
     MapEntry(key: "platform", value: "/platform"),
     MapEntry(key: "live", value: "/live"),
     MapEntry(key: "timeline", value: "/timeline"),
+    MapEntry(key: "load", value: "/load"),
     MapEntry(key: "secrets", value: "/secrets"),
     MapEntry(key: "history", value: "/history"),
   )
