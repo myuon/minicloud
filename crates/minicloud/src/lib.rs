@@ -24,6 +24,8 @@
 //! listener and written into the apps directory only if they load
 //! ([`deploy`]). [`ops`] is what the host shows of all this.
 //!
+//! [`load`] is load the host puts on its own apps, for the operations views.
+//!
 //! The README is the walkthrough; this crate's tests start the host
 //! in-process on a free port.
 
@@ -45,6 +47,7 @@ pub mod histogram;
 pub mod hosts;
 pub mod internal;
 pub mod kv;
+pub mod load;
 pub mod logs;
 pub mod manage;
 pub mod ops;

@@ -32,17 +32,16 @@
 //! `--mix cpu-io` is `crunch=35,slow=30,proxy=10,hello=25`, `cove-edge-load`'s
 //! `cpu-io` with `slow` for `aggregate` and `impatient`'s share given to
 //! `hello`. Which app request *i* asks is chosen from *i*, so the same
-//! command asks the same sequence.
+//! command asks the same sequence. The mixes and the connection are
+//! [`minicloud::load`]'s, which the host's own load runs share.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
-
 use clap::Parser;
+use minicloud::load::{mix, percentile, request, Conn};
 
 #[derive(Parser)]
 #[command(
@@ -86,137 +85,6 @@ struct Sample {
     lag: Duration,
 }
 
-fn mix(text: &str) -> Vec<(&'static str, u32)> {
-    let text = match text {
-        "cpu-io" => "crunch=35,slow=30,proxy=10,hello=25",
-        other => other,
-    };
-    text.split(',')
-        .map(|part| {
-            let (name, weight) = part.split_once('=').unwrap_or((part, "1"));
-            let name: &'static str = match name {
-                "hello" => "hello",
-                "crunch" => "crunch",
-                "crunch20k" => "crunch20k",
-                "slow" => "slow",
-                "proxy" => "proxy",
-                "algo" => "algo",
-                "algo-sat" => "algo-sat",
-                "algo-anneal" => "algo-anneal",
-                other => {
-                    panic!("`{other}` is not hello, crunch, crunch20k, slow, proxy, algo, algo-sat, algo-anneal or cpu-io")
-                }
-            };
-            (name, weight.parse().expect("a whole-number weight"))
-        })
-        .collect()
-}
-
-/// Which app request `i` asks, and its path.
-fn request(i: u64, mix: &[(&'static str, u32)], port: u16) -> (&'static str, String) {
-    let total: u64 = mix.iter().map(|(_, w)| u64::from(*w)).sum();
-    // A multiplicative hash spreads consecutive indices over the weights.
-    let mut pick = i.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 11;
-    pick %= total;
-    let mut app = mix[0].0;
-    for (name, weight) in mix {
-        if pick < u64::from(*weight) {
-            app = name;
-            break;
-        }
-        pick -= u64::from(*weight);
-    }
-    let path = match app {
-        "hello" => "/hello/?name=load".to_string(),
-        "crunch" => format!(
-            "/crunch/?n={}",
-            [20000, 50000, 100000, 150000][(i % 4) as usize]
-        ),
-        "crunch20k" => "/crunch/?n=20000".to_string(),
-        "slow" => "/slow/?ms=60&times=3".to_string(),
-        "algo" => "/algo/matching?example=large&algorithm=augmenting&part=result".to_string(),
-        "algo-sat" => "/algo/sat?example=hard&part=result".to_string(),
-        "algo-anneal" => "/algo/anneal?example=cooling&part=result".to_string(),
-        _ => format!("/proxy/?url=http://127.0.0.1:{port}/hello/"),
-    };
-    (
-        match app {
-            "crunch20k" => "crunch",
-            "algo-sat" | "algo-anneal" => "algo",
-            other => other,
-        },
-        path,
-    )
-}
-
-/// A kept-alive connection.
-struct Conn {
-    addr: String,
-    stream: Option<BufReader<TcpStream>>,
-}
-
-impl Conn {
-    /// Asks `path`; the status, or `None` for a connection that failed (it is
-    /// reopened for the next request).
-    async fn ask(&mut self, path: &str) -> Option<u16> {
-        if self.stream.is_none() {
-            let stream = TcpStream::connect(&self.addr).await.ok()?;
-            let _ = stream.set_nodelay(true);
-            self.stream = Some(BufReader::new(stream));
-        }
-        let answer = Self::exchange(self.stream.as_mut()?, path).await;
-        match answer {
-            Some((status, close)) => {
-                if close {
-                    self.stream = None;
-                }
-                Some(status)
-            }
-            None => {
-                self.stream = None;
-                None
-            }
-        }
-    }
-
-    async fn exchange(stream: &mut BufReader<TcpStream>, path: &str) -> Option<(u16, bool)> {
-        let head = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        stream.get_mut().write_all(head.as_bytes()).await.ok()?;
-        let mut line = String::new();
-        stream.read_line(&mut line).await.ok()?;
-        let status: u16 = line.split(' ').nth(1)?.parse().ok()?;
-        let mut length = 0usize;
-        let mut close = false;
-        loop {
-            line.clear();
-            if stream.read_line(&mut line).await.ok()? == 0 {
-                return None;
-            }
-            if line == "\r\n" {
-                break;
-            }
-            let lower = line.to_ascii_lowercase();
-            if let Some(value) = lower.strip_prefix("content-length:") {
-                length = value.trim().parse().ok()?;
-            }
-            if lower.starts_with("connection:") && lower.contains("close") {
-                close = true;
-            }
-        }
-        let mut body = vec![0; length];
-        stream.read_exact(&mut body).await.ok()?;
-        Some((status, close))
-    }
-}
-
-fn percentile(sorted: &[Duration], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return f64::NAN;
-    }
-    let at = ((sorted.len() - 1) as f64 * p).round() as usize;
-    sorted[at].as_secs_f64() * 1e3
-}
-
 async fn run(
     args: &Args,
     mix: &[(&'static str, u32)],
@@ -241,7 +109,7 @@ async fn run(
             let rate = args.rate;
             let mix = mix.to_vec();
             tokio::spawn(async move {
-                let mut conn = Conn { addr, stream: None };
+                let mut conn = Conn::new(addr);
                 let mut mine = Vec::new();
                 tokio::time::sleep_until(started).await;
                 loop {
@@ -289,7 +157,7 @@ async fn run(
 
 fn main() {
     let args = Args::parse();
-    let mix = mix(&args.mix);
+    let mix = mix(&args.mix).unwrap_or_else(|why| panic!("{why}"));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
