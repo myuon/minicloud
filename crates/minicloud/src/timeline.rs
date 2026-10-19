@@ -43,7 +43,7 @@ use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as Json};
@@ -333,7 +333,9 @@ struct Shared {
     frozen_now: Option<u64>,
     keep_ns: u64,
     per_shard: usize,
-    shards: Vec<Mutex<Shard>>,
+    /// Behind a [`Latch`] as a record is: held for a push or a few pops,
+    /// and by a view for a copy of a few hundred pointers.
+    shards: Vec<Latch<Shard>>,
     /// App names, by [`Track::app`].
     apps: RwLock<Vec<Arc<str>>>,
 }
@@ -344,10 +346,8 @@ impl Shared {
             .unwrap_or_else(|| Instant::now().ns(self.started))
     }
 
-    fn shard(&self, id: u64) -> MutexGuard<'_, Shard> {
-        self.shards[(id % SHARDS as u64) as usize]
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+    fn shard<R>(&self, id: u64, f: impl FnOnce(&mut Shard) -> R) -> R {
+        self.shards[(id % SHARDS as u64) as usize].with(f)
     }
 
     /// Puts `track` on its shard's ring. Forgetting is left to the end of a
@@ -359,8 +359,7 @@ impl Shared {
     /// `fill`, and a new one otherwise.
     fn keep(&self, id: u64, now_ns: u64, fill: impl FnOnce(&mut Track)) -> Arc<Track> {
         let mut gone = Vec::new();
-        let track = {
-            let mut shard = self.shard(id);
+        let track = self.shard(id, |shard| {
             if shard.ring.len() >= 2 * self.per_shard {
                 shard.evict(
                     self.per_shard.saturating_sub(1),
@@ -384,7 +383,7 @@ impl Shared {
             }
             shard.ring.push_back(Arc::clone(&track));
             track
-        };
+        });
         drop(gone);
         track
     }
@@ -392,11 +391,13 @@ impl Shared {
     /// Forgets what is past the bounds in `id`'s shard, as of `now_ns`.
     fn forget(&self, id: u64, now_ns: u64) {
         let mut gone = Vec::new();
-        self.shard(id).evict(
-            self.per_shard,
-            now_ns.saturating_sub(self.keep_ns),
-            &mut gone,
-        );
+        self.shard(id, |shard| {
+            shard.evict(
+                self.per_shard,
+                now_ns.saturating_sub(self.keep_ns),
+                &mut gone,
+            )
+        });
         // The records are dropped here, outside the lock.
         drop(gone);
     }
@@ -446,7 +447,7 @@ impl Recorder {
                 per_shard: keep_requests.div_ceil(SHARDS).max(1),
                 shards: (0..SHARDS)
                     .map(|_| {
-                        Mutex::new(Shard {
+                        Latch::new(Shard {
                             ring: VecDeque::new(),
                             aside: Vec::new(),
                             spare: Vec::new(),
@@ -585,10 +586,11 @@ impl Recorder {
         let mut all = Vec::new();
         let mut gone = Vec::new();
         for shard in &self.shared.shards {
-            let mut shard = shard.lock().unwrap_or_else(|p| p.into_inner());
-            shard.evict(self.shared.per_shard, oldest, &mut gone);
-            all.extend(shard.aside.iter().cloned());
-            all.extend(shard.ring.iter().cloned());
+            shard.with(|shard| {
+                shard.evict(self.shared.per_shard, oldest, &mut gone);
+                all.extend(shard.aside.iter().cloned());
+                all.extend(shard.ring.iter().cloned());
+            });
         }
         drop(gone);
         all
@@ -615,8 +617,7 @@ impl Recorder {
     pub fn request(&self, id: u64) -> Option<Span> {
         let now = self.now_ns();
         let mut gone = Vec::new();
-        let track = {
-            let mut shard = self.shared.shard(id);
+        let track = self.shared.shard(id, |shard| {
             shard.evict(
                 self.shared.per_shard,
                 now.saturating_sub(self.shared.keep_ns),
@@ -629,7 +630,7 @@ impl Recorder {
                 .chain(shard.aside.iter())
                 .find(|track| track.id == id)
                 .cloned()
-        };
+        });
         drop(gone);
         let track = track?;
         Some(Span::of(&track, &self.names(), now))
@@ -660,8 +661,7 @@ impl Recorder {
         let names = self.names();
         let mut rows: Vec<LiveRow> = Vec::new();
         for shard in &self.shared.shards {
-            let tracks: Vec<Arc<Track>> = {
-                let shard = shard.lock().unwrap_or_else(|p| p.into_inner());
+            let tracks: Vec<Arc<Track>> = shard.with(|shard| {
                 shard
                     .aside
                     .iter()
@@ -669,7 +669,7 @@ impl Recorder {
                     .filter(|track| track.ended_ns().is_none())
                     .cloned()
                     .collect()
-            };
+            });
             rows.extend(tracks.iter().filter_map(|track| LiveRow::of(track, &names)));
         }
         rows.sort_by_key(|row| (row.arrived_ns, row.id));
