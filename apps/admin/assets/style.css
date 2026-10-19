@@ -377,6 +377,13 @@ svg.timeline .tl-head{fill:var(--text);font-size:12px;font-weight:650}
 svg.timeline a:hover .tl-hit{fill:var(--soft)}
 svg.timeline a:hover rect[class^=tl-c]{stroke:var(--text);stroke-width:1}
 td .key{display:inline-flex;align-items:center;gap:.45em}
+/* a request's phases, a line each: what kind it was, when after the arrival, and what happened in words */
+ol.phases{margin:.2em 0 1.5em;padding-left:1.6em;font-size:14px}
+ol.phases li{margin:.25em 0}
+.ph{display:inline-block;min-width:3.6em;padding:.05em .5em;border-radius:.4em;font-size:11.5px;font-weight:700;text-align:center}
+.ph-wait{color:var(--off);background:var(--off-bg)}
+.ph-run{color:var(--link);background:var(--soft)}
+.ph-park{color:var(--warn);background:var(--warn-bg)}
 /* the app's tabs on a narrow screen: seven tabs do not fit a phone in one row, and a row that scrolls sideways hides the ones that matter behind a gesture. A folder tab cannot wrap, because the line it sits on is at the bottom of the row and the tabs above it would hang in the air. So they are pills: the same words, the same order, the chosen one filled. */
 @media (max-width:560px){
 /* four figures are two rows of two, not three and an orphan */

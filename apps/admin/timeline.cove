@@ -725,3 +725,161 @@ fn timelinePage(base: String, request: web.Request) -> Html {
       """,
   )
 }
+
+// ---------------------------------------------------------- a request
+
+/// How long a phase lasted, or has lasted so far.
+fn phaseLength(phase: host.Phase) -> String {
+  let length = "{millis(phase.toUs - phase.fromUs)} ms"
+  if phase.open {
+    return "{length} so far"
+  }
+  length
+}
+
+/// What ended a park.
+fn parkEnd(phase: host.Phase) -> String {
+  if phase.open {
+    "still parked"
+  } else if phase.by == "answer" {
+    "answered"
+  } else if phase.by == "deadline" {
+    "the deadline"
+  } else if phase.by == "cancel" {
+    "cancelled"
+  } else {
+    "ended"
+  }
+}
+
+/// One phase in words.
+fn phaseWords(phase: host.Phase) -> String {
+  let length = phaseLength(phase)
+  if phase.kind == "wait" {
+    if phase.after == "park" {
+      "waited {length} for a worker to resume it"
+    } else if phase.after == "yield" {
+      "yielded, waited {length} for a worker to continue it"
+    } else {
+      "waited for a worker {length}"
+    }
+  } else if phase.kind == "park" {
+    "parked on {phase.op} {length} ({parkEnd(phase)})"
+  } else {
+    let moved = if phase.moved { " (moved)" } else { "" }
+    if phase.began == "resume" {
+      "resumed on #{phase.worker}{moved}, ran {length}"
+    } else if phase.began == "continue" {
+      "continued on #{phase.worker}{moved}, ran {length}"
+    } else {
+      "ran {length} on worker #{phase.worker}"
+    }
+  }
+}
+
+/// A request's phases as one sentence, each step an arrow from the last.
+fn phaseSentence(phases: Array<host.Phase>) -> String {
+  var words = Vector.of()
+  for phase in phases {
+    words.push(phaseWords(phase))
+  }
+  " → ".join(words.freeze())
+}
+
+/// The kind of a phase, as the badge in front of its words.
+fn phaseBadge(kind: String) -> Html {
+  html"""<span class="ph ph-{kind}">{kind}</span>"""
+}
+
+/// A request's phases, in order, each from its start after the arrival.
+fn phaseList(request: host.TimelineRequest) -> Html {
+  if request.phases.length() == 0 {
+    return html"<p class=muted>No phases: it was turned away before it waited for a worker.</p>"
+  }
+  var items = Vector.of()
+  for phase in request.phases {
+    items.push(html"""
+      <li>{phaseBadge(phase.kind)} <span class="nums muted">+{millis(phase.fromUs - request.arrivedUs)} ms</span> {phaseWords(phase)}</li>
+      """)
+  }
+  html"<ol class=phases>{items.freeze()}</ol>"
+}
+
+/// A number the host may not know, or a dash.
+fn knownCount(count: Option<Int>) -> String {
+  match count {
+    Some(n) => "{n}"
+    None => "—"
+  }
+}
+
+/// The request alone, as one lane from its arrival to its end (or now).
+fn requestPicture(request: host.TimelineRequest) -> Html {
+  let until = match request.endedUs {
+    Some(ended) => ended
+    None => request.nowUs
+  }
+  let since = request.arrivedUs
+  html"""
+    <svg class=timeline viewBox="0 0 {tlWidth()} 40" role=img aria-label="the request's phases">
+      {axis(since, until, 16, 38, [12])}
+      {laneMarks(request, since, until, 20, 14, "0")}
+    </svg>
+    """
+}
+
+/// One request of the timeline: its phases, in words and drawn, and what
+/// it came to.
+fn requestPage(base: String, request: host.TimelineRequest) -> Html {
+  let facts = html"""
+    <div class="scroll narrow">
+      <table class=facts>
+        <tr><th>app</th><td><a href="{timelineLink(base, request.app, "1m")}"><code>{request.app}</code></a></td></tr>
+        <tr><th>request</th><td><code>{request.method} {request.path}</code></td></tr>
+        <tr><th>status</th><td>{requestStatus(request)}</td></tr>
+        <tr><th>outcome</th><td>{request.outcome}</td></tr>
+        <tr><th>latency</th><td class=nums>{requestLatency(request)}</td></tr>
+        <tr><th>worker time</th><td class=nums>{millis(request.workerUs)} ms</td></tr>
+        <tr><th>instructions</th><td class=nums>{knownCount(request.instructions)}</td></tr>
+        <tr><th>heap words</th><td class=nums>{knownCount(request.heapWords)}</td></tr>
+        <tr><th>yields</th><td class=nums>{request.yields}</td></tr>
+        <tr><th>parks</th><td class=nums>{request.parks}</td></tr>
+        <tr><th>moves</th><td class=nums>{request.moves} <span class=muted>(a run on another worker than the one before)</span></td></tr>
+      </table>
+    </div>
+    """
+  layout(
+    base,
+    "timeline",
+    "request {request.id}",
+    html"""
+      <p class=crumb><a href="{timelineLink(base, request.app, "1m")}">timeline of {request.app}</a> / request</p>
+      <h1>Request {request.id}</h1>
+      <p class=sub><code>{request.method} {request.path}</code> · {requestStatus(request)} · {requestLatency(request)}</p>
+      <p class=lead>{phaseSentence(request.phases)}</p>
+      {requestPicture(request)}
+      <h2>Phases</h2>{phaseList(request)}
+      <h2>What it came to</h2>{facts}
+      """,
+  )
+}
+
+/// `GET /requests/<id>`: the request's page, or a 404 that says why — an
+/// id the timeline no longer keeps, or not a number at all.
+fn requestAnswer(base: String, id: String) -> web.Response {
+  let back = html"""<p class=actions><a href="{base}/timeline">← the timeline</a></p>"""
+  let number = match Int.parse(id) {
+    Ok(number) => number
+    Err(_) => return htmlResponse(
+      404,
+      layout(base, "timeline", "request", html"<h1>Request</h1>{notRead(html"", "`{id}` is not a request's id", back)}"),
+    )
+  }
+  match host.request(number) {
+    Ok(request) => htmlResponse(200, requestPage(base, request))
+    Err(error) => htmlResponse(
+      404,
+      layout(base, "timeline", "request {number}", html"<h1>Request {number}</h1>{notRead(html"", error.message, back)}"),
+    )
+  }
+}
