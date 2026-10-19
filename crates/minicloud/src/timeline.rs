@@ -9,18 +9,27 @@
 //!
 //! - **A request's events live with the request.** Its [`Tracker`] is in its
 //!   flight, so whoever holds the flight — the HTTP task, a worker, the
-//!   task waiting on its host work — is the only writer of its events, into
-//!   a mutex nobody else takes except a reader copying it out. There is no
-//!   shared buffer per event, no global sequence number, and nothing is
+//!   task waiting on its host work — is the only writer of its record,
+//!   behind a latch nobody else takes but a view copying it out. There is
+//!   no shared buffer per event, no global sequence number, and nothing is
 //!   added under the run queue's lock.
 //! - **The shared state is touched twice per request**: when it is admitted
-//!   (into the *live* map of its shard) and when it is answered (out of the
-//!   live map, onto the shard's ring of finished requests). The shard is the
-//!   request's id modulo [`SHARDS`], so two workers finishing two requests
-//!   rarely meet on one lock, and the HTTP side's admissions do not either.
-//! - **Bounded.** A shard keeps its share of [`KEEP_REQUESTS`] finished
-//!   requests and none that ended more than [`KEEP`] ago; the oldest go
-//!   first. Nothing is written to disk: a restart starts empty.
+//!   (its record pushed onto its shard's ring, on the HTTP side) and when it
+//!   ends (its shard's ring trimmed to the bounds, on the worker that ended
+//!   it). The shard is the request's id modulo [`SHARDS`], so two threads
+//!   rarely meet on one latch.
+//! - **Cheap where it is hot.** On the HTTP side, the bottleneck of a host
+//!   answering small requests, recording allocates nothing in a steady
+//!   state: a record forgotten that nobody holds is kept as a spare and
+//!   refilled by the next request of its shard; the app is its slot's
+//!   index, not a shared name; a short path is stored inline. The latches
+//!   are spin latches rather than `std::sync::Mutex`, which on macOS is a
+//!   pthread mutex boxed on first use — an allocation per record.
+//! - **Bounded.** A shard keeps its share of [`KEEP_REQUESTS`] requests and
+//!   none that ended more than [`KEEP`] ago; the oldest go first. A request
+//!   still in flight past either bound is set aside, not forgotten, until it
+//!   ends. A record is about 400 bytes, so the whole is about 8 MB at most.
+//!   Nothing is written to disk: a restart starts empty.
 //!
 //! The events, each a time in nanoseconds since the recorder started:
 //!
@@ -1716,6 +1725,14 @@ mod tests {
                 seg(0, 40, 50)
             ]
         );
+    }
+
+    #[test]
+    fn a_record_is_small() {
+        // What the module's "about 8 MB at most" rests on: a record, its
+        // `Arc`'s counts and a ring slot, times KEEP_REQUESTS.
+        let record = std::mem::size_of::<Track>() + 16 + 8;
+        assert!(record <= 400, "{record} bytes");
     }
 
     #[test]
