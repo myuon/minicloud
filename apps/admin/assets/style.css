@@ -355,6 +355,28 @@ p.legend .peak{margin-left:auto;color:var(--muted)}
 /* the Live page: a worker busy or idle */
 .busy{color:var(--ok);background:var(--ok-bg)}
 .idle{color:var(--off);background:var(--off-bg)}
+/* the Timeline page: colour for an app's identity only, six of them in a fixed order and grey past them, each a fill (a run) and a stroke (a park); a status is a mark — a red cross for a deadline, a ring for another error, a square for a rejection — and never a colour alone. The picture is one SVG as wide as the page; its text is in the units of its viewBox, about a pixel each on a desk. */
+:root{--tl-0:#2a78d6;--tl-1:#eb6834;--tl-2:#1baf7a;--tl-3:#eda100;--tl-4:#e87ba4;--tl-5:#008300;--tl-x:#8a8984}
+@media (prefers-color-scheme:dark){:root{--tl-0:#3987e5;--tl-1:#d95926;--tl-2:#199e70;--tl-3:#c98500;--tl-4:#d55181;--tl-5:#2f9a2f;--tl-x:#8a8984}}
+.tl-c0{fill:var(--tl-0)}.tl-c1{fill:var(--tl-1)}.tl-c2{fill:var(--tl-2)}.tl-c3{fill:var(--tl-3)}.tl-c4{fill:var(--tl-4)}.tl-c5{fill:var(--tl-5)}.tl-cx{fill:var(--tl-x)}
+.tl-l0{stroke:var(--tl-0)}.tl-l1{stroke:var(--tl-1)}.tl-l2{stroke:var(--tl-2)}.tl-l3{stroke:var(--tl-3)}.tl-l4{stroke:var(--tl-4)}.tl-l5{stroke:var(--tl-5)}.tl-lx{stroke:var(--tl-x)}
+svg.timeline{display:block;width:100%;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+svg.timeline text{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+svg.timeline .tl-head{fill:var(--text);font-size:12px;font-weight:650}
+.tl-grid{stroke:var(--soft);stroke-width:1}
+.tl-base{stroke:var(--line);stroke-width:1}
+.tl-wait{stroke:var(--muted);stroke-width:1;stroke-opacity:.7}
+.tl-park{stroke-width:2}
+.tl-moved{fill:var(--text);stroke:var(--card);stroke-width:1}
+.tl-yield{stroke:var(--text);stroke-width:1.5}
+.tl-crit{fill:none;stroke:var(--bad);stroke-width:2;stroke-linecap:round}
+.tl-err{fill:none;stroke:var(--bad);stroke-width:1.5}
+.tl-rej{fill:none;stroke:var(--warn);stroke-width:1.5}
+.tl-area{fill:var(--muted);fill-opacity:.22;stroke:var(--muted);stroke-width:1;stroke-linejoin:round}
+.tl-hit{fill:transparent}
+svg.timeline a:hover .tl-hit{fill:var(--soft)}
+svg.timeline a:hover rect[class^=tl-c]{stroke:var(--text);stroke-width:1}
+td .key{display:inline-flex;align-items:center;gap:.45em}
 /* the app's tabs on a narrow screen: seven tabs do not fit a phone in one row, and a row that scrolls sideways hides the ones that matter behind a gesture. A folder tab cannot wrap, because the line it sits on is at the bottom of the row and the tabs above it would hang in the air. So they are pills: the same words, the same order, the chosen one filled. */
 @media (max-width:560px){
 /* four figures are two rows of two, not three and an orphan */
