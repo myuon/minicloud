@@ -1142,8 +1142,9 @@ files served from an app's `assets/` never run and are not in it.
   Cove repository's edge sample draws its timeline — and a request's own
   page from either, its phases in words.
 
-Recording costs about 1.5% of `hello`'s capacity with keep-alive, the worst
-case, and nothing measurable on a mixed load
+Recording costs nothing measurable: under 1% of `hello`'s capacity with
+keep-alive, the worst case, within the spread between rounds, and nothing
+on a mixed load
 ([docs/measurements.md](docs/measurements.md#what-the-request-timeline-costs)).
 
 ### Logs

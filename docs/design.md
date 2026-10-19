@@ -983,7 +983,7 @@ the minutes are the history. The HTTP threads are what a host answering
 small requests runs out of first, so what they do for the timeline is one
 latch and a refilled record — no allocation in a steady state, records
 being reused, and forgetting is done by the worker that ends a request. It
-costs about 1.5% of `hello`'s capacity
+costs under 1% of `hello`'s capacity, within the noise
 ([measurements](measurements.md#what-the-request-timeline-costs)).
 
 **What it does not see.** Not the query string, which may hold what a
