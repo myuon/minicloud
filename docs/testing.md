@@ -7,7 +7,7 @@ The tests run Cove programs, so they run optimised (`--profile checked`, as
 in Cove's own repository); a bare `cargo test` works, more slowly. The
 integration tests (`crates/minicloud/tests/host.rs`, `services.rs` and
 `updates.rs`, `deploying.rs`, `admin.rs`, `access.rs`, `secrets.rs`,
-`assets.rs`, `triggers.rs`, `timeline.rs`, and one
+`assets.rs`, `triggers.rs`, `timeline.rs`, `load.rs`, and one
 per real example: `webhooks.rs`, `ledger.rs`, `algo.rs`) start the host
 in-process on a free port and ask it over TCP. None asserts a duration: where
 a test needs the host in some state it waits for the host's own stats to say
@@ -200,6 +200,17 @@ so, and what it asserts is counted.
   Timeline and request pages are drawn from a recorder the test fills with
   fixed times (`Host::set_timeline_source`), so neither their snapshots nor
   `admin.rs` see the host's own requests;
+- the host's load runner (`load.rs`, and `load.rs`'s unit tests): a closed
+  loop is counted and every request it sent is in `/_host/timeline`; a
+  second start is 409 and a stop leaves the run `stopped`; a target app the
+  host does not have is reported as not deployed, not asked again, and ends
+  the run early; the token is required, the public listener answers 405 and
+  a figure past its cap is 422; an open loop at 20 requests a second for one
+  second sends exactly 20. The unit tests hold the caps, the JSON body, the
+  rotation of `mixed` and its skipping of a missing target, the status
+  classes, the accuracy of the quantiles and the status JSON. The admin's
+  Load page is drawn idle and with a fixed status
+  (`Host::set_load_status`), so its snapshots see no run;
 - `[rate]` (`rate.rs`, and `rate.rs`'s unit tests): a caller past its
   allowance is 429 with a `Retry-After` and the app does not run, while its
   neighbour answers; a burst larger than the rate is allowed and then is
