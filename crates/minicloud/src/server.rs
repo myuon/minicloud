@@ -813,7 +813,7 @@ impl Front {
             app.counters.rejected(why);
             self.engine.timeline.rejected(
                 self.engine.next_id(),
-                &app.name,
+                index,
                 verb.as_str(),
                 &path,
                 arrived,
@@ -979,7 +979,7 @@ impl Front {
         let track = self
             .engine
             .timeline
-            .admit(id, &app.name, &method, &path, arrived, queued);
+            .admit(id, index, &method, &path, arrived, queued);
         let start = Box::new(Start {
             request: AppRequest {
                 method,

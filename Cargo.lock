@@ -1063,6 +1063,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "smallvec",
  "tar",
  "tokio",
  "tokio-rustls",

@@ -126,7 +126,7 @@ pub fn admit_with(
     let (reply, answer) = oneshot::channel();
     let id = engine.next_id();
     let now = Instant::now();
-    let track = engine.timeline.admit(id, &app.name, method, path, now, now);
+    let track = engine.timeline.admit(id, slot, method, path, now, now);
     let start = Box::new(Start {
         request: AppRequest {
             method: method.to_string(),

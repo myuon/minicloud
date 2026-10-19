@@ -39,11 +39,15 @@
 //! bodies; `kv` and `sql` calls, which are synchronous inside a run and so
 //! count as running; files served from an app's `assets/`, which never run.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::borrow::Cow;
+use std::cell::UnsafeCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as Json};
+use smallvec::SmallVec;
 
 /// How long a finished request is kept.
 pub const KEEP: Duration = Duration::from_secs(300);
@@ -142,18 +146,111 @@ pub struct End {
 /// One request's record.
 pub struct Track {
     pub id: u64,
-    pub app: String,
-    pub method: String,
-    pub path: String,
+    /// The app's index ([`Recorder::set_app`]): a number, not its name, so
+    /// that recording a request touches no counter its neighbours share.
+    app: u32,
+    method: Cow<'static, str>,
+    /// Short paths inline: most are.
+    path: SmallVec<[u8; 48]>,
     pub arrived_ns: u64,
-    state: Mutex<TrackState>,
+    /// When it ended, or [`LIVE`] while it is in flight: what the bounds
+    /// and the live view read without taking its latch.
+    ended_ns: AtomicU64,
+    state: Latch<TrackState>,
 }
 
-#[derive(Default)]
+/// [`Track::ended_ns`] of a request in flight.
+const LIVE: u64 = u64::MAX;
+
+impl Track {
+    fn blank() -> Track {
+        Track {
+            id: 0,
+            app: 0,
+            method: Cow::Borrowed(""),
+            path: SmallVec::new(),
+            arrived_ns: 0,
+            ended_ns: AtomicU64::new(LIVE),
+            state: Latch::new(TrackState {
+                queued_ns: None,
+                events: SmallVec::new(),
+                end: None,
+            }),
+        }
+    }
+
+    fn ended_ns(&self) -> Option<u64> {
+        match self.ended_ns.load(Ordering::Acquire) {
+            LIVE => None,
+            at => Some(at),
+        }
+    }
+
+    fn path(&self) -> String {
+        String::from_utf8_lossy(&self.path).into_owned()
+    }
+}
+
+#[derive(Clone)]
 struct TrackState {
     queued_ns: Option<u64>,
-    events: Vec<Event>,
+    /// A request that neither parks nor yields has one event: inline.
+    events: SmallVec<[Event; 4]>,
     end: Option<End>,
+}
+
+/// A lock for one request's record. Its writer is whoever holds the
+/// request's flight, one thread at a time, and the only other taker is a
+/// view copying it out, so it is all but never contended — and unlike
+/// `std::sync::Mutex` on macOS, which is a pthread mutex boxed on first
+/// use, it costs no allocation to make or to drop, once per request.
+struct Latch<T> {
+    held: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: the value is only reached through `Latch::with`, which holds
+// `held` for the closure's whole run, so one thread at a time has it.
+unsafe impl<T: Send> Sync for Latch<T> {}
+
+impl<T> Latch<T> {
+    fn new(value: T) -> Latch<T> {
+        Latch {
+            held: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// The value, for the one who holds the only reference.
+    fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut spins = 0u32;
+        while self
+            .held
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spins += 1;
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        // Released however `f` ends, a panic included.
+        struct Release<'a>(&'a AtomicBool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _release = Release(&self.held);
+        // SAFETY: `held` is ours until `_release` drops, after `f`.
+        f(unsafe { &mut *self.value.get() })
+    }
 }
 
 /// A time: an [`Instant`] on the host, nanoseconds since the recorder
@@ -175,9 +272,57 @@ impl At for u64 {
 }
 
 struct Shard {
-    live: HashMap<u64, Arc<Track>>,
-    /// Finished requests, in the order they finished, with when.
-    done: VecDeque<(u64, Arc<Track>)>,
+    /// Its requests, in the order they arrived, in flight or not.
+    ring: VecDeque<Arc<Track>>,
+    /// Requests the bounds pushed off the ring while still in flight — a
+    /// long-lived stream, a request past `KEEP` — kept until they end.
+    aside: Vec<Arc<Track>>,
+    /// Records forgotten that nobody holds, for the next requests to reuse:
+    /// in a steady state a request allocates nothing for its record, and
+    /// none is freed on a thread other than the one that made it.
+    spare: Vec<Arc<Track>>,
+}
+
+/// The most records a shard keeps for reuse.
+const SPARE: usize = 64;
+
+impl Shard {
+    /// Takes off what is past the bounds — the oldest past `per_shard`,
+    /// and what ended before `oldest_ns` — into `gone`, for the caller to
+    /// drop outside the lock. A request still in flight is put aside.
+    fn evict(&mut self, per_shard: usize, oldest_ns: u64, gone: &mut Vec<Arc<Track>>) {
+        while let Some(front) = self.ring.front() {
+            let over = self.ring.len() > per_shard;
+            match front.ended_ns() {
+                Some(ended) if over || ended < oldest_ns => {
+                    let front = self.ring.pop_front().expect("a front");
+                    if Arc::strong_count(&front) == 1 && self.spare.len() < SPARE {
+                        self.spare.push(front);
+                    } else {
+                        gone.push(front);
+                    }
+                }
+                None if over || front.arrived_ns < oldest_ns => {
+                    let front = self.ring.pop_front().expect("a front");
+                    self.aside.push(front);
+                }
+                _ => break,
+            }
+        }
+        if !self.aside.is_empty() {
+            let mut k = 0;
+            while k < self.aside.len() {
+                if self.aside[k]
+                    .ended_ns()
+                    .is_some_and(|ended| ended < oldest_ns)
+                {
+                    gone.push(self.aside.swap_remove(k));
+                } else {
+                    k += 1;
+                }
+            }
+        }
+    }
 }
 
 struct Shared {
@@ -189,6 +334,8 @@ struct Shared {
     keep_ns: u64,
     per_shard: usize,
     shards: Vec<Mutex<Shard>>,
+    /// App names, by [`Track::app`].
+    apps: RwLock<Vec<Arc<str>>>,
 }
 
 impl Shared {
@@ -197,34 +344,61 @@ impl Shared {
             .unwrap_or_else(|| Instant::now().ns(self.started))
     }
 
-    fn shard(&self, id: u64) -> &Mutex<Shard> {
-        &self.shards[(id % SHARDS as u64) as usize]
-    }
-
-    /// Moves `track` from the live map to the finished ring, forgetting
-    /// what is past the bounds.
-    fn finish(&self, track: &Arc<Track>, ended_ns: u64) {
-        let now = self.now_ns().max(ended_ns);
-        let mut shard = self
-            .shard(track.id)
+    fn shard(&self, id: u64) -> MutexGuard<'_, Shard> {
+        self.shards[(id % SHARDS as u64) as usize]
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        shard.live.remove(&track.id);
-        shard.done.push_back((ended_ns, Arc::clone(track)));
-        evict(&mut shard, self.per_shard, now.saturating_sub(self.keep_ns));
+            .unwrap_or_else(|p| p.into_inner())
     }
-}
 
-fn evict(shard: &mut Shard, per_shard: usize, oldest_ns: u64) {
-    while shard.done.len() > per_shard {
-        shard.done.pop_front();
+    /// Puts `track` on its shard's ring. Forgetting is left to the end of a
+    /// request ([`Shared::forget`]), on a worker, off the HTTP side — unless
+    /// the ring is twice its bound, which only rejections with nothing
+    /// ending between them can make it.
+    ///
+    /// The record is a spare one when the shard has one, filled in by
+    /// `fill`, and a new one otherwise.
+    fn keep(&self, id: u64, now_ns: u64, fill: impl FnOnce(&mut Track)) -> Arc<Track> {
+        let mut gone = Vec::new();
+        let track = {
+            let mut shard = self.shard(id);
+            if shard.ring.len() >= 2 * self.per_shard {
+                shard.evict(
+                    self.per_shard.saturating_sub(1),
+                    now_ns.saturating_sub(self.keep_ns),
+                    &mut gone,
+                );
+            }
+            let mut track = shard
+                .spare
+                .pop()
+                .unwrap_or_else(|| Arc::new(Track::blank()));
+            match Arc::get_mut(&mut track) {
+                Some(record) => fill(record),
+                // A spare is held by nobody, so this is not reached; a new
+                // record is the answer if it were.
+                None => {
+                    let mut record = Track::blank();
+                    fill(&mut record);
+                    track = Arc::new(record);
+                }
+            }
+            shard.ring.push_back(Arc::clone(&track));
+            track
+        };
+        drop(gone);
+        track
     }
-    while shard
-        .done
-        .front()
-        .is_some_and(|(ended, _)| *ended < oldest_ns)
-    {
-        shard.done.pop_front();
+
+    /// Forgets what is past the bounds in `id`'s shard, as of `now_ns`.
+    fn forget(&self, id: u64, now_ns: u64) {
+        let mut gone = Vec::new();
+        self.shard(id).evict(
+            self.per_shard,
+            now_ns.saturating_sub(self.keep_ns),
+            &mut gone,
+        );
+        // The records are dropped here, outside the lock.
+        drop(gone);
     }
 }
 
@@ -273,11 +447,13 @@ impl Recorder {
                 shards: (0..SHARDS)
                     .map(|_| {
                         Mutex::new(Shard {
-                            live: HashMap::new(),
-                            done: VecDeque::new(),
+                            ring: VecDeque::new(),
+                            aside: Vec::new(),
+                            spare: Vec::new(),
                         })
                     })
                     .collect(),
+                apps: RwLock::new(Vec::new()),
             }),
         }
     }
@@ -300,38 +476,73 @@ impl Recorder {
         at.ns(self.shared.started)
     }
 
-    fn track(&self, id: u64, app: &str, method: &str, path: &str, arrived: u64) -> Track {
-        Track {
-            id,
-            app: app.to_string(),
-            method: method.to_string(),
-            path: cut(path, PATH_BYTES).to_string(),
-            arrived_ns: arrived,
-            state: Mutex::new(TrackState::default()),
+    /// Names the app whose requests are recorded as `index` — the engine's
+    /// slot index, so that a request records the number its flight carries.
+    pub fn set_app(&self, index: usize, name: &str) {
+        let mut apps = self.shared.apps.write().unwrap_or_else(|p| p.into_inner());
+        if apps.len() <= index {
+            apps.resize(index + 1, Arc::from(""));
+        }
+        apps[index] = Arc::from(name);
+    }
+
+    /// The index of the app `name`, named now if it has none yet.
+    pub fn app(&self, name: &str) -> usize {
+        let mut apps = self.shared.apps.write().unwrap_or_else(|p| p.into_inner());
+        match apps.iter().position(|known| &**known == name) {
+            Some(index) => index,
+            None => {
+                apps.push(Arc::from(name));
+                apps.len() - 1
+            }
         }
     }
 
-    /// A request admitted to `app`'s queue — about to be: it is live from
-    /// now. What happens to it next is its [`Tracker`]'s to record.
+    /// Keeps a record of a request, a spare one refilled where there is one.
+    #[allow(clippy::too_many_arguments)]
+    fn track(
+        &self,
+        id: u64,
+        app: usize,
+        method: &str,
+        path: &str,
+        arrived: u64,
+        queued: Option<u64>,
+        end: Option<End>,
+        now_ns: u64,
+    ) -> Arc<Track> {
+        self.shared.keep(id, now_ns, |track| {
+            track.id = id;
+            track.app = app as u32;
+            track.method = method_name(method);
+            track.path.clear();
+            track
+                .path
+                .extend_from_slice(cut(path, PATH_BYTES).as_bytes());
+            track.arrived_ns = arrived;
+            *track.ended_ns.get_mut() = end.as_ref().map_or(LIVE, |end| end.at_ns);
+            let state = track.state.get_mut();
+            state.queued_ns = queued;
+            state.events.clear();
+            state.end = end;
+        })
+    }
+
+    /// A request admitted to the queue of the app numbered `app` — about
+    /// to be: it is live from now. What happens to it next is its
+    /// [`Tracker`]'s to record.
     pub fn admit(
         &self,
         id: u64,
-        app: &str,
+        app: usize,
         method: &str,
         path: &str,
         arrived: impl At,
         queued: impl At,
     ) -> Tracker {
         let arrived = self.ns(arrived);
-        let track = self.track(id, app, method, path, arrived);
-        track.state.lock().unwrap().queued_ns = Some(self.ns(queued).max(arrived));
-        let track = Arc::new(track);
-        self.shared
-            .shard(id)
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .live
-            .insert(id, Arc::clone(&track));
+        let queued = self.ns(queued).max(arrived);
+        let track = self.track(id, app, method, path, arrived, Some(queued), None, queued);
         Tracker {
             track,
             shared: Arc::clone(&self.shared),
@@ -345,7 +556,7 @@ impl Recorder {
     pub fn rejected(
         &self,
         id: u64,
-        app: &str,
+        app: usize,
         method: &str,
         path: &str,
         arrived: impl At,
@@ -355,8 +566,7 @@ impl Recorder {
     ) {
         let arrived = self.ns(arrived);
         let at = self.ns(at).max(arrived);
-        let track = self.track(id, app, method, path, arrived);
-        track.state.lock().unwrap().end = Some(End {
+        let end = End {
             at_ns: at,
             status,
             reason: Some(reason),
@@ -364,58 +574,65 @@ impl Recorder {
             worker_ns: 0,
             instructions: None,
             heap_words: None,
-        });
-        self.shared.finish(&Arc::new(track), at);
+        };
+        self.track(id, app, method, path, arrived, None, Some(end), at);
     }
 
-    /// Every request kept — live, then finished — as `Arc`s, copied out
-    /// under each shard's lock in turn.
+    /// Every request kept, copied out under each shard's lock in turn
+    /// (which also forgets what is past the bounds by now).
     fn all(&self) -> Vec<Arc<Track>> {
         let oldest = self.now_ns().saturating_sub(self.shared.keep_ns);
         let mut all = Vec::new();
+        let mut gone = Vec::new();
         for shard in &self.shared.shards {
             let mut shard = shard.lock().unwrap_or_else(|p| p.into_inner());
-            evict(&mut shard, self.shared.per_shard, oldest);
-            all.extend(shard.live.values().cloned());
-            all.extend(shard.done.iter().map(|(_, track)| Arc::clone(track)));
+            shard.evict(self.shared.per_shard, oldest, &mut gone);
+            all.extend(shard.aside.iter().cloned());
+            all.extend(shard.ring.iter().cloned());
         }
+        drop(gone);
         all
     }
 
-    /// How many requests are kept, live and finished.
+    /// How many requests are kept, in flight and finished.
     pub fn len(&self) -> usize {
-        self.shared
-            .shards
-            .iter()
-            .map(|shard| {
-                let shard = shard.lock().unwrap_or_else(|p| p.into_inner());
-                shard.live.len() + shard.done.len()
-            })
-            .sum()
+        self.all().len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    fn names(&self) -> Vec<Arc<str>> {
+        self.shared
+            .apps
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     /// One request, assembled; `None` for one not kept (or never seen).
     pub fn request(&self, id: u64) -> Option<Span> {
         let now = self.now_ns();
+        let mut gone = Vec::new();
         let track = {
-            let shard = self
-                .shared
-                .shard(id)
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            shard.live.get(&id).cloned().or_else(|| {
-                shard
-                    .done
-                    .iter()
-                    .find(|(_, track)| track.id == id)
-                    .map(|(_, track)| Arc::clone(track))
-            })
-        }?;
-        Some(Span::of(&track, now))
+            let mut shard = self.shared.shard(id);
+            shard.evict(
+                self.shared.per_shard,
+                now.saturating_sub(self.shared.keep_ns),
+                &mut gone,
+            );
+            shard
+                .ring
+                .iter()
+                .rev()
+                .chain(shard.aside.iter())
+                .find(|track| track.id == id)
+                .cloned()
+        };
+        drop(gone);
+        let track = track?;
+        Some(Span::of(&track, &self.names(), now))
     }
 
     /// What the requests of `app` (every app's for `None`) did between
@@ -423,13 +640,15 @@ impl Recorder {
     pub fn window(&self, app: Option<&str>, since_ns: u64, until_ns: u64) -> Window {
         let now = self.now_ns();
         let until_ns = until_ns.min(now).max(since_ns);
+        let names = self.names();
+        let wanted = app.map(|app| names.iter().position(|name| &**name == app));
         let mut requests: Vec<Span> = self
             .all()
             .iter()
-            .filter(|track| app.is_none_or(|app| track.app == app))
+            .filter(|track| wanted.is_none_or(|index| index == Some(track.app as usize)))
             .filter(|track| track.arrived_ns <= until_ns)
-            .map(|track| Span::of(track, now))
-            .filter(|span| span.end.as_ref().is_none_or(|end| end.at_ns >= since_ns))
+            .filter(|track| track.ended_ns().is_none_or(|ended| ended >= since_ns))
+            .map(|track| Span::of(track, &names, now))
             .collect();
         requests.sort_by_key(|span| (span.arrived_ns, span.id));
         Window::of(self, requests, now, since_ns, until_ns)
@@ -438,15 +657,21 @@ impl Recorder {
     /// The requests in flight now, oldest first, and what each worker runs.
     pub fn live(&self) -> Live {
         let now = self.now_ns();
-        let mut tracks = Vec::new();
+        let names = self.names();
+        let mut rows: Vec<LiveRow> = Vec::new();
         for shard in &self.shared.shards {
-            let shard = shard.lock().unwrap_or_else(|p| p.into_inner());
-            tracks.extend(shard.live.values().cloned());
+            let tracks: Vec<Arc<Track>> = {
+                let shard = shard.lock().unwrap_or_else(|p| p.into_inner());
+                shard
+                    .aside
+                    .iter()
+                    .chain(shard.ring.iter())
+                    .filter(|track| track.ended_ns().is_none())
+                    .cloned()
+                    .collect()
+            };
+            rows.extend(tracks.iter().filter_map(|track| LiveRow::of(track, &names)));
         }
-        let mut rows: Vec<LiveRow> = tracks
-            .iter()
-            .filter_map(|track| LiveRow::of(track))
-            .collect();
         rows.sort_by_key(|row| (row.arrived_ns, row.id));
         let mut workers: Vec<Option<LiveRow>> = vec![None; self.shared.workers];
         for row in &rows {
@@ -465,6 +690,24 @@ impl Recorder {
             workers,
             requests: rows,
         }
+    }
+}
+
+/// `names[app]`, or nothing for an index never named.
+fn name_of(names: &[Arc<str>], app: u32) -> String {
+    names
+        .get(app as usize)
+        .map_or_else(String::new, |name| name.to_string())
+}
+
+/// A method as kept: the common ones without a copy.
+fn method_name(method: &str) -> Cow<'static, str> {
+    const KNOWN: [&str; 9] = [
+        "GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS", "CONNECT", "TRACE",
+    ];
+    match KNOWN.iter().find(|known| **known == method) {
+        Some(known) => Cow::Borrowed(known),
+        None => Cow::Owned(cut(method, 32).to_string()),
     }
 }
 
@@ -501,10 +744,7 @@ impl Tracker {
         let at_ns = at.ns(self.shared.started);
         self.track
             .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .events
-            .push(Event { at_ns, what });
+            .with(|state| state.events.push(Event { at_ns, what }));
     }
 
     /// A slice began on `worker`.
@@ -577,11 +817,7 @@ impl Tracker {
             Some((instructions, heap)) => (Some(instructions), Some(heap)),
             None => (None, None),
         };
-        self.track
-            .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .end = Some(End {
+        let end = End {
             at_ns,
             status,
             reason,
@@ -589,8 +825,12 @@ impl Tracker {
             worker_ns: worker.as_nanos() as u64,
             instructions,
             heap_words,
-        });
-        self.shared.finish(&self.track, at_ns);
+        };
+        self.track.state.with(|state| state.end = Some(end));
+        self.track.ended_ns.store(at_ns, Ordering::Release);
+        // The bounds are kept here, where a request ends — on a worker —
+        // and not where one is admitted, on the HTTP side.
+        self.shared.forget(self.track.id, at_ns);
     }
 }
 
@@ -602,7 +842,7 @@ impl Drop for Tracker {
             } else {
                 "dropped"
             };
-            let now = self.shared.now_ns();
+            let now = Instant::now().ns(self.shared.started);
             self.close(now, 500, Some(reason), false, Duration::ZERO);
         }
     }
@@ -694,18 +934,19 @@ pub struct Span {
 }
 
 impl Span {
-    fn of(track: &Track, now: u64) -> Span {
-        let state = track.state.lock().unwrap_or_else(|p| p.into_inner());
+    fn of(track: &Track, names: &[Arc<str>], now: u64) -> Span {
+        // Copied out, so the latch is held for a copy and no longer.
+        let state = track.state.with(|state| state.clone());
         let (phases, yields, parks, moves) =
             assemble(state.queued_ns, &state.events, state.end.as_ref());
         Span {
             id: track.id,
-            app: track.app.clone(),
-            method: track.method.clone(),
-            path: track.path.clone(),
+            app: name_of(names, track.app),
+            method: track.method.to_string(),
+            path: track.path(),
             arrived_ns: track.arrived_ns,
             queued_ns: state.queued_ns,
-            end: state.end.clone(),
+            end: state.end,
             phases,
             yields,
             parks,
@@ -1135,8 +1376,8 @@ pub struct LiveRow {
 }
 
 impl LiveRow {
-    fn of(track: &Track) -> Option<LiveRow> {
-        let state = track.state.lock().unwrap_or_else(|p| p.into_inner());
+    fn of(track: &Track, names: &[Arc<str>]) -> Option<LiveRow> {
+        let state = track.state.with(|state| state.clone());
         if state.end.is_some() {
             return None;
         }
@@ -1161,9 +1402,9 @@ impl LiveRow {
         };
         Some(LiveRow {
             id: track.id,
-            app: track.app.clone(),
-            method: track.method.clone(),
-            path: track.path.clone(),
+            app: name_of(names, track.app),
+            method: track.method.to_string(),
+            path: track.path(),
             arrived_ns: track.arrived_ns,
             state: live,
             worker,
@@ -1240,7 +1481,7 @@ mod tests {
     #[test]
     fn a_request_that_parks_and_resumes_elsewhere_is_phases() {
         let rec = recorder();
-        let mut t = rec.admit(7, "slow", "GET", "/slow/", 10 * MS, 11 * MS);
+        let mut t = rec.admit(7, rec.app("slow"), "GET", "/slow/", 10 * MS, 11 * MS);
         t.run(12 * MS, 0, Began::Start);
         t.park(13 * MS, "timer.sleep");
         t.ready(23 * MS, By::Answer);
@@ -1289,7 +1530,7 @@ mod tests {
         let rec = recorder();
         rec.rejected(
             1,
-            "hello",
+            rec.app("hello"),
             "GET",
             "/hello/",
             5 * MS,
@@ -1297,9 +1538,9 @@ mod tests {
             429,
             "rate_limited",
         );
-        let mut queued = rec.admit(2, "hello", "POST", "/hello/", 6 * MS, 6 * MS);
+        let mut queued = rec.admit(2, rec.app("hello"), "POST", "/hello/", 6 * MS, 6 * MS);
         queued.reject(7 * MS, 429, "queue_full");
-        let mut parked = rec.admit(3, "slow", "GET", "/slow/", 8 * MS, 8 * MS);
+        let mut parked = rec.admit(3, rec.app("slow"), "GET", "/slow/", 8 * MS, 8 * MS);
         parked.run(9 * MS, 1, Began::Start);
         parked.park(10 * MS, "fetch");
         parked.ready(40 * MS, By::Deadline);
@@ -1326,7 +1567,7 @@ mod tests {
     #[test]
     fn a_dropped_tracker_ends_its_request() {
         let rec = recorder();
-        let t = rec.admit(4, "hello", "GET", "/", 1 * MS, 1 * MS);
+        let t = rec.admit(4, rec.app("hello"), "GET", "/", MS, MS);
         assert_eq!(rec.live().total, 1);
         drop(t);
         let span = rec.request(4).unwrap();
@@ -1337,13 +1578,13 @@ mod tests {
     #[test]
     fn live_says_where_each_request_is() {
         let rec = recorder();
-        let _waiting = rec.admit(1, "a", "GET", "/a", 1 * MS, 1 * MS);
-        let running = rec.admit(2, "a", "GET", "/b", 2 * MS, 2 * MS);
+        let _waiting = rec.admit(1, rec.app("a"), "GET", "/a", MS, MS);
+        let running = rec.admit(2, rec.app("a"), "GET", "/b", 2 * MS, 2 * MS);
         running.run(3 * MS, 1, Began::Start);
-        let parked = rec.admit(3, "b", "GET", "/c", 3 * MS, 3 * MS);
+        let parked = rec.admit(3, rec.app("b"), "GET", "/c", 3 * MS, 3 * MS);
         parked.run(4 * MS, 0, Began::Start);
         parked.park(5 * MS, "fetch");
-        let yielded = rec.admit(4, "b", "GET", "/d", 4 * MS, 4 * MS);
+        let yielded = rec.admit(4, rec.app("b"), "GET", "/d", 4 * MS, 4 * MS);
         yielded.run(5 * MS, 0, Began::Start);
         yielded.yielded(6 * MS);
         let live = rec.live();
@@ -1373,7 +1614,7 @@ mod tests {
     fn the_count_bound_keeps_the_newest() {
         let rec = Recorder::with_bounds(1, KEEP, 64);
         for id in 0..1000 {
-            let mut t = rec.admit(id, "a", "GET", "/", 0u64, 0u64);
+            let mut t = rec.admit(id, rec.app("a"), "GET", "/", 0u64, 0u64);
             t.end(0u64, 200, None, Duration::ZERO);
         }
         assert_eq!(rec.len(), 64);
@@ -1385,7 +1626,7 @@ mod tests {
     fn the_age_bound_forgets_what_ended_long_ago() {
         let rec = Recorder::fixed(1, 0, KEEP.as_nanos() as u64 + 50 * MS);
         for (id, ended) in [(1, 10 * MS), (2, 40 * MS), (3, 60 * MS), (4, 200 * MS)] {
-            let mut t = rec.admit(id, "a", "GET", "/", ended, ended);
+            let mut t = rec.admit(id, rec.app("a"), "GET", "/", ended, ended);
             t.end(ended, 200, None, Duration::ZERO);
         }
         // The first two ended more than KEEP before now.
@@ -1393,7 +1634,7 @@ mod tests {
         assert_eq!(rec.len(), 2);
         assert!(rec.request(3).is_some());
         // A live request is kept however old.
-        let _old = rec.admit(5, "a", "GET", "/", 0u64, 0u64);
+        let _old = rec.admit(5, rec.app("a"), "GET", "/", 0u64, 0u64);
         assert_eq!(rec.live().total, 1);
     }
 
@@ -1402,10 +1643,10 @@ mod tests {
         let rec = Recorder::fixed(2, 0, 100 * MS);
         // Two requests: one runs 0–50 ms on worker 0, one waits 0–50 and
         // runs 50–100 on worker 1.
-        let mut a = rec.admit(1, "a", "GET", "/", 0u64, 0u64);
+        let mut a = rec.admit(1, rec.app("a"), "GET", "/", 0u64, 0u64);
         a.run(0u64, 0, Began::Start);
         a.end(50 * MS, 200, None, Duration::from_millis(50));
-        let mut b = rec.admit(2, "b", "GET", "/", 0u64, 0u64);
+        let mut b = rec.admit(2, rec.app("b"), "GET", "/", 0u64, 0u64);
         b.run(50 * MS, 1, Began::Start);
         b.end(100 * MS, 200, None, Duration::from_millis(50));
         let window = rec.window(None, 0, 100 * MS);
@@ -1456,7 +1697,7 @@ mod tests {
     fn paths_are_cut_and_windows_parsed() {
         let rec = recorder();
         let long = "/é".repeat(200);
-        let _t = rec.admit(1, "a", "GET", &long, 0u64, 0u64);
+        let _t = rec.admit(1, rec.app("a"), "GET", &long, 0u64, 0u64);
         let path = rec.request(1).unwrap().path;
         assert!(path.len() <= PATH_BYTES && long.starts_with(&path));
         assert_eq!(parse_over("10s"), Some(Duration::from_secs(10)));

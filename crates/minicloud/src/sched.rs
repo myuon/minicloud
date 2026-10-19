@@ -559,7 +559,11 @@ impl Engine {
             None => {
                 let slot = Arc::new(Slot {
                     name: app.name.clone(),
-                    index: self.queue.add_app(&app.limits),
+                    index: {
+                        let index = self.queue.add_app(&app.limits);
+                        self.timeline.set_app(index, &app.name);
+                        index
+                    },
                     current: RwLock::new(None),
                     history: Mutex::new(Vec::new()),
                     counters: Arc::clone(&app.counters),
