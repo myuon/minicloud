@@ -948,6 +948,59 @@ a file is optional: macOS, cgroup v1 and a sandbox that hides a file give
 `null`, and the sampler never fails for one. A test replaces the source
 (`Host::set_platform_source`), so nothing it asserts is the machine's.
 
+## Where a request's time went
+
+The counters and the minutes say how much and when; they cannot say *why*
+one request took 300 ms — whether it waited for a worker, ran, or sat
+parked at a fetch, and whether it came back on the worker it left. The
+request timeline (`timeline.rs`) is the Cove repository's edge sample's
+recorder, made always on and bounded.
+
+**A request carries its own record.** A `Tracker` rides in the request's
+`Flight`, which already goes from the HTTP side to a worker, to the I/O
+runtime while parked, and back; whoever holds the flight writes the
+request's events into its record. So an event costs a latch nobody else is
+taking, and nothing is added under the run queue's mutex, which every
+worker's every take goes through. The shared state — 32 shards by request
+id, each a ring in arrival order — is touched when a request is admitted
+and when it ends.
+
+**Where each event is taken:** arrival at the top of the HTTP side's
+`reply` (so reading a slow body shows as time before it is queued); queued
+where the `Flight` is made; a run's start in `Engine::sliced`, with its
+worker and whether it is a start, a resume or a continue; its end in
+`settle`, as a park (with `PendingWork::op`), a yield, or the answer; the
+park's end on the I/O runtime, where the host work, the deadline and the
+client's going away race; a rejection where the request is turned away.
+The end is recorded before the answer is sent, so a client that has its
+answer finds it recorded. A flight dropped without an end — a panic, a
+queue closed under it — ends its record as the HTTP side answers it, 500.
+
+**Bounded, and cheap where it is hot.** The last 5 minutes and at most
+20,000 requests, the oldest first; a request still in flight is set aside
+rather than forgotten. Nothing is written down: it is a picture of now, and
+the minutes are the history. The HTTP threads are what a host answering
+small requests runs out of first, so what they do for the timeline is one
+latch and a refilled record — no allocation in a steady state, records
+being reused, and forgetting is done by the worker that ends a request. It
+costs about 1.5% of `hello`'s capacity
+([measurements](measurements.md#what-the-request-timeline-costs)).
+
+**What it does not see.** Not the query string, which may hold what a
+caller did not mean to keep; not headers or bodies. A `kv` or `sql` call
+answers inside the run, so it is running time — accepted for now, because
+splitting a run at every synchronous call would put an event on the
+hottest path an app has. An asset never runs.
+
+**A view is drawn from phases.** The events of a request are made, when
+asked, into phases — waiting for a worker (after arrival, a park or a
+yield), running on a worker (and whether it moved), parked at a host call
+(and what ended it) — and a window of them into the workers' run segments,
+three strips of mean counts (running, parked, waiting) and p50/p99 per app.
+A test hands the views a recorder filled with times of its own
+(`Host::set_timeline_source`, `Recorder::fixed`), so a page of the timeline
+is the same every run.
+
 ## The front door
 
 Until `--tls-cert`, the host could not be reached by a browser without

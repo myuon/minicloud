@@ -52,3 +52,46 @@ Parking a `get` would triple its cost, and parking a `put` would only move
 its write to another thread. The call runs on the worker, never on the
 async runtime's threads, so HTTP is not blocked behind a write; a worker held
 34 µs is far inside a 2 ms slice.
+
+## What the request timeline costs
+
+**About 1.5% of `hello`'s capacity, the worst case, and nothing measurable
+on a mixed load.** The same macOS x86-64 development machine (i7-10700K,
+load average 5 to 5.6 from other work), `--profile checked`, the host as
+`bench/perf.sh` starts it (four workers, a 2 ms slice, the samples' limits
+raised), `minicloud-load` closed loop with keep-alive. Five rounds, each
+alternating a host built from `main` (v0.31.0, `de01067`) and one with the
+timeline (`f0c709c`), each host started afresh and warmed with 20,000
+requests first:
+
+| | `main` req/s | timeline req/s | difference |
+| --- | --- | --- | ---: |
+| `hello`, 64 in flight, 200,000 requests | 100,484 / 99,245 / 98,457 / 100,930 / 99,107 (mean 99,645) | 99,379 / 96,978 / 97,496 / 98,521 / 97,571 (97,989) | −1.7% |
+| `hello`, 256 in flight, 200,000 requests | 99,130 / 95,796 / 97,591 / 99,064 / 97,647 (97,846) | 98,204 / 96,387 / 95,609 / 97,893 / 94,340 (96,487) | −1.4% |
+| `--mix cpu-io`, 256 in flight, 3,000 requests | 1,835 / 1,844 / 1,841 / 1,843 / 1,850 (1,843) | 1,862 / 1,854 / 1,850 / 1,850 / 1,839 (1,851) | +0.5% |
+
+`hello`'s p99 was 1.00–1.03 ms on `main` and 1.02–1.06 ms with the
+timeline at 64 in flight, and 4.0–4.3 ms and 4.0–5.0 ms at 256; `hello`'s
+p99 inside the mix 52–107 ms and 51–54 ms. `hello` is the worst case: nothing to wait on, four
+events a request, and a host whose two HTTP threads are the bottleneck —
+`sample(1)` of the host under that load has them 95% busy and the workers
+half idle. In that profile the recorder is 0.4–0.8% of the HTTP threads'
+busy time (admitting a request: one latch, a record refilled) and 0.6–0.9%
+of the workers' (the run's start and end, and trimming the ring to its
+bounds).
+
+It took three changes to get there from the first version, which cost
+4–5%: the record's lock (`std::sync::Mutex` on macOS is a pthread mutex
+boxed on first use, an allocation and a destroy per request) became a spin
+latch; forgetting old records moved from the HTTP side, where it freed
+them, to the worker that ends a request; and a forgotten record that
+nobody holds is reused by the next request rather than freed — with the app
+recorded as its slot's index rather than a shared `Arc<str>`, whose count
+every thread would have bumped. [`bench/ab.sh`](../bench/ab.sh) is the
+interleaving, a fresh host for each build in each round:
+
+```console
+$ git switch main && cargo build --profile checked && cp target/checked/minicloud /tmp/main/
+$ git switch - && cargo build --profile checked && cp target/checked/minicloud /tmp/timeline/
+$ sh bench/ab.sh /tmp/main /tmp/timeline 5
+```
