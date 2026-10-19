@@ -170,6 +170,12 @@ pub(crate) struct Front {
     /// The platform as the last sample saw it, which the next one takes the
     /// CPU's difference from.
     pub(crate) platform_sampled: std::sync::Mutex<Option<crate::platform::PlatformSample>>,
+    /// The load the host puts on its own apps ([`crate::load`]), one run at
+    /// a time, over loopback to the public listener.
+    pub(crate) loader: Arc<crate::load::Runner>,
+    /// What the load views read instead of the runner's status, when a test
+    /// put one there ([`Host::set_load_status`]).
+    pub(crate) load_status_source: std::sync::RwLock<Option<crate::load::Status>>,
     pub(crate) admin_token: String,
     /// Set by [`Host::shutdown`]: new requests are answered 503.
     draining: AtomicBool,
@@ -342,6 +348,8 @@ impl Host {
             options.forwarding.clone(),
             runtime.handle().clone(),
         ));
+        let loader =
+            crate::load::Runner::new(addr, runtime.handle().clone(), certificates.is_some());
         let front = Arc::new(Front {
             engine,
             counters: ServerCounters::default(),
@@ -361,6 +369,8 @@ impl Host {
             platform_source: std::sync::RwLock::new(None),
             timeline_source: std::sync::RwLock::new(None),
             platform_sampled: std::sync::Mutex::new(None),
+            loader,
+            load_status_source: std::sync::RwLock::new(None),
         });
         control.attach(&front);
         let (listener, admin) = {
@@ -476,6 +486,23 @@ impl Host {
             .timeline_source
             .write()
             .unwrap_or_else(|p| p.into_inner()) = Some(recorder);
+    }
+
+    /// Shows `status` in the load views (`/_host/load`, `host.loadStatus`)
+    /// from now on, instead of what the runner says: what a test does so that
+    /// the admin's Load page is drawn from figures of its own. Runs still
+    /// start and stop as before.
+    pub fn set_load_status(&self, status: crate::load::Status) {
+        *self
+            .front
+            .load_status_source
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(status);
+    }
+
+    /// The load runner ([`crate::load`]): what `POST /_host/load` starts.
+    pub fn loader(&self) -> &Arc<crate::load::Runner> {
+        &self.front.loader
     }
 
     /// What `GET /_host/stats` answers.
@@ -801,6 +828,20 @@ impl Front {
         // own paths are on the others.
         if route.as_ref().is_none_or(|route| route.hostname.is_none()) {
             if is_ops_path(&path) {
+                // Starting load is a change, and the public listener's
+                // operations views are read by anyone who can reach them.
+                if is_load_path(&path)
+                    && request.method() != hyper::Method::GET
+                    && request.method() != hyper::Method::HEAD
+                    && self.options.ops_listener == OpsListener::Public
+                {
+                    return Reply::text(
+                        405,
+                        "a load run is started and stopped on the admin listener, with its \
+                         token\n",
+                    )
+                    .with_header("allow", "GET, HEAD");
+                }
                 return match self.options.ops_listener {
                     OpsListener::Public => self.ops_reply(&path, request.uri().query()),
                     OpsListener::Admin => {
@@ -1080,6 +1121,7 @@ impl Front {
                 "  /_host/timeline?app=&over=60s  where each request waited, ran and parked\n",
             );
             out.push_str("  /_host/live  the requests in flight, and what each worker runs\n");
+            out.push_str("  /_host/load  the load run going on, and the last one\n");
         }
         out
     }
@@ -1169,6 +1211,9 @@ impl Front {
         if path == "/_host/live" {
             return json_reply(&self.timeline().live().to_json());
         }
+        if path == "/_host/load" {
+            return json_reply(&self.load_status().to_json());
+        }
         if path == "/_host/ui" {
             return Reply {
                 status: 200,
@@ -1236,6 +1281,16 @@ impl Front {
             .unwrap_or_else(|p| p.into_inner())
             .clone()
             .unwrap_or_else(|| self.engine.timeline.clone())
+    }
+
+    /// What the load views show: what a test put in
+    /// [`Front::load_status_source`], or the runner's own.
+    pub(crate) fn load_status(&self) -> crate::load::Status {
+        self.load_status_source
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.loader.status())
     }
 
     pub(crate) fn ops_context(&self) -> OpsContext<'_> {
@@ -1520,6 +1575,12 @@ impl Front {
             ));
         }
     }
+}
+
+/// Whether `path` is `/_host/load` or below it: the one operations path
+/// that changes something, on `POST`.
+pub(crate) fn is_load_path(path: &str) -> bool {
+    path == "/_host/load" || path.starts_with("/_host/load/")
 }
 
 /// Whether `path` is one of the host's own, under `/_host`.

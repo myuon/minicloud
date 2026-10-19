@@ -24,10 +24,19 @@
 //! | `GET /apps/<app>/logs?n=&follow=1` | its recent log lines as text, or — with `follow` — those and every line as it is written, as server-sent events (`minicloud logs`) |
 //! | `PUT /secrets/<name>` | body: the value. Stores it (mode 0600, atomically), then reloads every app that uses it. 200 with each app's reload; 422 for a name or value refused |
 //! | `DELETE /secrets/<name>` | removes it. 409 while an app uses it, unless `?force=1`, which reloads those apps without it (they are refused); 404 if it is not set |
+//! | `POST /_host/load` | body: `{"mix": "light"\|"cpu"\|"wait"\|"mixed", "rate", "connections", "seconds"}`, each optional. Starts a load run on the host's own apps ([`crate::load`]). 200 with `GET /_host/load`'s answer; 409 while one is going on; 422 for a figure past its cap |
+//! | `POST /_host/load/stop` | stops it. 200 as above; 409 when none is going on |
+//! | `GET /_host/load` | the run going on and the last one, as JSON (also an operations view, below) |
 //!
 //! These are the emergency exits when the admin app is broken or locked
 //! out: they do not go through it, and they may do what it may not —
 //! disable the admin app, or reset it.
+//!
+//! The load routes are under `/_host/` beside the operations view of the
+//! same run, but they start work, so they take the token whichever listener
+//! serves the operations views: a form on another site could post to a
+//! loopback address the browser can reach, and its `Host` would pass the
+//! loopback check below.
 //!
 //! Anything without the token is 401, and changes nothing — except, under
 //! `--ops-listener admin`, a `GET` under `/_host/` ([`crate::ops`]): the
@@ -54,7 +63,7 @@ use crate::deploy::{self, Limits};
 use crate::manage::{ChangeError, SecretChange, Via};
 use crate::ops::{self, OpsListener};
 use crate::sched::Installed;
-use crate::server::{is_ops_path, json_reply, to_response, Front, UpdateError};
+use crate::server::{is_load_path, is_ops_path, json_reply, to_response, Front, UpdateError};
 
 /// Serves the admin listener until the runtime stops.
 pub(crate) async fn serve(front: Arc<Front>, listener: tokio::net::TcpListener) {
@@ -166,6 +175,16 @@ fn authorized(front: &Front, request: &Request<Incoming>) -> bool {
 }
 
 async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
+    if request.method() == Method::POST && is_load_path(request.uri().path()) {
+        if !authorized(front, &request) {
+            return Reply::text(
+                401,
+                "minicloud admin: a load run needs `Authorization: Bearer <token>`\n",
+            )
+            .with_header("www-authenticate", "Bearer");
+        }
+        return load_change(front, request).await;
+    }
     if front.options.ops_listener == OpsListener::Admin && is_ops_path(request.uri().path()) {
         if request.method() != Method::GET && request.method() != Method::HEAD {
             return Reply::text(405, "the operations views are read-only\n")
@@ -266,6 +285,7 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
                 None => Reply::text(404, format!("no app named `{name}`\n")),
             }
         }
+        (Method::GET, "/_host/load") => json_reply(&front.load_status().to_json()),
         (Method::GET, "/changes") => {
             let n = request
                 .uri()
@@ -357,6 +377,36 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
              POST /apps/<app>/deploy|rollback|enable|disable|reset, GET /apps, \
              GET /changes, GET /secrets, PUT|DELETE /secrets/<name>\n",
         ),
+    }
+}
+
+/// `POST /_host/load` and `POST /_host/load/stop`, the token checked.
+async fn load_change(front: &Front, request: Request<Incoming>) -> Reply {
+    let stopping = request.uri().path() == "/_host/load/stop";
+    if !stopping && request.uri().path() != "/_host/load" {
+        return Reply::text(
+            404,
+            "minicloud admin: POST /_host/load or /_host/load/stop\n",
+        );
+    }
+    if stopping {
+        return match front.loader.stop() {
+            Ok(_) => json_reply(&front.load_status().to_json()),
+            Err(why) => Reply::text(409, format!("{why}\n")),
+        };
+    }
+    let body = match Limited::new(request.into_body(), 4096).collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(e) => return Reply::text(400, format!("cannot read the body: {e}\n")),
+    };
+    let params = match crate::load::Params::from_json(&body) {
+        Ok(params) => params,
+        Err(why) => return Reply::text(422, format!("{why}\n")),
+    };
+    match front.loader.start(params) {
+        Ok(_) => json_reply(&front.load_status().to_json()),
+        Err(why @ crate::load::StartError::Running) => Reply::text(409, format!("{why}\n")),
+        Err(why) => Reply::text(503, format!("{why}\n")),
     }
 }
 
