@@ -8,6 +8,9 @@
 //! | `GET /_host/metrics` | the same counters as OpenMetrics, for Prometheus to scrape |
 //! | `GET /_host/series?app=&over=hour\|day\|month` | what each app did, minute by minute (or hour by hour), as JSON |
 //! | `GET /_host/platform?over=hour\|day\|month` | the host's process and machine ([`crate::platform`]) now, and minute by minute (or hour by hour), as JSON |
+//! | `GET /_host/timeline?app=&over=\|since=&until=` | where each request of the window waited, ran on which worker, parked at which host call and resumed ([`crate::timeline`]), with the workers' run segments, three strips and a summary, as JSON; `since`/`until` are Unix milliseconds, `over` `10s`, `1m`, `5m` or seconds (a minute by default) |
+//! | `GET /_host/timeline/<id>` | one request of it, its phases whole |
+//! | `GET /_host/live` | the requests in flight now and where each is, and what each worker is running |
 //! | `GET /_host/apps/<app>/logs?n=` | its recent log lines, as text |
 //! | `GET /_host/apps/<app>/logs?follow=1` | the same, and then every line as it is written, as server-sent events |
 //! | `GET /_host/ui` | a page of all of it; every value from an app is escaped |

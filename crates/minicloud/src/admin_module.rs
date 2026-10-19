@@ -26,6 +26,9 @@
 //! | `host.series(app, over)` | `Array<host.Point>`: what the app did over `over` — `"hour"`, `"day"` or `"month"` — as the host's history keeps it ([`crate::series`]), oldest first: a row a minute for the first two and a row an hour for the last, because the store keeps the two at those granularities and [`crate::series::window`] is the one place that says which. The same rows `GET /_host/series` answers, as values; an `over` that is none of the three is an hour, as there. Empty — not an `Err` — for a host that keeps no history (no `--data`, or `minicloud test`), so a page that draws a graph shows "nothing yet" before there is one; never more than [`SERIES_ROWS`] rows, the newest if there would be |
 //! | `host.platform(over)` | `Array<host.PlatformPoint>`: the host's process and machine over `over` ([`crate::platform`], kept beside the apps' rows in [`crate::series`]), windowed, capped and empty when there is no history exactly as `host.series` is. A figure the host could not read is `None` |
 //! | `host.platformNow()` | `host.PlatformNow`: the same figures as they are now, the CPU's as running totals; every file figure `None` and the engine's zero where there is no host (`minicloud test`) |
+//! | `host.timeline(app, overSecs)` | `host.Timeline`: what every app's requests (or `app`'s; `""` is every app) did over the last `overSecs` seconds (1–[`crate::timeline::KEEP`]), from the in-memory request timeline ([`crate::timeline`]): the summary (requests, rejected, worker utilisation, p50/p99 per app), the three strips (workers running, runs parked, requests waiting for a worker, each a mean in thousandths over [`crate::timeline::STRIP_BUCKETS`] buckets), the workers' run segments — those of one worker less than a thousandth of the window apart merged, at most [`TIMELINE_SEGMENTS`], the newest — and the newest [`crate::timeline::LANES`] requests with their phases, in arrival order. Times are microseconds since the host started (`startedUnixMs`). Empty where there is no host (`minicloud test`) |
+//! | `host.request(id)` | `Result<host.TimelineRequest, Error>`: one request of the timeline, its phases whole; an `Err` for one it no longer keeps |
+//! | `host.live()` | `host.Live`: the requests in flight now, oldest first (at most [`crate::timeline::LIVE_ROWS`]), each with where it is — waiting for a worker, running, parked at a host call, resuming, yielded — and since when; and each worker with the request it is running |
 //! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
 //! | `host.allLogs(limit)` | `host.AllLogs`: every app's log as one sequence — the last `limit` lines of it, oldest first, each saying which app it came from — and `apps`, every app whose ring holds a line. The host merges the rings, and "the last `limit`" is the last `limit` of its whole log, so one app that is talking fills it ([`crate::manage`]) |
 //! | `host.setEnabled(app, enabled, who)` | `Result<String, Error>`: routes to the app again, or stops; nothing is reloaded |
@@ -76,6 +79,8 @@ const OPT_INT: HostType = HostType::Option(&HostType::Int);
 /// as large as the table. Past it the newest rows are kept, because a graph
 /// that loses a stretch loses the end it is looking at.
 pub const SERIES_ROWS: usize = 2000;
+/// The most worker segments one `host.timeline` answers, after merging.
+pub const TIMELINE_SEGMENTS: usize = 3000;
 
 const CHANGED: HostType = HostType::Result(&HostType::String, &HostType::Error);
 
@@ -240,6 +245,19 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             HostType::Named("host.PlatformNow"),
             Effect::Read,
         ),
+        op(
+            "timeline",
+            &[STR, INT],
+            HostType::Named("host.Timeline"),
+            Effect::Read,
+        ),
+        op(
+            "request",
+            &[INT],
+            HostType::Result(&HostType::Named("host.TimelineRequest"), &HostType::Error),
+            Effect::Read,
+        ),
+        op("live", &[], HostType::Named("host.Live"), Effect::Read),
         op(
             "queues",
             &[STR],
@@ -553,6 +571,172 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("queued", INT),
                 field("busy", INT),
                 field("workers", INT),
+            ],
+        },
+        // The request timeline over a window ([`crate::timeline::Window`]).
+        // Times are microseconds since the host started.
+        TypeSchema {
+            name: "Timeline",
+            cases: &[],
+            fields: &[
+                field("startedUnixMs", INT),
+                field("nowUs", INT),
+                field("sinceUs", INT),
+                field("untilUs", INT),
+                field("workers", INT),
+                field("keepSecs", INT),
+                field("keepRequests", INT),
+                // Every request that overlaps the window; `lanes` is the
+                // newest of them.
+                field("requests", INT),
+                field("rejected", INT),
+                field("busyUs", INT),
+                field("utilisationMilli", INT),
+                field(
+                    "apps",
+                    HostType::Array(&HostType::Named("host.TimelineApp")),
+                ),
+                field("bucketUs", INT),
+                // Means in thousandths: 1500 is one and a half.
+                field("running", HostType::Array(&INT)),
+                field("parked", HostType::Array(&INT)),
+                field("waiting", HostType::Array(&INT)),
+                field("segmentsTotal", INT),
+                field(
+                    "segments",
+                    HostType::Array(&HostType::Named("host.WorkerRun")),
+                ),
+                field(
+                    "lanes",
+                    HostType::Array(&HostType::Named("host.TimelineRequest")),
+                ),
+            ],
+        },
+        TypeSchema {
+            name: "TimelineApp",
+            cases: &[],
+            fields: &[
+                field("app", STR),
+                field("requests", INT),
+                field("rejected", INT),
+                field("errors", INT),
+                field("p50Us", INT),
+                field("p99Us", INT),
+            ],
+        },
+        // A stretch a worker ran: one request's run, or `runs` of them
+        // close together, `id` the first.
+        TypeSchema {
+            name: "WorkerRun",
+            cases: &[],
+            fields: &[
+                field("worker", INT),
+                field("id", INT),
+                field("app", STR),
+                field("fromUs", INT),
+                field("toUs", INT),
+                field("runs", INT),
+            ],
+        },
+        // One request ([`crate::timeline::Span`]): `outcome` is `ok`,
+        // `error`, `rejected` or `in_flight`, and `reason` the error kind
+        // or the rejection, `""` for neither.
+        TypeSchema {
+            name: "TimelineRequest",
+            cases: &[],
+            fields: &[
+                field("id", INT),
+                field("app", STR),
+                field("method", STR),
+                field("path", STR),
+                field("arrivedUs", INT),
+                field("queuedUs", OPT_INT),
+                field("endedUs", OPT_INT),
+                field("status", OPT_INT),
+                field("outcome", STR),
+                field("reason", STR),
+                field("latencyUs", OPT_INT),
+                field("workerUs", INT),
+                field("instructions", OPT_INT),
+                field("heapWords", OPT_INT),
+                field("yields", INT),
+                field("parks", INT),
+                field("moves", INT),
+                field("nowUs", INT),
+                field("phases", HostType::Array(&HostType::Named("host.Phase"))),
+            ],
+        },
+        // One stretch of a request: `wait` (for a worker; `after` says
+        // `arrival`, `park` or `yield`), `run` (on `worker`; `began`
+        // `start`, `resume` or `continue`; `moved` when on another worker
+        // than its last) or `park` (at `op`; `by` `answer`, `deadline` or
+        // `cancel`). `open` while it lasts, `toUs` then being now; `worker`
+        // is -1 and the strings `""` where they do not apply.
+        TypeSchema {
+            name: "Phase",
+            cases: &[],
+            fields: &[
+                field("kind", STR),
+                field("fromUs", INT),
+                field("toUs", INT),
+                field("open", HostType::Bool),
+                field("worker", INT),
+                field("began", STR),
+                field("moved", HostType::Bool),
+                field("op", STR),
+                field("by", STR),
+                field("after", STR),
+            ],
+        },
+        TypeSchema {
+            name: "Live",
+            cases: &[],
+            fields: &[
+                field("startedUnixMs", INT),
+                field("nowUs", INT),
+                field("total", INT),
+                field(
+                    "workers",
+                    HostType::Array(&HostType::Named("host.LiveWorker")),
+                ),
+                field(
+                    "requests",
+                    HostType::Array(&HostType::Named("host.LiveRequest")),
+                ),
+            ],
+        },
+        // A worker and what it is running; `busy` false and the rest empty
+        // (`id` -1) when nothing.
+        TypeSchema {
+            name: "LiveWorker",
+            cases: &[],
+            fields: &[
+                field("worker", INT),
+                field("busy", HostType::Bool),
+                field("id", INT),
+                field("app", STR),
+                field("method", STR),
+                field("path", STR),
+                field("sinceUs", INT),
+            ],
+        },
+        // A request in flight: `state` is `waiting`, `running`, `parked`,
+        // `resuming` or `yielded`, since `sinceUs`; `worker` the one running
+        // it or the last that did (-1 for none yet); `op` the host call it
+        // is parked at.
+        TypeSchema {
+            name: "LiveRequest",
+            cases: &[],
+            fields: &[
+                field("id", INT),
+                field("app", STR),
+                field("method", STR),
+                field("path", STR),
+                field("arrivedUs", INT),
+                field("state", STR),
+                field("worker", INT),
+                field("op", STR),
+                field("sinceUs", INT),
             ],
         },
         // The same figures now ([`crate::platform::PlatformSample`]), the
@@ -982,6 +1166,194 @@ fn platform_now_value(now: crate::platform::PlatformSample) -> Value {
     )
 }
 
+fn us(ns: u64) -> Value {
+    int(ns / 1000)
+}
+
+fn phase_value(phase: &crate::timeline::Phase, now: u64) -> Value {
+    let text = |value: Option<&'static str>| Value::string(value.unwrap_or_default().to_string());
+    Value::structure(
+        "host.Phase",
+        vec![
+            ("kind", Value::string(phase.kind.name().to_string())),
+            ("fromUs", us(phase.from_ns)),
+            ("toUs", us(phase.until(now))),
+            ("open", Value::bool(phase.to_ns.is_none())),
+            ("worker", phase.worker.map_or(Value::int(-1), int)),
+            ("began", text(phase.began.map(crate::timeline::Began::name))),
+            ("moved", Value::bool(phase.moved)),
+            ("op", text(phase.op)),
+            ("by", text(phase.by.map(crate::timeline::By::name))),
+            ("after", text(phase.after)),
+        ],
+    )
+}
+
+fn timeline_request_value(span: &crate::timeline::Span) -> Value {
+    let end = span.end.as_ref();
+    let known = |value: Option<u64>| maybe(value);
+    Value::structure(
+        "host.TimelineRequest",
+        vec![
+            ("id", int(span.id)),
+            ("app", Value::string(span.app.clone())),
+            ("method", Value::string(span.method.clone())),
+            ("path", Value::string(span.path.clone())),
+            ("arrivedUs", us(span.arrived_ns)),
+            ("queuedUs", known(span.queued_ns.map(|ns| ns / 1000))),
+            ("endedUs", known(end.map(|end| end.at_ns / 1000))),
+            ("status", known(end.map(|end| u64::from(end.status)))),
+            ("outcome", Value::string(span.outcome().to_string())),
+            (
+                "reason",
+                Value::string(
+                    end.and_then(|end| end.reason)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ),
+            ("latencyUs", known(span.latency_ns().map(|ns| ns / 1000))),
+            ("workerUs", us(end.map_or(0, |end| end.worker_ns))),
+            ("instructions", known(end.and_then(|end| end.instructions))),
+            ("heapWords", known(end.and_then(|end| end.heap_words))),
+            ("yields", int(span.yields)),
+            ("parks", int(span.parks)),
+            ("moves", int(span.moves)),
+            ("nowUs", us(span.now_ns)),
+            (
+                "phases",
+                Value::array(
+                    span.phases
+                        .iter()
+                        .map(|phase| phase_value(phase, span.now_ns)),
+                ),
+            ),
+        ],
+    )
+}
+
+fn timeline_value(window: &crate::timeline::Window) -> Value {
+    let span = window.until_ns.saturating_sub(window.since_ns);
+    let merged = crate::timeline::merge_segments(&window.segments, span / 1000);
+    let segments = &merged[merged.len().saturating_sub(TIMELINE_SEGMENTS)..];
+    let ints = |values: &[u64]| Value::array(values.iter().map(|value| int(*value)));
+    Value::structure(
+        "host.Timeline",
+        vec![
+            ("startedUnixMs", int(window.started_unix_ms)),
+            ("nowUs", us(window.now_ns)),
+            ("sinceUs", us(window.since_ns)),
+            ("untilUs", us(window.until_ns)),
+            ("workers", int(window.workers)),
+            ("keepSecs", int(crate::timeline::KEEP.as_secs())),
+            ("keepRequests", int(crate::timeline::KEEP_REQUESTS)),
+            ("requests", int(window.requests.len())),
+            ("rejected", int(window.rejected())),
+            ("busyUs", us(window.busy_ns)),
+            ("utilisationMilli", int(window.utilisation_milli())),
+            (
+                "apps",
+                Value::array(window.apps.iter().map(|app| {
+                    Value::structure(
+                        "host.TimelineApp",
+                        vec![
+                            ("app", Value::string(app.app.clone())),
+                            ("requests", int(app.requests)),
+                            ("rejected", int(app.rejected)),
+                            ("errors", int(app.errors)),
+                            ("p50Us", us(app.p50_ns)),
+                            ("p99Us", us(app.p99_ns)),
+                        ],
+                    )
+                })),
+            ),
+            ("bucketUs", us(window.bucket_ns)),
+            ("running", ints(&window.running)),
+            ("parked", ints(&window.parked)),
+            ("waiting", ints(&window.waiting)),
+            ("segmentsTotal", int(window.segments.len())),
+            (
+                "segments",
+                Value::array(segments.iter().map(|segment| {
+                    Value::structure(
+                        "host.WorkerRun",
+                        vec![
+                            ("worker", int(segment.worker)),
+                            ("id", int(segment.id)),
+                            ("app", Value::string(segment.app.clone())),
+                            ("fromUs", us(segment.from_ns)),
+                            ("toUs", us(segment.to_ns)),
+                            ("runs", int(segment.runs)),
+                        ],
+                    )
+                })),
+            ),
+            (
+                "lanes",
+                Value::array(
+                    window
+                        .newest(crate::timeline::LANES)
+                        .iter()
+                        .map(timeline_request_value),
+                ),
+            ),
+        ],
+    )
+}
+
+fn live_request_value(row: &crate::timeline::LiveRow) -> Value {
+    Value::structure(
+        "host.LiveRequest",
+        vec![
+            ("id", int(row.id)),
+            ("app", Value::string(row.app.clone())),
+            ("method", Value::string(row.method.clone())),
+            ("path", Value::string(row.path.clone())),
+            ("arrivedUs", us(row.arrived_ns)),
+            ("state", Value::string(row.state.name().to_string())),
+            ("worker", row.worker.map_or(Value::int(-1), int)),
+            ("op", Value::string(row.op.unwrap_or_default().to_string())),
+            ("sinceUs", us(row.since_ns)),
+        ],
+    )
+}
+
+fn live_value(live: &crate::timeline::Live) -> Value {
+    Value::structure(
+        "host.Live",
+        vec![
+            ("startedUnixMs", int(live.started_unix_ms)),
+            ("nowUs", us(live.now_ns)),
+            ("total", int(live.total)),
+            (
+                "workers",
+                Value::array(live.workers.iter().enumerate().map(|(worker, row)| {
+                    let row = row.as_ref();
+                    let text = |f: fn(&crate::timeline::LiveRow) -> String| {
+                        Value::string(row.map(f).unwrap_or_default())
+                    };
+                    Value::structure(
+                        "host.LiveWorker",
+                        vec![
+                            ("worker", int(worker)),
+                            ("busy", Value::bool(row.is_some())),
+                            ("id", row.map_or(Value::int(-1), |row| int(row.id))),
+                            ("app", text(|row| row.app.clone())),
+                            ("method", text(|row| row.method.clone())),
+                            ("path", text(|row| row.path.clone())),
+                            ("sinceUs", us(row.map_or(0, |row| row.since_ns))),
+                        ],
+                    )
+                })),
+            ),
+            (
+                "requests",
+                Value::array(live.requests.iter().map(live_request_value)),
+            ),
+        ],
+    )
+}
+
 fn queue_value(queue: QueueInfo) -> Value {
     Value::structure(
         "host.Queue",
@@ -1280,6 +1652,40 @@ impl HostApi for AdminHost {
             .map_err(|why| RuntimeError::new(format!("admin: series: {why}")))?;
             let skip = rows.len().saturating_sub(SERIES_ROWS);
             return Ok(Value::array(rows.into_iter().skip(skip).map(point_value)));
+        }
+        // The request timeline: where there is no host (`minicloud test`),
+        // an empty recorder's answers, so a page shows "nothing yet".
+        if op == "timeline" || op == "request" || op == "live" {
+            let front = self.control.as_ref().and_then(|control| control.front());
+            let recorder = front.map_or_else(
+                || crate::timeline::Recorder::new(1),
+                |front| front.timeline(),
+            );
+            return Ok(match op {
+                "timeline" => {
+                    let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                    let over = args.get(1).and_then(Value::as_int).unwrap_or(60);
+                    let over = std::time::Duration::from_secs(over.max(1) as u64)
+                        .min(crate::timeline::KEEP);
+                    let until = recorder.now_ns();
+                    let since = until.saturating_sub(over.as_nanos() as u64);
+                    let app = (!app.is_empty()).then_some(app);
+                    timeline_value(&recorder.window(app, since, until))
+                }
+                "request" => {
+                    let id = args.first().and_then(Value::as_int).unwrap_or(-1);
+                    match u64::try_from(id).ok().and_then(|id| recorder.request(id)) {
+                        Some(span) => Value::ok(timeline_request_value(&span)),
+                        None => Value::err(Value::error(format!(
+                            "no request {id} in the timeline: it keeps the last {} s, at most \
+                             {} requests",
+                            crate::timeline::KEEP.as_secs(),
+                            crate::timeline::KEEP_REQUESTS
+                        ))),
+                    }
+                }
+                _ => live_value(&recorder.live()),
+            });
         }
         // The host's own history and its figures now: absences are answers
         // here too, for the reason `series` gives.

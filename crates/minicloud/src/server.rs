@@ -164,6 +164,9 @@ pub(crate) struct Front {
     /// from: `None` for the live files ([`crate::platform::read_system`]),
     /// or what a test put there ([`Host::set_platform_source`]).
     pub(crate) platform_source: std::sync::RwLock<Option<PlatformSource>>,
+    /// What the timeline views read instead of the engine's own recorder,
+    /// when a test put one there ([`Host::set_timeline_source`]).
+    pub(crate) timeline_source: std::sync::RwLock<Option<crate::timeline::Recorder>>,
     /// The platform as the last sample saw it, which the next one takes the
     /// CPU's difference from.
     pub(crate) platform_sampled: std::sync::Mutex<Option<crate::platform::PlatformSample>>,
@@ -356,6 +359,7 @@ impl Host {
             series,
             sampled: std::sync::Mutex::new(std::collections::HashMap::new()),
             platform_source: std::sync::RwLock::new(None),
+            timeline_source: std::sync::RwLock::new(None),
             platform_sampled: std::sync::Mutex::new(None),
         });
         control.attach(&front);
@@ -459,6 +463,19 @@ impl Host {
     /// ([`crate::platform`]).
     pub fn platform_now(&self) -> crate::platform::PlatformSample {
         self.front.platform_now()
+    }
+
+    /// Shows `recorder` in the timeline views (`/_host/timeline`,
+    /// `/_host/live`, `host.timeline` and the rest) from now on, instead of
+    /// what the engine records: what a test does so that a page of the
+    /// timeline is drawn from requests and times of its own
+    /// ([`crate::timeline::Recorder::fixed`]). The engine goes on recording.
+    pub fn set_timeline_source(&self, recorder: crate::timeline::Recorder) {
+        *self
+            .front
+            .timeline_source
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(recorder);
     }
 
     /// What `GET /_host/stats` answers.
@@ -1059,6 +1076,10 @@ impl Front {
             out.push_str("  /_host/stats  per-app counters, queues and work, as JSON\n");
             out.push_str("  /_host/apps/<app>  one app, its versions and recent errors, as JSON\n");
             out.push_str("  /_host/apps/<app>/logs?n=200  an app's recent log lines\n");
+            out.push_str(
+                "  /_host/timeline?app=&over=60s  where each request waited, ran and parked\n",
+            );
+            out.push_str("  /_host/live  the requests in flight, and what each worker runs\n");
         }
         out
     }
@@ -1105,6 +1126,48 @@ impl Front {
                 })
                 .unwrap_or_else(|| "hour".to_string());
             return json_reply(&ops::platform(&self.ops(), &self.platform_now(), &over));
+        }
+        if path == "/_host/timeline" {
+            let asked: BTreeMap<String, String> = query
+                .map(|query| {
+                    form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let number = |key: &str| asked.get(key).and_then(|n| n.parse::<u64>().ok());
+            let window = crate::timeline::asked_window(
+                &self.timeline(),
+                asked
+                    .get("app")
+                    .map(String::as_str)
+                    .filter(|app| !app.is_empty()),
+                number("since"),
+                number("until"),
+                asked.get("over").map(String::as_str),
+            );
+            return json_reply(&window.to_json());
+        }
+        if let Some(id) = path.strip_prefix("/_host/timeline/") {
+            return match id
+                .parse::<u64>()
+                .ok()
+                .and_then(|id| self.timeline().request(id))
+            {
+                Some(span) => json_reply(&span.to_json()),
+                None => Reply::text(
+                    404,
+                    format!(
+                        "no request `{id}` in the timeline: it keeps the last {} s, at most {} \
+                         requests\n",
+                        crate::timeline::KEEP.as_secs(),
+                        crate::timeline::KEEP_REQUESTS
+                    ),
+                ),
+            };
+        }
+        if path == "/_host/live" {
+            return json_reply(&self.timeline().live().to_json());
         }
         if path == "/_host/ui" {
             return Reply {
@@ -1163,6 +1226,16 @@ impl Front {
         sample.busy = self.engine.busy() as u64;
         sample.workers = self.engine.workers() as u64;
         sample
+    }
+
+    /// The recorder the timeline views read: what a test put in
+    /// [`Front::timeline_source`], or the engine's own.
+    pub(crate) fn timeline(&self) -> crate::timeline::Recorder {
+        self.timeline_source
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.engine.timeline.clone())
     }
 
     pub(crate) fn ops_context(&self) -> OpsContext<'_> {

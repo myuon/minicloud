@@ -1468,6 +1468,31 @@ pub fn parse_over(over: &str) -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs * unit).min(KEEP))
 }
 
+/// The window `GET /_host/timeline` asks for: `until` (Unix milliseconds,
+/// now if not given), and `since` (the same), or `over` before `until`
+/// ([`parse_over`]; a minute if neither is given). Of `app`'s requests, or
+/// every app's.
+pub fn asked_window(
+    recorder: &Recorder,
+    app: Option<&str>,
+    since_unix_ms: Option<u64>,
+    until_unix_ms: Option<u64>,
+    over: Option<&str>,
+) -> Window {
+    let now = recorder.now_ns();
+    let started = recorder.started_unix_ms();
+    let at = |unix_ms: u64| unix_ms.saturating_sub(started).saturating_mul(1_000_000);
+    let until = until_unix_ms.map_or(now, at).min(now);
+    let since = match since_unix_ms {
+        Some(since) => at(since),
+        None => {
+            let over = over.and_then(parse_over).unwrap_or(Duration::from_secs(60));
+            until.saturating_sub(over.as_nanos() as u64)
+        }
+    };
+    recorder.window(app, since.min(until), until)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
