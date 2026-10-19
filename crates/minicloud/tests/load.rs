@@ -101,7 +101,11 @@ fn a_second_run_is_refused_and_a_run_stops_when_asked() {
     assert_eq!(first.status, 200, "{}", first.body);
     let second = admin_post(&host, "/_host/load", r#"{"mix":"light"}"#);
     assert_eq!(second.status, 409, "{}", second.body);
-    assert!(second.body.contains("a load run is going on"), "{}", second.body);
+    assert!(
+        second.body.contains("a load run is going on"),
+        "{}",
+        second.body
+    );
 
     wait_until("a request of the run to be answered", || {
         n(&status(host.addr)["current"]["ok"]) > 0
@@ -170,7 +174,11 @@ fn starting_takes_the_admin_token_and_figures_within_their_caps() {
     let public = post(host.addr, "/_host/load", r#"{"mix":"light"}"#);
     assert_eq!(public.status, 405, "{}", public.body);
     // Not without the token.
-    let anonymous = post(host.admin_addr.unwrap(), "/_host/load", r#"{"mix":"light"}"#);
+    let anonymous = post(
+        host.admin_addr.unwrap(),
+        "/_host/load",
+        r#"{"mix":"light"}"#,
+    );
     assert_eq!(anonymous.status, 401, "{}", anonymous.body);
     for (body, says) in [
         (r#"{"mix":"heavy"}"#, "none of light, cpu, wait or mixed"),

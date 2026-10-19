@@ -1378,3 +1378,136 @@ fn the_timeline_pages_show_where_each_request_was() {
     // The pages only read.
     assert_eq!(ui(&host, "POST", "/live", &same_site(), "").status, 404);
 }
+
+#[test]
+fn the_load_page_starts_stops_and_shows_a_run() {
+    let apps = ui_apps();
+    let host = deployed(&apps);
+    let idle = ui(&host, "GET", "/load", &authed(), "");
+    assert_eq!(idle.status, 200, "{}", idle.body);
+    assert!(idle
+        .body
+        .contains("No load has been run since the host started."));
+    assert!(idle
+        .body
+        .contains("<a href=\"/load\" aria-current=page>load</a>"));
+    assert!(!idle.body.contains("http-equiv"));
+
+    // A form from another site starts nothing.
+    let form = "mix=light&rate=0&connections=1&seconds=60";
+    let crossed = ui(
+        &host,
+        "POST",
+        "/load/start",
+        &format!("{}Sec-Fetch-Site: cross-site\r\n", authed()),
+        form,
+    );
+    assert_eq!(crossed.status, 403, "{}", crossed.body);
+    assert!(!host.loader().status().running());
+
+    let started = ui(&host, "POST", "/load/start", &same_site(), form);
+    assert_eq!(started.status, 303, "{}", started.body);
+    assert!(host.loader().status().running());
+    // One at a time: the second is refused, with the host's reason.
+    let again = ui(&host, "POST", "/load/start", &same_site(), form);
+    assert_eq!(again.status, 422, "{}", again.body);
+    assert!(
+        again.body.contains("a load run is going on"),
+        "{}",
+        again.body
+    );
+    let running = ui(&host, "GET", "/load", &authed(), "");
+    for expected in [
+        "<meta http-equiv=refresh content=\"2\">",
+        "<h2>Running</h2>",
+        "action=\"/load/stop\"",
+        "closed loop on 1 connections",
+    ] {
+        assert!(
+            running.body.contains(expected),
+            "no `{expected}` in:\n{}",
+            running.body
+        );
+    }
+    let stopped = ui(&host, "POST", "/load/stop", &same_site(), "");
+    assert_eq!(stopped.status, 303, "{}", stopped.body);
+    wait_until("the run to stop", || !host.loader().status().running());
+    let last = ui(&host, "GET", "/load", &authed(), "");
+    assert!(last.body.contains("<h2>Last run</h2>"), "{}", last.body);
+    assert!(
+        last.body
+            .contains("<span class=\"state stopped\">stopped</span>"),
+        "{}",
+        last.body
+    );
+    assert!(!last.body.contains("http-equiv"));
+
+    // `slow` is not on this host: said so, and the run ends at once.
+    let wait = ui(
+        &host,
+        "POST",
+        "/load/start",
+        &same_site(),
+        "mix=wait&rate=0&connections=1&seconds=60",
+    );
+    assert_eq!(wait.status, 303, "{}", wait.body);
+    wait_until("the run to end", || !host.loader().status().running());
+    let missing = ui(&host, "GET", "/load", &authed(), "");
+    assert!(
+        missing
+            .body
+            .contains("<li>target app <code>slow</code> is not deployed</li>"),
+        "{}",
+        missing.body
+    );
+    assert!(missing
+        .body
+        .contains("<span class=\"state finished\">finished</span>"));
+
+    // A figure past its cap: the host's reason, the form as posted.
+    let capped = ui(
+        &host,
+        "POST",
+        "/load/start",
+        &same_site(),
+        "mix=cpu&rate=900&connections=1&seconds=5",
+    );
+    assert_eq!(capped.status, 422, "{}", capped.body);
+    assert!(
+        capped.body.contains("rate is 0 (closed loop) to 500"),
+        "{}",
+        capped.body
+    );
+    assert!(
+        capped
+            .body
+            .contains("<input id=rate name=rate value=\"900\""),
+        "{}",
+        capped.body
+    );
+
+    // Figures of the test's own, shown as the runner's would be.
+    host.set_load_status(minicloud::load::Status {
+        current: Some(fixed_load_run("running")),
+        last: None,
+    });
+    let fixed = ui(&host, "GET", "/load", &authed(), "");
+    for expected in [
+        "50 requests a second on up to 4 connections",
+        "12.3 s of 20 s",
+        "9 × 429, 0 × 503",
+        "<span class=big>2.5 ms</span>",
+        "p50; p99 181.0 ms",
+        "<li>target app <code>crunch</code> is not deployed</li>",
+    ] {
+        assert!(
+            fixed.body.contains(expected),
+            "no `{expected}` in:\n{}",
+            fixed.body
+        );
+    }
+    // And `/_host/load` says the same.
+    let status: serde_json::Value =
+        serde_json::from_str(&get(host.addr, "/_host/load").body).unwrap();
+    assert_eq!(status["current"]["sent"], 600);
+}

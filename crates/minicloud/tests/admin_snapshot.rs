@@ -554,6 +554,20 @@ fn every_admin_page() {
     // The request timeline: what is in flight, each window, one app's and
     // an app with nothing, and a window nobody knows (a minute).
     snap.page(&host, "live", "/live");
+    // Load: nothing run yet, then figures of the test's own — a run going on
+    // with a target missing, and one that ended — never a run of this
+    // host's, whose figures are measured.
+    snap.page(&host, "load", "/load");
+    host.set_load_status(minicloud::load::Status {
+        current: Some(fixed_load_run("running")),
+        last: Some(fixed_load_run("finished")),
+    });
+    snap.page(&host, "load-running", "/load");
+    host.set_load_status(minicloud::load::Status {
+        current: None,
+        last: Some(fixed_load_run("stopped")),
+    });
+    snap.page(&host, "load-stopped", "/load");
     for (name, query) in [
         ("timeline", ""),
         ("timeline-over-10s", "?over=10s"),

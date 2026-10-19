@@ -1254,3 +1254,129 @@ test fn showsARequestsPhasesAndWhatItCameTo() -> Result<Unit, Error> {
   assert(turned.contains("No phases"))?
   Ok(())
 }
+
+// ---------------------------------------------------------------- load
+
+fn aLoadRun(
+  state: String = "running",
+  rate: Int = 0,
+  notDeployed: Array<String> = [],
+  p50Us: Option<Int> = Some(1500),
+) -> host.LoadRun {
+  host.LoadRun(
+    mix: "mixed",
+    rate: rate,
+    connections: 4,
+    seconds: 10,
+    state: state,
+    startedUnixMs: 1700000000000,
+    elapsedMs: 2345,
+    sent: 120,
+    answered: 117,
+    ok: 100,
+    clientErrors: 3,
+    tooMany: 7,
+    unavailable: 2,
+    serverErrors: 4,
+    other: 1,
+    errors: 3,
+    p50Us: p50Us,
+    p99Us: None,
+    targets: Vector.of("hello", "crunch", "slow").freeze(),
+    notDeployed: notDeployed,
+  )
+}
+
+fn aLoadStatus(current: Option<host.LoadRun>, last: Option<host.LoadRun>) -> host.LoadStatus {
+  host.LoadStatus(
+    running: current.isSome(),
+    current: current,
+    last: last,
+    maxRate: 500,
+    maxConnections: 64,
+    maxSeconds: 60,
+  )
+}
+
+test fn saysHowALoadRunSends() -> Result<Unit, Error> {
+  assertEqual(loadMode(0, 8), "closed loop on 8 connections")?
+  assertEqual(loadMode(50, 2), "50 requests a second on up to 2 connections")?
+  assertEqual(loadSeconds(2345), "2.3 s")?
+  assertEqual(loadSeconds(60000), "60.0 s")?
+  assertEqual(loadLatency(Some(1500)), "1.5 ms")?
+  assertEqual(loadLatency(None), "–")?
+  assertEqual(",".join(loadMixes()), "light,cpu,wait,mixed")?
+  assert(loadMixSaid("wait").render().contains("<code>slow</code>"))?
+  assertEqual(loadMixSaid("<b>").render(), "<code>&lt;b&gt;</code>")?
+  Ok(())
+}
+
+test fn readsTheLoadFormsFigures() -> Result<Unit, Error> {
+  let form = text.parseForm("rate=+20+&connections=x&seconds=")
+  assertEqual(loadNumber(form, "rate").unwrapOr(-1), 20)?
+  assert(loadNumber(form, "connections").isError())?
+  assert(loadNumber(form, "missing").isError())?
+  match loadNumber(form, "connections") {
+    Ok(_) => assert(false)?
+    Err(why) => assertEqual(why, "connections is a whole number, not “x”")?
+  }
+  assertEqual(loadField(form, "mix", "light"), "light")?
+  Ok(())
+}
+
+/// Under `minicloud test` there is no host: nothing has run, and a start is
+/// refused with the form as it was posted.
+test fn theLoadPageWithNoHost() -> Result<Unit, Error> {
+  let page = loadPage("", host.loadStatus(), html"", Map.of()).render()
+  assert(page.contains("<h1>Load</h1>"))?
+  assert(page.contains("<a href=\"/load\" aria-current=page>load</a>"))?
+  assert(page.contains("No load has been run since the host started."))?
+  assert(!page.contains("http-equiv"))?
+  assert(page.contains("<option value=\"light\" selected>light</option>"))?
+  assert(page.contains("<input id=connections name=connections value=\"8\""))?
+  assert(page.contains("at most 500"))?
+  assert(page.contains("<a href=\"/timeline?over=1m\">"))?
+  assert(page.contains("<form method=post action=\"/load/start\">"))?
+  assert(!page.contains("/load/stop"))?
+  let wrong = changeLoad("", "start", text.parseForm("mix=cpu&rate=fast&connections=2&seconds=5"))
+  assertEqual(wrong.status, 422)?
+  assert(wrong.body.contains("rate is a whole number, not “fast”"))?
+  assert(wrong.body.contains("<option value=\"cpu\" selected>cpu</option>"))?
+  let refused = changeLoad("", "start", text.parseForm("mix=cpu&rate=0&connections=2&seconds=5"))
+  assertEqual(refused.status, 422)?
+  assert(refused.body.contains("there is no host to put load on"))?
+  let stop = changeLoad("", "stop", Map.of())
+  assertEqual(stop.status, 422)?
+  assertEqual(changeLoad("", "bogus", Map.of()).status, 404)?
+  Ok(())
+}
+
+test fn showsTheRunGoingOnWithTheWayToStopIt() -> Result<Unit, Error> {
+  let running = aLoadStatus(Some(aLoadRun(notDeployed: Vector.of("slow").freeze())), Some(aLoadRun(state: "finished")))
+  let page = loadPage("/admin", running, html"", Map.of()).render()
+  assert(page.contains("<meta http-equiv=refresh content=\"2\">"))?
+  assert(page.contains("<h2>Running</h2>"))?
+  assert(!page.contains("<h2>Last run</h2>"))?
+  assert(page.contains("<form method=post action=\"/admin/load/stop\">"))?
+  assert(page.contains("<span class=\"state running\">running</span> — 2.3 s of 10 s"))?
+  assert(page.contains("closed loop on 4 connections"))?
+  assert(page.contains("<li>target app <code>slow</code> is not deployed</li>"))?
+  assert(page.contains("<div class=\"fig is-warn\">"))?
+  assert(page.contains("7 × 429, 2 × 503"))?
+  assert(page.contains("4 × 5xx, 3 unanswered"))?
+  assert(page.contains("<span class=big>1.5 ms</span>"))?
+  assert(page.contains("p50; p99 –"))?
+  Ok(())
+}
+
+test fn showsTheLastRunWhenNoneIsGoingOn() -> Result<Unit, Error> {
+  let done = aLoadStatus(None, Some(aLoadRun(state: "stopped", rate: 50, p50Us: None)))
+  let page = loadPage("", done, html"", Map.of()).render()
+  assert(!page.contains("http-equiv"))?
+  assert(page.contains("<h2>Last run</h2>"))?
+  assert(page.contains("<span class=\"state stopped\">stopped</span> — took 2.3 s"))?
+  assert(page.contains("50 requests a second on up to 4 connections"))?
+  assert(!page.contains("is not deployed"))?
+  assert(!page.contains("/load/stop"))?
+  Ok(())
+}
