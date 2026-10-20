@@ -165,39 +165,118 @@ fn timelineKeep() -> String {
 
 // ------------------------------------------------------------ timeline
 
-/// Which window `?over=` asks for: `10s`, `1m` or `5m`, and a minute for
-/// anything else.
+/// The window a Timeline page shows: the last `over` up to now, which moves
+/// with it (`live`), or a stretch of the past from `fromMs` to `untilMs`
+/// (Unix milliseconds), which does not. `over` is `""` for a window of the
+/// past; a live one's `fromMs` and `untilMs` are what the host answered for
+/// it, and 0 before it has.
+struct TlWindow {
+  live: Bool
+  over: String
+  fromMs: Int
+  untilMs: Int
+}
+
+/// The live window of `over`.
+fn liveWindow(over: String) -> TlWindow {
+  TlWindow(live: true, over: over, fromMs: 0, untilMs: 0)
+}
+
+/// A window of the past, at least [`tlLeast`] long.
+fn pastWindow(fromMs: Int, untilMs: Int) -> TlWindow {
+  let until = if untilMs - fromMs < tlLeast() { fromMs + tlLeast() } else { untilMs }
+  TlWindow(live: false, over: "", fromMs: fromMs, untilMs: until)
+}
+
+/// The shortest window the page shows, in milliseconds: a zoom stops there.
+fn tlLeast() -> Int {
+  10
+}
+
+/// The live windows, shortest first.
+fn timelineOvers() -> Array<String> {
+  ["10s", "1m", "5m", "15m", "1h"]
+}
+
+/// Which live window `?over=` asks for, and a minute for anything else.
 fn timelineWindow(request: web.Request) -> String {
   let asked = request.query.get("over").unwrapOr("").trim()
-  if asked == "10s" || asked == "5m" {
+  if timelineOvers().contains(asked) {
     return asked
   }
   "1m"
 }
 
-/// The window's seconds, as `host.timeline` takes them.
+/// A live window's seconds, as `host.timeline` takes them.
 fn timelineSecs(over: String) -> Int {
   if over == "10s" {
     10
   } else if over == "5m" {
     300
+  } else if over == "15m" {
+    900
+  } else if over == "1h" {
+    3600
   } else {
     60
   }
 }
 
-/// What a window is called in a sentence.
+/// What a live window is called in a sentence.
 fn timelineSpan(over: String) -> String {
   if over == "10s" {
     "the last 10 seconds"
   } else if over == "5m" {
     "the last 5 minutes"
+  } else if over == "15m" {
+    "the last 15 minutes"
+  } else if over == "1h" {
+    "the last hour"
   } else {
     "the last minute"
   }
 }
 
-/// The Timeline page of `app` (`""` for every app) over `over`.
+/// The shortest live window at least `spanMs` long, and the longest for a
+/// span longer than them all: where a window that reaches now goes.
+fn liveOver(spanMs: Int) -> String {
+  for over in timelineOvers() {
+    if timelineSecs(over) * 1000 >= spanMs {
+      return over
+    }
+  }
+  "1h"
+}
+
+/// A whole number of the query string, or `None` for none or not one.
+fn queryInt(request: web.Request, key: String) -> Option<Int> {
+  match Int.parse(request.query.get(key).unwrapOr("").trim()) {
+    Ok(number) => Some(number)
+    Err(_) => None
+  }
+}
+
+/// The window a Timeline page asks for: `?from=&until=` (Unix
+/// milliseconds), `?from=&span=` (seconds) or `?until=` alone (the `span`
+/// before it) is a window of the past — a minute where no `span` says — and
+/// anything else the live window of `?over=`.
+fn timelineAsked(request: web.Request) -> TlWindow {
+  let spanMs = match queryInt(request, "span") {
+    Some(secs) => secs * 1000
+    None => 60000
+  }
+  let until = queryInt(request, "until")
+  match queryInt(request, "from") {
+    Some(from) => pastWindow(from, until.unwrapOr(from + spanMs))
+    None => match until {
+      Some(end) => pastWindow(end - spanMs, end)
+      None => liveWindow(timelineWindow(request))
+    }
+  }
+}
+
+/// The Timeline page of `app` (`""` for every app) over the live window
+/// `over`.
 fn timelineLink(base: String, app: String, over: String) -> String {
   if app == "" {
     return "{base}/timeline?over={over}"
@@ -205,13 +284,130 @@ fn timelineLink(base: String, app: String, over: String) -> String {
   "{base}/timeline?app={text.urlEncode(app)}&over={over}"
 }
 
-/// The three windows, the one shown marked: the row Metrics and Platform
+/// The Timeline page of `app` (`""` for every app) over `window`, live or
+/// of the past.
+fn windowLink(base: String, app: String, window: TlWindow) -> String {
+  if window.live {
+    return timelineLink(base, app, window.over)
+  }
+  let range = "from={window.fromMs}&until={window.untilMs}"
+  if app == "" {
+    return "{base}/timeline?{range}"
+  }
+  "{base}/timeline?app={text.urlEncode(app)}&{range}"
+}
+
+/// `window` moved by half its length, earlier (`toward` -1) or later (1):
+/// held to start no earlier than `earliestMs`, and the live window of its
+/// length where it would reach `nowMs`.
+fn panned(window: TlWindow, toward: Int, nowMs: Int, earliestMs: Int) -> TlWindow {
+  let span = window.untilMs - window.fromMs
+  let moved = window.fromMs + toward * (span / 2)
+  let from = if moved < earliestMs { earliestMs } else { moved }
+  if from + span >= nowMs {
+    return liveWindow(liveOver(span))
+  }
+  pastWindow(from, from + span)
+}
+
+/// `window` five times as long around its middle, at most all that is kept
+/// (`earliestMs` to `nowMs`), and the live window of its length where it
+/// would reach now; a live window is the next longer one. `None` past the
+/// longest.
+fn zoomedOut(window: TlWindow, nowMs: Int, earliestMs: Int) -> Option<TlWindow> {
+  if window.live {
+    let at = timelineOvers().indexOf(window.over).unwrapOr(0)
+    return match timelineOvers().get(at + 1) {
+      Some(longer) => Some(liveWindow(longer))
+      None => None
+    }
+  }
+  let wide = (window.untilMs - window.fromMs) * 5
+  let kept = nowMs - earliestMs
+  let span = if wide > kept { kept } else { wide }
+  let centred = (window.fromMs + window.untilMs) / 2 - span / 2
+  let from = if centred < earliestMs { earliestMs } else { centred }
+  if from + span >= nowMs {
+    return Some(liveWindow(liveOver(span)))
+  }
+  Some(pastWindow(from, from + span))
+}
+
+/// The window a fifth as long as `window` around the middle of its band
+/// `band` of `bands`, held inside it and before `nowMs`, and at least
+/// [`tlLeast`] long: what clicking that band of the picture opens.
+fn zoomedIn(window: TlWindow, band: Int, bands: Int, nowMs: Int) -> TlWindow {
+  let span = window.untilMs - window.fromMs
+  let narrow = if span / 5 < tlLeast() { tlLeast() } else { span / 5 }
+  let middle = window.fromMs + span * (2 * band + 1) / (2 * bands)
+  let last = if window.untilMs < nowMs { window.untilMs } else { nowMs }
+  var from = middle - narrow / 2
+  if from + narrow > last {
+    from = last - narrow
+  }
+  if from < window.fromMs {
+    from = window.fromMs
+  }
+  pastWindow(from, from + narrow)
+}
+
+/// A window of the past from `fromMs` to `untilMs` with `pad` more on
+/// either side: what a merged bar, or a request, opens.
+fn around(fromMs: Int, untilMs: Int, pad: Int) -> TlWindow {
+  pastWindow(fromMs - pad, untilMs + pad)
+}
+
+/// A length of time in words: `250 ms`, `2.5 s`, `5 min`, `1 h 30 min`.
+fn lengthSaid(ms: Int) -> String {
+  if ms < 1000 {
+    "{ms} ms"
+  } else if ms < 60000 && ms % 1000 == 0 {
+    "{ms / 1000} s"
+  } else if ms < 60000 {
+    "{ms / 1000}.{ms % 1000 / 100} s"
+  } else if ms < 3600000 && ms % 60000 == 0 {
+    "{ms / 60000} min"
+  } else if ms < 3600000 {
+    "{ms / 60000} min {ms % 60000 / 1000} s"
+  } else if ms % 3600000 == 0 {
+    "{ms / 3600000} h"
+  } else {
+    "{ms / 3600000} h {ms % 3600000 / 60000} min"
+  }
+}
+
+/// A time on the clock, JST: `10:14:03`, and `10:14:03.120` where the
+/// window it is read in is shorter than 10 seconds (`spanUs`).
+fn clockLabel(unixMs: Int, spanUs: Int) -> String {
+  let stamp = jstStamp(unixMs)
+  let end = if spanUs < 10000000 { 23 } else { 19 }
+  stamp.sliceBytes(11, end).unwrapOr(stamp)
+}
+
+/// A time on the clock to the millisecond, JST: what a hover says.
+fn clockMillis(unixMs: Int) -> String {
+  clockLabel(unixMs, 0)
+}
+
+/// What a window is called in a sentence: `the last 5 minutes`, or its
+/// date and times, JST: `2026-10-20 10:14:00 – 10:14:10 JST (10 s)`.
+fn windowSaid(window: TlWindow) -> String {
+  if window.live {
+    return timelineSpan(window.over)
+  }
+  let spanUs = (window.untilMs - window.fromMs) * 1000
+  let stamp = jstStamp(window.fromMs)
+  let day = stamp.sliceBytes(0, 10).unwrapOr(stamp)
+  "{day} {clockLabel(window.fromMs, spanUs)} – {clockLabel(window.untilMs, spanUs)} JST ({lengthSaid(window.untilMs - window.fromMs)})"
+}
+
+/// The live windows, the one shown marked: the row Metrics and Platform
 /// carry, with this page's windows.
-fn timelineSteps(base: String, app: String, over: String) -> Html {
+fn timelineSteps(base: String, app: String, shown: TlWindow) -> Html {
   var steps = Vector.of()
-  for name in Vector.of("10s", "1m", "5m").freeze() {
+  for name in timelineOvers() {
     let label = timelineSpan(name)
-    if name == over {
+    if shown.live && name == shown.over {
       steps.push(html"<b>{label}</b>")
     } else {
       steps.push(html"""<a href="{timelineLink(base, app, name)}">{label}</a>""")
@@ -220,14 +416,46 @@ fn timelineSteps(base: String, app: String, over: String) -> Html {
   html"<p class=actions><span class=muted>window:</span> {html.join(steps.freeze(), html" ")}</p>"
 }
 
+/// Moving the window, each a link: half a window earlier and later, five
+/// times as wide, and back to now — those that would go nowhere left out:
+/// no earlier than what is kept, no later than now.
+fn timelineMoves(base: String, app: String, shown: TlWindow, nowMs: Int, earliestMs: Int) -> Html {
+  var moves = Vector.of()
+  if shown.fromMs > earliestMs {
+    moves.push(html"""<a href="{windowLink(base, app, panned(shown, -1, nowMs, earliestMs))}">← earlier</a>""")
+  }
+  if !shown.live {
+    moves.push(html"""<a href="{windowLink(base, app, panned(shown, 1, nowMs, earliestMs))}">later →</a>""")
+  }
+  match zoomedOut(shown, nowMs, earliestMs) {
+    Some(wider) => moves.push(html"""<a href="{windowLink(base, app, wider)}">zoom out</a>""")
+    None => {}
+  }
+  if !shown.live {
+    let now = liveWindow(liveOver(shown.untilMs - shown.fromMs))
+    moves.push(html"""<a href="{windowLink(base, app, now)}">now</a>""")
+  }
+  html"<p class=actions><span class=muted>move:</span> {html.join(moves.freeze(), html" ")}</p>"
+}
+
+/// A window of the past does not reload — it would not change — and its
+/// control says so, and is the way back to the live window `live`.
+fn pastReload(link: String, live: String) -> Reload {
+  Reload(
+    seconds: 0,
+    link: link,
+    control: html"""<p class=reload>viewing a past window · <a href="{live}">back to now</a></p>""",
+  )
+}
+
 /// `all apps`, then every app with a request in the window: the one shown
-/// filled.
-fn timelineChips(base: String, apps: Array<String>, app: String, over: String) -> Html {
+/// filled. Each keeps the window.
+fn timelineChips(base: String, apps: Array<String>, app: String, shown: TlWindow) -> Html {
   var out = Vector.of()
-  out.push(html"""<a href="{timelineLink(base, "", over)}"{current(app == "")}>all apps</a>""")
+  out.push(html"""<a href="{windowLink(base, "", shown)}"{current(app == "")}>all apps</a>""")
   out.push(html.only(apps.length() > 0, html"<span class=sep></span>"))
   for name in apps {
-    out.push(html"""<a href="{timelineLink(base, name, over)}"{current(name == app)}>{name}</a>""")
+    out.push(html"""<a href="{windowLink(base, name, shown)}"{current(name == app)}>{name}</a>""")
   }
   html"<nav class=pick><span class=lbl>app</span>{out.freeze()}</nav>"
 }
@@ -450,9 +678,10 @@ fn laneMarks(request: host.TimelineRequest, since: Int, until: Int, top: Int, ro
   marks.freeze()
 }
 
-/// What a lane says on hover: which request, how it ended, how long.
+/// What a lane says on hover: which request, how it ended, how long, and
+/// when it arrived (JST).
 fn laneTitle(request: host.TimelineRequest) -> String {
-  "#{request.id} {request.app}: {request.method} {request.path} — {requestStatus(request)}, {requestLatency(request)}{heapSaid(request)}"
+  "#{request.id} {request.app}: {request.method} {request.path} — {requestStatus(request)}, {requestLatency(request)}{heapSaid(request)}, arrived {clockMillis(request.startedUnixMs + request.arrivedUs / 1000)}"
 }
 
 /// What a request's heap came to, for a hover: its collections and what it
@@ -555,10 +784,130 @@ fn axis(since: Int, until: Int, from: Int, to: Int, labelYs: Array<Int>) -> Html
   html"{out.freeze()}"
 }
 
-/// The picture of a window: the workers, the three strips, the requests.
-fn timelinePicture(base: String, timeline: host.Timeline, order: Array<String>) -> Html {
+/// The spacing of a clock's ticks over `spanUs` with about `count` of them,
+/// in microseconds: the least of the steps a clock is read in that does.
+fn clockStep(spanUs: Int, count: Int) -> Int {
+  for step in [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000, 2000000, 5000000, 10000000, 15000000, 30000000, 60000000, 120000000, 300000000, 600000000, 900000000, 1800000000, 3600000000] {
+    if step * count >= spanUs {
+      return step
+    }
+  }
+  3600000000
+}
+
+/// The ticks of the time axis of a window from `since` to `until` (the
+/// host's microseconds, which began at `startedMs`), at whole steps of the
+/// clock — :00, :15, :30, :45 for a quarter of an hour, JST — as grid lines
+/// from `from` to `to` and the time at each of `labelYs`.
+fn clockAxis(since: Int, until: Int, startedMs: Int, from: Int, to: Int, labelYs: Array<Int>) -> Html {
+  let span = until - since
+  let step = clockStep(span, 6)
+  let origin = startedMs * 1000
+  var out = Vector.of()
+  var at = (origin + since + step - 1) / step * step - origin
+  while at <= until {
+    let x = tlX(at, since, until)
+    out.push(html"""<line class=tl-grid x1="{x}" y1="{from}" x2="{x}" y2="{to}"/>""")
+    for y in labelYs {
+      out.push(html"""<text x="{x}" y="{y}" text-anchor=middle>{clockLabel((origin + at) / 1000, span)}</text>""")
+    }
+    at = at + step
+  }
+  html"{out.freeze()}"
+}
+
+/// How many bands the time axis is cut into, to zoom in.
+fn tlBands() -> Int {
+  10
+}
+
+/// The bands that zoom in: each a tenth of the time axis, over its labels
+/// (at `labelYs`) and the strips (`top` to `bottom`), a link to a fifth of
+/// `shown` around it. A pointer over one lights it.
+fn zoomBands(base: String, app: String, shown: TlWindow, nowMs: Int, top: Int, bottom: Int, labelYs: Array<Int>) -> Html {
+  let width = tlPlot() / tlBands()
+  var out = Vector.of()
+  var band = 0
+  while band < tlBands() {
+    let x = tlLeft() + band * tlPlot() / tlBands()
+    let zoom = zoomedIn(shown, band, tlBands(), nowMs)
+    let spanUs = (zoom.untilMs - zoom.fromMs) * 1000
+    var rects = Vector.of()
+    for y in labelYs {
+      rects.push(html"""<rect class=tl-band x="{x}" y="{y - 12}" width="{width}" height="16"/>""")
+    }
+    rects.push(html"""<rect class=tl-band x="{x}" y="{top}" width="{width}" height="{bottom - top}"/>""")
+    out.push(html"""<a href="{windowLink(base, app, zoom)}"><title>zoom in to {clockLabel(zoom.fromMs, spanUs)} – {clockLabel(zoom.untilMs, spanUs)}</title>{rects.freeze()}</a>""")
+    band = band + 1
+  }
+  html"{out.freeze()}"
+}
+
+/// How many of a merged bar's runs each app's were: `hello 3200, crunch 2100`.
+fn runsByApp(segment: host.WorkerRun) -> String {
+  var parts = Vector.of()
+  for app in segment.apps {
+    parts.push("{app.app} {app.runs}")
+  }
+  ", ".join(parts.freeze())
+}
+
+/// What a worker's bar says on hover: one request's run, or the runs merged
+/// into it — whose, and how much of it the worker was busy.
+fn segmentTitle(segment: host.WorkerRun, startedMs: Int) -> String {
+  let at = clockMillis(startedMs + segment.fromUs / 1000)
+  let length = millis(segment.toUs - segment.fromUs)
+  if segment.runs > 1 {
+    return "{segment.runs} runs merged ({runsByApp(segment)}), busy {millis(segment.busyUs)} ms of {length} ms on worker #{segment.worker} from {at} — zoom in to tell them apart"
+  }
+  "{segment.app} #{segment.id}, {length} ms on worker #{segment.worker} from {at}"
+}
+
+/// A merged bar's fill: its app's colour, or hatched for runs of more than
+/// one app. The pattern is the `fill` the rect carries, which a colour's
+/// class overrides.
+fn segmentClass(segment: host.WorkerRun, order: Array<String>) -> String {
+  if segment.apps.length() > 1 {
+    return "tl-mix"
+  }
+  "tl-c{paletteSlot(order, segment.app)}"
+}
+
+/// One bar on a worker's lane, `height` high from `top`. A run of one
+/// request is its app's colour, the way to the request. Runs merged — less
+/// than a thousandth of the window apart, too close to draw apart — are a
+/// faint band over their stretch with a bar in it as high as the worker was
+/// busy, hatched where they are of several apps, the way to the stretch
+/// zoomed in: never one solid bar that reads as one request holding it.
+fn segmentBar(base: String, app: String, segment: host.WorkerRun, since: Int, until: Int, startedMs: Int, top: Int, height: Int, order: Array<String>) -> Html {
+  let x0 = tlX(segment.fromUs, since, until)
+  let x1 = tlX(segment.toUs, since, until)
+  let width = if x1 - x0 < 2 { 2 } else { x1 - x0 }
+  let title = segmentTitle(segment, startedMs)
+  if segment.runs <= 1 {
+    return html"""<a href="{base}/requests/{segment.id}"><rect class="tl-c{paletteSlot(order, segment.app)}" x="{x0}" y="{top}" width="{width}" height="{height}"><title>{title}</title></rect></a>"""
+  }
+  let busy = height * segment.occupancyMilli / 1000
+  let tall = if busy < 2 { 2 } else { busy }
+  let fromMs = startedMs + segment.fromUs / 1000
+  let untilMs = startedMs + segment.toUs / 1000 + 1
+  let pad = if (untilMs - fromMs) / 10 < 5 { 5 } else { (untilMs - fromMs) / 10 }
+  html"""<a href="{windowLink(base, app, around(fromMs, untilMs, pad))}"><title>{title}</title><rect class=tl-span x="{x0}" y="{top}" width="{width}" height="{height}"/><rect class="{segmentClass(segment, order)}" fill="url(#tl-mix)" x="{x0}" y="{top + height - tall}" width="{width}" height="{tall}"/></a>"""
+}
+
+/// The hatching of runs of several apps merged, defined once in the
+/// picture: a rect's `fill` names it.
+fn mixPattern() -> Html {
+  html"""<defs><pattern id=tl-mix width=6 height=6 patternUnits=userSpaceOnUse patternTransform="rotate(45)"><rect class=tl-mix-bg width=6 height=6 /><line class=tl-mix-ln x1=0 y1=0 x2=0 y2=6 /></pattern></defs>"""
+}
+
+/// The picture of a window: the workers, the three strips, the requests,
+/// under a time axis of the clock (JST). A tenth of the axis or of the
+/// strips is the way to a fifth of the window around it ([`zoomBands`]).
+fn timelinePicture(base: String, app: String, timeline: host.Timeline, order: Array<String>, shown: TlWindow, nowMs: Int) -> Html {
   let since = timeline.sinceUs
   let until = timeline.untilUs
+  let startedMs = timeline.startedUnixMs
   let workerLane = 20
   let workersTop = 42
   var y = workersTop + timeline.workers * workerLane + 6
@@ -573,14 +922,9 @@ fn timelinePicture(base: String, timeline: host.Timeline, order: Array<String>) 
     w = w + 1
   }
   for segment in timeline.segments {
-    let x0 = tlX(segment.fromUs, since, until)
-    let x1 = tlX(segment.toUs, since, until)
-    let width = if x1 - x0 < 2 { 2 } else { x1 - x0 }
-    let merged = if segment.runs > 1 { ", {segment.runs} runs close together, the first #{segment.id}" } else { "" }
-    workers.push(html"""
-      <a href="{base}/requests/{segment.id}"><rect class="tl-c{paletteSlot(order, segment.app)}" x="{x0}" y="{workersTop + segment.worker * workerLane + 3}" width="{width}" height="{workerLane - 6}"><title>{segment.app} #{segment.id}, {millis(segment.toUs - segment.fromUs)} ms on worker #{segment.worker}{merged}</title></rect></a>
-      """)
+    workers.push(segmentBar(base, app, segment, since, until, startedMs, workersTop + segment.worker * workerLane + 3, workerLane - 6, order))
   }
+  let stripsTop = y
   let each = "means over {millis(timeline.bucketUs)} ms"
   let runningHeight = if timeline.workers * 12 > 24 { timeline.workers * 12 } else { 24 }
   let running = strip(
@@ -618,12 +962,15 @@ fn timelinePicture(base: String, timeline: host.Timeline, order: Array<String>) 
     at = at + 1
   }
   let height = requestsTop + count * row + 8
+  let labelYs = [12, requestsTop - 24]
   html"""
     <svg class=timeline viewBox="0 0 {tlWidth()} {height}" role=img aria-label="the workers and the requests over the window">
-      {axis(since, until, 16, height - 4, [12, requestsTop - 24])}
+      {mixPattern()}
+      {clockAxis(since, until, startedMs, 16, height - 4, labelYs)}
       <text class=tl-head x="{tlLeft()}" y="{workersTop - 8}">Workers: a bar wherever one runs a request, in its app's colour</text>
       {workers.freeze()}
       {running}{parked}{waiting}
+      {zoomBands(base, app, shown, nowMs, stripsTop, y - 8, labelYs)}
       <text class=tl-head x="{tlLeft()}" y="{requestsTop - 8}">Requests, in arrival order: bar = running, thin line = parked, grey = waiting for a worker</text>
       <text x="{tlLeft() - 6}" y="{requestsTop + row}" text-anchor=end>first</text>
       <text x="{tlLeft() - 6}" y="{requestsTop + count * row}" text-anchor=end>last</text>
@@ -658,6 +1005,10 @@ fn timelineLegend(order: Array<String>) -> Html {
   for app in order {
     keys.push(appKey(paletteSlot(order, app), app))
   }
+  keys.push(markKey(
+    html"""<rect class=tl-span width=16 height=12 /><rect class=tl-mix fill="url(#tl-mix)" y=5 width=16 height=7 />""",
+    "runs merged, as high as the worker was busy; hatched for several apps",
+  ))
   keys.push(markKey(html"<line class=tl-wait x1=0 y1=6 x2=16 y2=6 />", "waiting for a worker"))
   keys.push(markKey(html"<line class=\"tl-park tl-lx\" x1=0 y1=6 x2=16 y2=6 />", "parked (its app's colour)"))
   keys.push(markKey(diamond(8, 6, 4), "resumed on another worker"))
@@ -670,7 +1021,7 @@ fn timelineLegend(order: Array<String>) -> Html {
 
 /// Each app's requests in the window: how many ended, how many of those
 /// were errors or turned away, and how long the answered took.
-fn timelineApps(base: String, timeline: host.Timeline, order: Array<String>, over: String) -> Html {
+fn timelineApps(base: String, timeline: host.Timeline, order: Array<String>, shown: TlWindow) -> Html {
   if timeline.apps.length() == 0 {
     return html"<p class=muted>No request ended in this window yet.</p>"
   }
@@ -678,7 +1029,7 @@ fn timelineApps(base: String, timeline: host.Timeline, order: Array<String>, ove
   for app in timeline.apps {
     rows.push(html"""
       <tr>
-        <td class=title data-label=app><a href="{timelineLink(base, app.app, over)}">{appKey(paletteSlot(order, app.app), app.app)}</a></td>
+        <td class=title data-label=app><a href="{windowLink(base, app.app, shown)}">{appKey(paletteSlot(order, app.app), app.app)}</a></td>
         <td class=nums data-label=requests>{app.requests}</td>
         <td class=nums data-label=errors>{app.errors}</td>
         <td class=nums data-label=rejected>{app.rejected}</td>
@@ -718,19 +1069,46 @@ fn timelineFigures(timeline: host.Timeline) -> Html {
     """
 }
 
-/// The Timeline page: the picture of `?over=` (10 s, a minute, 5 minutes)
-/// of every app's requests or `?app=`'s, then the figures and each app's.
+/// The window's answer of `app` (`""` for every app's).
+fn timelineOf(app: String, window: TlWindow) -> host.Timeline {
+  if window.live {
+    host.timeline(app, timelineSecs(window.over))
+  } else {
+    host.timelineRange(app, window.fromMs, window.untilMs)
+  }
+}
+
+/// The Timeline page: the picture of a window — the live `?over=` (10 s to
+/// an hour), or one of the past, `?from=&until=` — of every app's requests
+/// or `?app=`'s, then the figures and each app's. A live window reloads
+/// every 5 seconds; one of the past does not.
 fn timelinePage(base: String, request: web.Request) -> Html {
-  let over = timelineWindow(request)
+  let asked = timelineAsked(request)
   let app = request.query.get("app").unwrapOr("").trim()
-  let span = timelineSpan(over)
   // Every app's window as well as the one asked for: its apps are the
   // chips, and their order is the colours, so an app is the same colour
   // whichever of them is shown.
-  let all = host.timeline("", timelineSecs(over))
-  let timeline = if app == "" { all } else { host.timeline(app, timelineSecs(over)) }
+  let all = timelineOf("", asked)
+  let timeline = if app == "" { all } else { timelineOf(app, asked) }
   let order = timelineOrder(deployedApps(), all)
-  let reload = reloading(timelineLink(base, app, over), 5, paused(request))
+  let startedMs = all.startedUnixMs
+  let nowMs = startedMs + all.nowUs / 1000
+  let kept = nowMs - all.keepSecs * 1000
+  let earliestMs = if kept < startedMs { startedMs } else { kept }
+  // The window as the host held it: between its start and now.
+  let shown = TlWindow(
+    live: asked.live,
+    over: asked.over,
+    fromMs: startedMs + all.sinceUs / 1000,
+    untilMs: startedMs + all.untilUs / 1000,
+  )
+  let link = windowLink(base, app, shown)
+  let reload = if shown.live {
+    reloading(link, 5, paused(request))
+  } else {
+    pastReload(link, windowLink(base, app, liveWindow(liveOver(shown.untilMs - shown.fromMs))))
+  }
+  let span = windowSaid(shown)
   let summary = html"Where each request waited, ran, parked and resumed, over {span}."
   let said = html"""
     The host records every request in memory — the last {timelineKeep()}, its path without
@@ -738,14 +1116,16 @@ fn timelinePage(base: String, request: web.Request) -> Html {
     request; under them how many workers ran, how many runs were parked at a host call (a
     sleep, a fetch) holding no worker, and how many requests waited for a worker; then the
     newest requests, one lane each in arrival order. Hover a bar or a lane for what it is; a
-    lane is the way to its request's phases. Times are from the window's start.
+    lane is the way to its request's phases. Times are JST. Move back and forth with the links
+    over the picture, and zoom in by clicking a tenth of the time axis or of the strips.
     """
   let head = html"""
     <h1>Timeline</h1>
     {about(summary, said)}
     {reload.control}
-    {timelineChips(base, order, app, over)}
-    {timelineSteps(base, app, over)}
+    {timelineChips(base, order, app, shown)}
+    {timelineSteps(base, app, shown)}
+    {timelineMoves(base, app, shown, nowMs, earliestMs)}
     """
   if timeline.requests == 0 {
     let whose = if app == "" { "" } else { " of {app}" }
@@ -762,10 +1142,10 @@ fn timelinePage(base: String, request: web.Request) -> Html {
       reload.link,
     )
   }
-  let shown = timeline.lanes.length()
+  let shownLanes = timeline.lanes.length()
   let newest = html.only(
-    timeline.requests > shown,
-    html"<p class=muted>Showing the newest {shown} of {timeline.requests} requests in the window.</p>",
+    timeline.requests > shownLanes,
+    html"<p class=muted>Showing the last {shownLanes} of {timeline.requests} requests in this window — zoom in to see the rest.</p>",
   )
   layout(
     base,
@@ -775,9 +1155,10 @@ fn timelinePage(base: String, request: web.Request) -> Html {
       {head}
       {timelineFigures(timeline)}
       {timelineLegend(order)}
-      {timelinePicture(base, timeline, order)}
+      {timelinePicture(base, app, timeline, order, shown, nowMs)}
+      <p class=muted>Click a tenth of the time axis or of the strips — it lights up under the pointer — to zoom in on it, and a merged bar to zoom in on its stretch.</p>
       {newest}
-      <h2>Apps</h2>{timelineApps(base, timeline, order, over)}
+      <h2>Apps</h2>{timelineApps(base, timeline, order, shown)}
       """,
     reload.seconds,
     reload.link,
@@ -886,6 +1267,20 @@ fn requestPicture(request: host.TimelineRequest, slot: String) -> Html {
     """
 }
 
+/// The window of the past around `request`, from its arrival to its end
+/// (or now) with half its length — at least a tenth of a second — on
+/// either side: what "show on the timeline" opens.
+fn requestWindow(request: host.TimelineRequest) -> TlWindow {
+  let ended = match request.endedUs {
+    Some(ended) => ended
+    None => request.nowUs
+  }
+  let fromMs = request.startedUnixMs + request.arrivedUs / 1000
+  let untilMs = request.startedUnixMs + ended / 1000 + 1
+  let half = (untilMs - fromMs) / 2
+  around(fromMs, untilMs, if half < 100 { 100 } else { half })
+}
+
 /// One request of the timeline: its phases, in words and drawn, and what
 /// it came to.
 fn requestPage(base: String, request: host.TimelineRequest) -> Html {
@@ -918,6 +1313,7 @@ fn requestPage(base: String, request: host.TimelineRequest) -> Html {
       <p class=sub><code>{request.method} {request.path}</code> · {requestStatus(request)} · {requestLatency(request)}</p>
       <p class=lead>{phaseSentence(request.phases)}</p>
       {requestPicture(request, paletteSlot(colourOrder(deployedApps(), [request.app]), request.app))}
+      <p class=actions><a href="{windowLink(base, "", requestWindow(request))}">show on the timeline</a></p>
       <h2>Phases</h2>{phaseList(request)}
       <h2>What it came to</h2>{facts}
       """,

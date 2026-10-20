@@ -1371,7 +1371,7 @@ fn the_timeline_pages_show_where_each_request_was() {
         "<svg class=timeline",
         // A lane is the way to its request, with what it is on hover.
         "<a href=\"/requests/102\"><title>#102 slow: GET /slow/sleep — 200, 1080.0 ms, 0 collections, \
-         1.5 MiB allocated</title>",
+         1.5 MiB allocated, arrived 23:19:52.300</title>",
         // 102 resumed on another worker; 105's deadline; 107 turned away.
         "class=tl-moved",
         "class=tl-crit",
@@ -1395,6 +1395,60 @@ fn the_timeline_pages_show_where_each_request_was() {
     let slow = ui(&host, "GET", "/timeline?app=slow&over=10s", &authed(), "").body;
     assert!(slow.contains("/requests/105\""), "{slow}");
     assert!(!slow.contains("/requests/101\""), "{slow}");
+    // The live window reloads, has nothing later, and zooms out to 5 min.
+    for expected in [
+        "<meta http-equiv=refresh content=\"5; url=/timeline?over=10s\">",
+        "<a href=\"/timeline?over=1m\">zoom out</a>",
+        // A tenth of the axis zooms in; 23:19:50–23:20:00 is the window.
+        "<a href=\"/timeline?from=1790000390000&amp;until=1790000392000\"><title>zoom in to \
+         23:19:50.000 – 23:19:52.000</title>",
+        ">23:19:52<",
+    ] {
+        assert!(
+            picture.body.contains(expected),
+            "no `{expected}` in:\n{}",
+            picture.body
+        );
+    }
+    assert!(!picture.body.contains("later →"));
+
+    // A window of the past: two seconds of it, still; 102 ran in it and 110
+    // arrived after it.
+    let past = ui(
+        &host,
+        "GET",
+        "/timeline?from=1790000392000&until=1790000394000",
+        &authed(),
+        "",
+    );
+    assert_eq!(past.status, 200, "{}", past.body);
+    for expected in [
+        "over 2026-09-21 23:19:52.000 – 23:19:54.000 JST (2 s).",
+        "<p class=reload>viewing a past window · <a href=\"/timeline?over=10s\">back to now</a></p>",
+        "<a href=\"/timeline?from=1790000391000&amp;until=1790000393000\">← earlier</a>",
+        "<a href=\"/timeline?from=1790000393000&amp;until=1790000395000\">later →</a>",
+        "<a href=\"/timeline?from=1790000388000&amp;until=1790000398000\">zoom out</a>",
+        "<a href=\"/timeline?over=10s\">now</a>",
+        ">23:19:53.000<",
+        "/requests/102\"",
+        // The chips keep the window.
+        "<a href=\"/timeline?app=slow&amp;from=1790000392000&amp;until=1790000394000\">slow</a>",
+    ] {
+        assert!(past.body.contains(expected), "no `{expected}` in:\n{}", past.body);
+    }
+    assert!(!past.body.contains("http-equiv"), "{}", past.body);
+    assert!(!past.body.contains("/requests/110\""), "{}", past.body);
+    // One app's, by `span` in seconds.
+    let slow = ui(
+        &host,
+        "GET",
+        "/timeline?app=slow&from=1790000392000&span=2",
+        &authed(),
+        "",
+    )
+    .body;
+    assert!(slow.contains("/requests/102\""), "{slow}");
+    assert!(!slow.contains("/requests/101\""), "{slow}");
 
     let moved = ui(&host, "GET", "/requests/102", &authed(), "");
     assert_eq!(moved.status, 200, "{}", moved.body);
@@ -1403,6 +1457,8 @@ fn the_timeline_pages_show_where_each_request_was() {
         "parked on timer.sleep 1000.0 ms (answered)",
         "resumed on #1 (moved), ran 30.0 ms",
         "<a href=\"/timeline?app=slow&amp;over=1m\">timeline of slow</a>",
+        // Arrived at 392.3 s, ended at 393.38: half of that either side.
+        "<a href=\"/timeline?from=1790000391760&amp;until=1790000393921\">show on the timeline</a>",
     ] {
         assert!(
             moved.body.contains(expected),
