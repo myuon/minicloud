@@ -1294,14 +1294,26 @@ test fn putsTicksAtOneTwoOrFiveOfAPowerOfTen() -> Result<Unit, Error> {
   Ok(())
 }
 
-test fn colorsAnAppByItsPlaceInTheSummary() -> Result<Unit, Error> {
-  let order = ["hello", "notes", "a", "b", "c", "d", "e"]
-  assertEqual(paletteSlot(order, "hello"), "0")?
-  assertEqual(paletteSlot(order, "notes"), "1")?
-  assertEqual(paletteSlot(order, "d"), "5")?
-  // Past the sixth, and an app not there, are grey.
-  assertEqual(paletteSlot(order, "e"), "x")?
+test fn colorsAnAppByItsPlaceInTheOrder() -> Result<Unit, Error> {
+  let order = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+  assertEqual(paletteSlot(order, "a"), "0")?
+  assertEqual(paletteSlot(order, "j"), "9")?
+  // Past the tenth the colours begin again; an app not there is grey.
+  assertEqual(paletteSlot(order, "k"), "0")?
+  assertEqual(paletteSlot(order, "l"), "1")?
   assertEqual(paletteSlot(order, "nobody"), "x")?
+  Ok(())
+}
+
+test fn ordersColoursByNameWhateverTheWindowHolds() -> Result<Unit, Error> {
+  let deployed = ["watch", "admin", "hello", "algo"]
+  // The same order whichever app the window saw first.
+  assertEqual(colourOrder(deployed, ["hello", "watch"]), ["admin", "algo", "hello", "watch"])?
+  assertEqual(colourOrder(deployed, ["watch", "hello", "admin"]), ["admin", "algo", "hello", "watch"])?
+  // An app no longer deployed comes after them, by name, once.
+  assertEqual(colourOrder(deployed, ["zed", "old", "zed", "hello"]), ["admin", "algo", "hello", "watch", "old", "zed"])?
+  // Where the host cannot list its apps, the window's by name.
+  assertEqual(colourOrder([], ["slow", "hello", "slow"]), ["hello", "slow"])?
   Ok(())
 }
 

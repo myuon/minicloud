@@ -9,7 +9,7 @@
 //!
 //! | operation | answers |
 //! | --- | --- |
-//! | `host.apps()` | `Array<host.App>`: every app the host has, in load order — its state (`serving`, `disabled`, `refused`, `removed`) and why, version, tier, hostnames, what its entry requires and what it is granted (and which of those grants the admin changed), its fetch allowlist, its limits, its counters and its recent errors |
+//! | `host.apps()` | `Array<host.App>`: every app the host has (none where there is no host, as under `minicloud test`), in load order — its state (`serving`, `disabled`, `refused`, `removed`) and why, version, tier, hostnames, what its entry requires and what it is granted (and which of those grants the admin changed), its fetch allowlist, its limits, its counters and its recent errors |
 //! | `host.capabilities()` | `Array<String>`: every capability the host's modules declare, the ones a grant may name |
 //! | `host.selfVersion()` | `String`: the version of the admin app itself, the same string its answers carry as `x-cove-app-version`; `""` when the host cannot say |
 //! | `host.code(app, limit)` | `Array<host.CodeFile>`: the files of the version the app is running ([`crate::code`]) — `app.toml`, then its `.cove` files, then its `assets/` — at most `limit` files (0–[`crate::code::CODE_FILES`]) as a tree, each row saying its depth, its size and how the one on disk compares, and no text |
@@ -1871,6 +1871,11 @@ impl HostApi for AdminHost {
             return Ok(Value::array(
                 rows.into_iter().skip(skip).map(platform_point_value),
             ));
+        }
+        // No apps where there is no host (`minicloud test`), as the timeline
+        // is empty there: a page that only wants their names can go on.
+        if op == "apps" && self.control.is_none() {
+            return Ok(Value::array(std::iter::empty()));
         }
         let control = self.control()?;
         match op {
