@@ -182,17 +182,47 @@ fn the_admin_app_reads_another_apps_store_and_log_and_makes_no_store() {
     assert!(!apps.data.join("hello").join("kv.sqlite3").exists());
 }
 
-#[test]
-fn the_admin_app_reads_an_apps_history_and_a_host_with_none_answers_nothing() {
-    let apps = apps(&[control(), sample("hello")]);
-    let host = start(&apps, 2);
+/// The first of three samples a minute apart, kept inside one clock hour and
+/// inside the last hour. Sampling across the top of the hour rolls the hour
+/// into the hour table, so a test run at hh:00-hh:02 would see rows it does
+/// not expect.
+fn sample_base_at(now: i64) -> i64 {
+    let hour = now - now % 3600;
+    let minute = now - now % 60;
+    if now - hour >= 300 {
+        minute - 180
+    } else {
+        hour - 1800
+    }
+}
+
+fn sample_base() -> i64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
+    sample_base_at(now)
+}
+
+#[test]
+fn sample_times_never_cross_an_hour_boundary() {
+    let hour = 1_792_465_200;
+    for offset in [30, 90, 3570, 299, 300] {
+        let now = hour + offset;
+        let base = sample_base_at(now);
+        assert_eq!(base % 60, 0);
+        assert_eq!(base / 3600, (base + 120) / 3600, "offset {offset}");
+        assert!(base >= now - 3600 && base + 120 <= now, "offset {offset}");
+    }
+}
+
+#[test]
+fn the_admin_app_reads_an_apps_history_and_a_host_with_none_answers_nothing() {
+    let apps = apps(&[control(), sample("hello")]);
+    let host = start(&apps, 2);
     // Minutes are taken for the minute that ended, at a time of the test's
     // own; the first call has nothing to take a difference from.
-    let minute = now - now % 60;
+    let minute = sample_base() + 180;
     host.sample_now(minute - 180);
     for (n, requests) in [(1, 3), (2, 0)] {
         for _ in 0..requests {
@@ -1232,11 +1262,7 @@ fn the_platform_page_shows_the_host_against_its_limits() {
             ..Default::default()
         }
     }));
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    let minute = now - now % 60;
+    let minute = sample_base() + 180;
     host.sample_now(minute - 180);
     for (n, usec) in [(1, 30_000_000), (2, 36_000_000)] {
         cpu.store(usec, std::sync::atomic::Ordering::Relaxed);
