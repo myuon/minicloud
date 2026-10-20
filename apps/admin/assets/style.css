@@ -338,7 +338,16 @@ li.app .flags{justify-content:flex-start;margin-top:.15em}
 li.app .count{font-size:13px}
 }
 /* the metrics page: the chart is the width of the page and as tall as its own box makes it — no max-height, which would letterbox it: the viewBox would be fitted to the shorter side and the line would stop short of both edges. two lines on one chart, told apart by their dashes as well as their colour — someone may not see colour — and drawn at the width of the page, which is what the viewBox is for. non-scaling-stroke keeps a line as thick on a phone as on a desk, where scaling the box down would thin it to a hair */
-svg.chart{display:block;width:100%;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+svg.chart{display:block;width:100%;max-width:56rem;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+/* the scale, the times and the ends of the lines. The text is in the units of the viewBox (720 wide), so it is scaled with the chart: about 13px on a desk, and set larger below where the chart is drawn smaller, so that on a phone, where it is half its size, it is still about 12px. Each label has a halo of the card's colour, so a line that crosses it does not cross it out. The grid is recessive, and a phone shows every other time */
+svg.chart text{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;paint-order:stroke;stroke:var(--card);stroke-width:3px;stroke-linejoin:round}
+svg.chart .ch-end{fill:var(--text);font-weight:650}
+.ch-grid{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke}
+.ch-base{stroke:var(--tree-line);stroke-width:1;vector-effect:non-scaling-stroke}
+.ch-hit{fill:transparent}
+.ch-hit:hover{fill:var(--soft)}
+@media (max-width:760px){svg.chart text{font-size:16px;stroke-width:4px}}
+@media (max-width:480px){svg.chart text{font-size:24px;stroke-width:5px}svg.chart .odd{display:none}}
 .ln{fill:none;stroke-width:2;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .ln-served,.ln-p50{stroke:var(--link)}
 .ln-errors{stroke:var(--bad);stroke-dasharray:7 4}
@@ -350,8 +359,6 @@ svg.chart{display:block;width:100%;height:auto;margin:.2em 0 1.4em;padding:.4em;
 p.legend{display:flex;flex-wrap:wrap;gap:.3em 1.4em;margin:.4em 0;font-size:13px}
 p.legend .key{display:inline-flex;align-items:center;gap:.5em}
 p.legend .ln{vector-effect:none}
-/* the largest value the chart is scaled to, at the far end of the key: a line with no number anywhere is a shape nobody can size, and the <title> is a hover a phone does not have */
-p.legend .peak{margin-left:auto;color:var(--muted)}
 /* the Live page: a worker busy or idle */
 .busy{color:var(--ok);background:var(--ok-bg)}
 .idle{color:var(--off);background:var(--off-bg)}

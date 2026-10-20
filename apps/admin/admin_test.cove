@@ -478,21 +478,138 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
   let b = Vector.of(0, 0, 5).freeze()
   assertEqual(metricsLargest(a, b), 10)?
   let times = Vector.of(0, 60, 120).freeze()
-  // 4 of margin on every side, so the stroke of the first, last, highest
-  // and lowest value is not cut in half by the edge of the box
-  assertEqual(metricsPoints(times, a, 10), "4,116 320,60 636,4")?
+  // from 8 to 712 across and from 248 (zero) up to 30 (the top of the scale)
+  assertEqual(metricsPoints(times, a, 10), "8,248 360,139 712,30")?
   // a minute with no row is a gap, not a closer neighbour
-  assertEqual(metricsPoints(Vector.of(0, 60, 180).freeze(), a, 10), "4,116 214,60 636,4")?
-  let chart = metricsChart("two things", "10 a sample", 10, times, a, "ln-served", "served", b, "ln-errors", "errors").render()
+  assertEqual(metricsPoints(Vector.of(0, 60, 180).freeze(), a, 10), "8,248 242,139 712,30")?
+  let chart = metricsChart("two things", "count", times, a, "ln-served", "served", b, "ln-errors", "errors").render()
   assert(chart.contains("role=img aria-label=\"two things\""))?
-  assert(chart.contains("<title>up to 10 a sample, over 3 rows</title>"))?
+  assert(chart.contains("<title>two things: now served 10, errors 5</title>"))?
   assert(chart.contains("polyline class=\"ln ln-served\""))?
   assert(chart.contains("polyline class=\"ln ln-errors\""))?
   // a legend, so the lines are not told apart by colour alone
   assert(chart.contains("class=legend"))?
+  // the scale: 0, 5, 10, a line each with its value
+  assert(chart.contains("<text x=\"12\" y=\"25\">10</text>"))?
+  assert(chart.contains("<text x=\"12\" y=\"134\">5</text>"))?
+  // the times under the plot, UTC
+  assert(chart.contains("text-anchor=start>00:00</text>"))?
+  assert(chart.contains("text-anchor=end>00:02</text>"))?
+  // the latest values at the ends of the lines
+  assert(chart.contains(">10</text>"))?
+  assert(chart.contains("text-anchor=end>5</text>"))?
+  // and a hover for each row
+  assert(chart.contains("<title>01-01 00:01 UTC: served 5, errors 0</title>"))?
+  assert(!chart.contains("up to"))?
   // and no line from one sample, or from nothing but zeros
-  assert(!metricsChart("x", "0", 0, Vector.of(0).freeze(), Vector.of(1).freeze(), "a", "a", Vector.of(1).freeze(), "b", "b").render().contains("<svg class=chart"))?
-  assert(!metricsChart("x", "0", 0, times, a, "a", "a", b, "b", "b").render().contains("<svg class=chart"))?
+  assert(!metricsChart("x", "count", Vector.of(0).freeze(), Vector.of(1).freeze(), "a", "a", Vector.of(1).freeze(), "b", "b").render().contains("<svg class=chart"))?
+  let zeros = Vector.of(0, 0, 0).freeze()
+  assert(!metricsChart("x", "count", times, zeros, "a", "a", zeros, "b", "b").render().contains("<svg class=chart"))?
+  Ok(())
+}
+
+test fn stepsAScaleInOneTwoOrFive() -> Result<Unit, Error> {
+  assertEqual(niceStep(1, 4), 1)?
+  assertEqual(niceStep(3, 4), 1)?
+  assertEqual(niceStep(10, 4), 5)?
+  // never more than four steps: 21 is three of 10, not five of 5
+  assertEqual(niceStep(21, 4), 10)?
+  assertEqual(niceStep(100, 4), 50)?
+  assertEqual(niceStep(101, 4), 50)?
+  assertEqual(niceStep(201, 4), 100)?
+  assertEqual(chartTicks("count", 3), [0, 1, 2, 3])?
+  assertEqual(chartTicks("count", 21), [0, 10, 20, 30])?
+  assertEqual(chartTicks("percent", 7), [0, 2, 4, 6, 8])?
+  // a time steps by no less than a tenth of a millisecond
+  assertEqual(chartTicks("ms", 150), [0, 100, 200])?
+  assertEqual(chartTicks("ms", 3400), [0, 1000, 2000, 3000, 4000])?
+  Ok(())
+}
+
+test fn stepsASizeInRoundTenthsOfItsUnit() -> Result<Unit, Error> {
+  let gib = 1073741824
+  let mib = 1048576
+  assertEqual(byteUnit(500), 1)?
+  assertEqual(byteUnit(150 * mib), mib)?
+  assertEqual(byteUnit(2 * gib), gib)?
+  // MemoryMax of 2 GiB: half a GiB a line
+  assertEqual(chartTicks("bytes", 2 * gib), [0, gib / 2, gib, gib + gib / 2, 2 * gib])?
+  var labels = Vector.of()
+  for value in chartTicks("bytes", 2 * gib) {
+    labels.push(chartTickLabel("bytes", value, 2 * gib))
+  }
+  assertEqual(",".join(labels.freeze()), "0,0.5 GiB,1 GiB,1.5 GiB,2 GiB")?
+  // 150 MiB with no limit: 50 MiB a line
+  assertEqual(chartTicks("bytes", 150 * mib), [0, 50 * mib, 100 * mib, 150 * mib])?
+  assertEqual(chartTickLabel("bytes", 100 * mib, 150 * mib), "100 MiB")?
+  // a disk of 100 GiB
+  assertEqual(chartTickLabel("bytes", 50 * gib, 100 * gib), "50 GiB")?
+  assertEqual(chartTickLabel("bytes", 300, 500), "300 B")?
+  // the other kinds, each in its own unit
+  assertEqual(chartTickLabel("ms", 2000, 3400), "2 ms")?
+  assertEqual(chartTickLabel("ms", 100, 150), "0.1 ms")?
+  assertEqual(chartTickLabel("percent", 40, 80), "40%")?
+  assertEqual(chartTickLabel("count", 0, 80), "0")?
+  // and a value at the end of a line, as the figures write it
+  assertEqual(chartValue("bytes", 152 * mib), "152.0 MiB")?
+  assertEqual(chartValue("bytes", 2 * gib), "2.0 GiB")?
+  assertEqual(chartValue("ms", 1250), "1.3 ms")?
+  assertEqual(chartValue("percent", 5), "5%")?
+  Ok(())
+}
+
+test fn putsTimeTicksOnTheClock() -> Result<Unit, Error> {
+  // an hour: every 10 minutes
+  assertEqual(timeStep(3540, 6), 600)?
+  // a day: every 6 hours
+  assertEqual(timeStep(86340, 6), 21600)?
+  // 30 days: every week
+  assertEqual(timeStep(30 * 86400, 6), 604800)?
+  // whole steps between the first row and the last, not from the first
+  assertEqual(timeTicks(1000, 4000, 900), [1800, 2700, 3600])?
+  assertEqual(timeTicks(900, 1800, 900), [900, 1800])?
+  // 2026-10-20T14:30:00Z
+  let at = 1792506600
+  assertEqual(timeTickLabel(at, 900), "14:30")?
+  assertEqual(timeTickLabel(at, 86400), "10-20")?
+  assertEqual(timeFull(at), "10-20 14:30 UTC")?
+  Ok(())
+}
+
+test fn keepsTheEndsOfTwoLinesApart() -> Result<Unit, Error> {
+  // far apart: both above their lines
+  let far = chartEnds(40, "2.0 GiB", 230, "150.0 MiB").render()
+  assert(far.contains("y=\"40\" dy=\"-0.45em\" text-anchor=end>2.0 GiB"))?
+  assert(far.contains("y=\"230\" dy=\"-0.45em\" text-anchor=end>150.0 MiB"))?
+  // close: the lower one under its line
+  let close = chartEnds(110, "5", 100, "6").render()
+  assert(close.contains("y=\"110\" dy=\"1.15em\" text-anchor=end>5"))?
+  assert(close.contains("y=\"100\" dy=\"-0.45em\" text-anchor=end>6"))?
+  // close at the floor: the higher one a line further up
+  let floor = chartEnds(248, "0", 248, "1").render()
+  assert(floor.contains("dy=\"-0.45em\""))?
+  assert(floor.contains("dy=\"-1.5em\""))?
+  // the same value at the same place: said once
+  let same = chartEnds(100, "1", 100, "1").render()
+  assertEqual(same.split("<text").length() - 1, 1)?
+  assert(same.contains("dy=\"-0.45em\""))?
+  Ok(())
+}
+
+test fn hoversARowOrAGroupOfRows() -> Result<Unit, Error> {
+  var times = Vector.of()
+  var values = Vector.of()
+  var at = 0
+  while at < 1440 {
+    times.push(at * 60)
+    values.push(at)
+    at = at + 1
+  }
+  let rows = values.freeze()
+  let day = chartHovers("count", times.freeze(), rows, "a", rows, "b").render()
+  // a day of minutes is 120 columns, not 1440
+  assertEqual(day.split("<title>").length() - 1, 120)?
+  assert(day.contains("<title>01-01 00:00 UTC – 01-01 00:06 UTC: a up to 6, b up to 6</title>"))?
   Ok(())
 }
 
