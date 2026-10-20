@@ -91,8 +91,9 @@ test fn showsALogLineAsItCame() -> Result<Unit, Error> {
   assert(said.contains("lvl-warn"))?
   assert(said.contains("&lt;img src=x&gt; &amp; on"))?
   assert(!said.contains("<img"))?
-  // 2026-10-05T03:29:49.566Z, as the clock of the day.
-  assert(said.contains("03:29:49.566"))?
+  // 2026-10-05T03:29:49.566Z is 12:29:49.566 JST, as the clock of the day.
+  assert(said.contains("12:29:49.566"))?
+  assert(said.contains("title=\"2026-10-05 12:29:49 JST\""))?
   // The level is a cell of its own and the text is the whole of the cell
   // beside it: a narrow screen puts the level with the time and the text
   // on a line under them, which it cannot do with the badge inside the
@@ -492,14 +493,14 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
   // the scale: 0, 5, 10, a line each with its value
   assert(chart.contains("<text x=\"12\" y=\"25\">10</text>"))?
   assert(chart.contains("<text x=\"12\" y=\"134\">5</text>"))?
-  // the times under the plot, UTC
-  assert(chart.contains("text-anchor=start>00:00</text>"))?
-  assert(chart.contains("text-anchor=end>00:02</text>"))?
+  // the times under the plot, JST: 9 hours past UTC's
+  assert(chart.contains("text-anchor=start>09:00</text>"))?
+  assert(chart.contains("text-anchor=end>09:02</text>"))?
   // the latest values at the ends of the lines
   assert(chart.contains(">10</text>"))?
   assert(chart.contains("text-anchor=end>5</text>"))?
   // and a hover for each row
-  assert(chart.contains("<title>01-01 00:01 UTC: served 5, errors 0</title>"))?
+  assert(chart.contains("<title>01-01 09:01 JST: served 5, errors 0</title>"))?
   assert(!chart.contains("up to"))?
   // and no line from one sample, or from nothing but zeros
   assert(!metricsChart("x", "count", Vector.of(0).freeze(), Vector.of(1).freeze(), "a", "a", Vector.of(1).freeze(), "b", "b").render().contains("<svg class=chart"))?
@@ -568,11 +569,48 @@ test fn putsTimeTicksOnTheClock() -> Result<Unit, Error> {
   // whole steps between the first row and the last, not from the first
   assertEqual(timeTicks(1000, 4000, 900), [1800, 2700, 3600])?
   assertEqual(timeTicks(900, 1800, 900), [900, 1800])?
-  // 2026-10-20T14:30:00Z
+  // and a day on JST's midnight, 15:00 UTC
+  assertEqual(timeTicks(0, 86400, 86400), [54000])?
+  // 2026-10-20T14:30:00Z is 23:30 JST
   let at = 1792506600
-  assertEqual(timeTickLabel(at, 900), "14:30")?
+  assertEqual(timeTickLabel(at, 900), "23:30")?
   assertEqual(timeTickLabel(at, 86400), "10-20")?
-  assertEqual(timeFull(at), "10-20 14:30 UTC")?
+  assertEqual(timeFull(at), "10-20 23:30 JST")?
+  Ok(())
+}
+
+test fn writesTimesInJapanStandardTime() -> Result<Unit, Error> {
+  // 2026-10-20T01:14:00Z
+  assertEqual(jst(1792458840000), "2026-10-20 10:14:00")?
+  assertEqual(jstClock(1792458840000), "10:14")?
+  assertEqual(jstDate(1792458840000), "10-20")?
+  // 14:59:59.999 UTC is 23:59:59 JST, the same day; a millisecond later
+  // it is the next day's midnight, and the date, the month and the year turn
+  assertEqual(jst(1792508399999), "2026-10-20 23:59:59")?
+  assertEqual(jst(1792508400000), "2026-10-21 00:00:00")?
+  assertEqual(jstDate(1792508400000), "10-21")?
+  assertEqual(jst(1798729199999), "2026-12-31 23:59:59")?
+  assertEqual(jst(1798729200000), "2027-01-01 00:00:00")?
+  // the epoch is nine in the morning
+  assertEqual(jst(0), "1970-01-01 09:00:00")?
+  // the clock of a log line keeps its milliseconds and says the whole stamp
+  let said = atTime(1792508400123).render()
+  assert(said.contains(">00:00:00.123<"))?
+  assert(said.contains("title=\"2026-10-21 00:00:00 JST\""))?
+  Ok(())
+}
+
+test fn putsDayTicksOnJstMidnight() -> Result<Unit, Error> {
+  // 2026-10-20T14:00:00Z is 23:00 JST; the day's tick after it is 15:00Z
+  // (JST midnight), not UTC's midnight at 00:00Z
+  let first = 1792504800
+  let ticks = timeTicks(first, first + 3 * 86400, 86400)
+  assertEqual(ticks, [1792508400, 1792594800, 1792681200])?
+  assertEqual(timeTickLabel(1792508400, 86400), "10-21")?
+  assertEqual(jstClock(1792508400 * 1000), "00:00")?
+  // a quarter of an hour is on JST's :00, :15, :30 and :45 as well
+  assertEqual(timeTicks(1792504801, 1792506600, 900), [1792505700, 1792506600])?
+  assertEqual(timeTickLabel(1792505700, 900), "23:15")?
   Ok(())
 }
 
@@ -609,7 +647,7 @@ test fn hoversARowOrAGroupOfRows() -> Result<Unit, Error> {
   let day = chartHovers("count", times.freeze(), rows, "a", rows, "b").render()
   // a day of minutes is 120 columns, not 1440
   assertEqual(day.split("<title>").length() - 1, 120)?
-  assert(day.contains("<title>01-01 00:00 UTC – 01-01 00:06 UTC: a up to 6, b up to 6</title>"))?
+  assert(day.contains("<title>01-01 09:00 JST – 01-01 09:06 JST: a up to 6, b up to 6</title>"))?
   Ok(())
 }
 
@@ -1011,7 +1049,7 @@ test fn listsTheMessagesWaitingWithTheirTriesAndTheirDueTime() -> Result<Unit, E
   assert(said.contains("<th>tries</th>"))?
   // The whole stamp, not the time of day: a retry's delay doubles, so a
   // message can be due days off and a clock alone would read as today.
-  assert(said.contains("2025-10-09T08:53:20.000Z"))?
+  assert(said.contains("2025-10-09 17:53:20"))?
   // Nothing waiting is said in words, not shown as an empty table.
   assert(queueMessagesTable("/apps/post", Vector.of().freeze()).render().contains("Nothing is waiting"))?
   // The id is the way to the whole of a body, which a row cuts.
@@ -1039,7 +1077,7 @@ test fn saysWhyADeadLetterWasBuriedAndEscapesThat() -> Result<Unit, Error> {
   assert(!said.contains("<img"))?
   assert(said.contains("500 &lt;img src=y&gt;"))?
   assert(said.contains("<code>payload</code>"))?
-  assert(said.contains("2025-10-09T09:01:40.000Z"))?
+  assert(said.contains("2025-10-09 18:01:40"))?
   assert(queueDeadTable("/apps/post", Vector.of().freeze()).render().contains("No dead letters"))?
   Ok(())
 }
