@@ -1241,11 +1241,11 @@ fn appAt(base: String, app: host.App) -> String {
   "{base}/apps/{app.name}"
 }
 
-/// The time of day of `millis`, the whole stamp as its title.
+/// The time of day of `millis` (JST), the whole stamp as its title.
 fn atTime(millis: Int) -> Html {
-  let stamp = text.isoTime(millis)
+  let stamp = jstStamp(millis)
   let clock = stamp.sliceBytes(11, 23).unwrapOr(stamp)
-  html"""<span title="{stamp}">{clock}</span>"""
+  html"""<span title="{jst(millis)} JST">{clock}</span>"""
 }
 
 /// What a page about one thing of an app's says when the host could not
@@ -2152,7 +2152,7 @@ fn queuesTable(queues: Array<host.Queue>) -> Html {
 /// retry's delay doubles, so a message can be due days off, and a dead
 /// letter can be weeks old — a clock alone would read as today.
 fn queueTime(millis: Int) -> String {
-  text.isoTime(millis)
+  jst(millis)
 }
 
 /// A message's id, as the way to the whole of it — the shape the store's
@@ -2176,8 +2176,8 @@ fn queueMessagesTable(at: String, messages: Array<host.QueueMessage>) -> Html {
         <td data-label=queue><code>{message.queue}</code></td>
         <td data-label=state>{queueState(message.state)}</td>
         <td class=nums data-label=tries>{message.attempts}</td>
-        <td class=when data-label="due (UTC)">{queueTime(message.dueMs)}</td>
-        <td class=when data-label="sent (UTC)">{queueTime(message.sentMs)}</td>
+        <td class=when data-label="due (JST)">{queueTime(message.dueMs)}</td>
+        <td class=when data-label="sent (JST)">{queueTime(message.sentMs)}</td>
         <td class="value block" data-label=body>{queueBodyCell(message)}</td>
       </tr>
       """)
@@ -2187,7 +2187,7 @@ fn queueMessagesTable(at: String, messages: Array<host.QueueMessage>) -> Html {
       <table class=cards>
         <tr class=head>
           <th>id</th><th>queue</th><th>state</th><th>tries</th>
-          <th>due (UTC)</th><th>sent (UTC)</th><th>body</th>
+          <th>due (JST)</th><th>sent (JST)</th><th>body</th>
         </tr>
         {rows.freeze()}
       </table>
@@ -2214,7 +2214,7 @@ fn queueDeadTable(at: String, messages: Array<host.QueueMessage>) -> Html {
         <td class=title data-label=id>{queueIdLink(at, message)}</td>
         <td data-label=queue><code>{message.queue}</code></td>
         <td class=nums data-label=tries>{message.attempts}</td>
-        <td class=when data-label="buried (UTC)">{queueTime(message.buriedMs)}</td>
+        <td class=when data-label="buried (JST)">{queueTime(message.buriedMs)}</td>
         <td class="value block" data-label=why>{why}</td>
         <td class="value block" data-label=body>{queueBodyCell(message)}</td>
       </tr>
@@ -2224,7 +2224,7 @@ fn queueDeadTable(at: String, messages: Array<host.QueueMessage>) -> Html {
     <div class="scroll cardwrap">
       <table class=cards>
         <tr class=head>
-          <th>id</th><th>queue</th><th>tries</th><th>buried (UTC)</th><th>why</th><th>body</th>
+          <th>id</th><th>queue</th><th>tries</th><th>buried (JST)</th><th>why</th><th>body</th>
         </tr>
         {rows.freeze()}
       </table>
@@ -2540,7 +2540,7 @@ fn metricsLargest(a: Array<Int>, b: Array<Int>) -> Int {
   largest
 }
 
-// The charts' box, in the units of their `viewBox`: 720 wide and 280 tall,
+// The charts' box, in the units of their `viewBox`: 720 wide and 460 tall,
 // the plot inset from the left and right by 8, with 30 above it for the
 // label of its top line and 32 below it for the times. The text is in the
 // same units and is scaled with the box, so the stylesheet sets it larger
@@ -2552,7 +2552,7 @@ fn chartWidth() -> Int {
 }
 
 fn chartHeight() -> Int {
-  280
+  460
 }
 
 fn chartLeft() -> Int {
@@ -2568,7 +2568,7 @@ fn chartTop() -> Int {
 }
 
 fn chartBottom() -> Int {
-  248
+  428
 }
 
 /// The step of a scale from 0 to `largest` with at most `count` steps: 1, 2
@@ -2690,6 +2690,39 @@ fn chartValue(kind: String, value: Int) -> String {
   }
 }
 
+/// Japan Standard Time is UTC+9 all year — Japan has no daylight saving
+/// time — so every time the pages show is the host's UTC millisecond plus
+/// a fixed nine hours, written as the UTC time of that. The host's data
+/// stay UTC; only what is written for a person is shifted.
+fn jstOffsetSeconds() -> Int {
+  32400
+}
+
+/// `millis` shifted to JST, written as `text.isoTime` writes a UTC time:
+/// `2026-10-20T10:14:00.000Z` for 01:14 UTC. Not shown as it is — the Z
+/// would be a lie — but sliced by the helpers below.
+fn jstStamp(millis: Int) -> String {
+  text.isoTime(millis + jstOffsetSeconds() * 1000)
+}
+
+/// A time as the pages write it: `2026-10-20 10:14:00`, JST.
+fn jst(millis: Int) -> String {
+  let stamp = jstStamp(millis)
+  "{stamp.sliceBytes(0, 10).unwrapOr(stamp)} {stamp.sliceBytes(11, 19).unwrapOr(stamp)}"
+}
+
+/// The time of day in JST, to the minute: `10:14`.
+fn jstClock(millis: Int) -> String {
+  let stamp = jstStamp(millis)
+  stamp.sliceBytes(11, 16).unwrapOr(stamp)
+}
+
+/// The date in JST, without the year: `10-20`.
+fn jstDate(millis: Int) -> String {
+  let stamp = jstStamp(millis)
+  stamp.sliceBytes(5, 10).unwrapOr(stamp)
+}
+
 /// The spacing of the time axis for a span of `span` seconds with at most
 /// `count` ticks: the least of the steps a clock is read in that does.
 fn timeStep(span: Int, count: Int) -> Int {
@@ -2703,10 +2736,11 @@ fn timeStep(span: Int, count: Int) -> Int {
 
 /// The ticks of the time axis from `first` to `last` (Unix seconds): every
 /// whole `step` between them, so that a tick of a quarter of an hour is at
-/// :00, :15, :30 and :45, and a tick of a day at midnight, UTC.
+/// :00, :15, :30 and :45, and a tick of a day at midnight, JST — the clock
+/// is read in JST, so the steps are counted from JST's midnight.
 fn timeTicks(first: Int, last: Int, step: Int) -> Array<Int> {
   var out = Vector.of()
-  var at = (first + step - 1) / step * step
+  var at = (first + jstOffsetSeconds() + step - 1) / step * step - jstOffsetSeconds()
   while at <= last {
     out.push(at)
     at = at + step
@@ -2715,19 +2749,17 @@ fn timeTicks(first: Int, last: Int, step: Int) -> Array<Int> {
 }
 
 /// A tick's label: the time of day, `14:30`, or for ticks a day or more
-/// apart the date, `10-20` — UTC, as every time on these pages is.
+/// apart the date, `10-20` — JST, as every time on these pages is.
 fn timeTickLabel(at: Int, step: Int) -> String {
-  let stamp = text.isoTime(at * 1000)
   if step >= 86400 {
-    return stamp.sliceBytes(5, 10).unwrapOr(stamp)
+    return jstDate(at * 1000)
   }
-  stamp.sliceBytes(11, 16).unwrapOr(stamp)
+  jstClock(at * 1000)
 }
 
-/// A time as a hover says it: `10-20 14:30 UTC`.
+/// A time as a hover says it: `10-20 14:30 JST`.
 fn timeFull(at: Int) -> String {
-  let stamp = text.isoTime(at * 1000)
-  "{stamp.sliceBytes(5, 10).unwrapOr(stamp)} {stamp.sliceBytes(11, 16).unwrapOr(stamp)} UTC"
+  "{jstDate(at * 1000)} {jstClock(at * 1000)} JST"
 }
 
 /// Where a time is across the plot, for rows from `first` to `first +
@@ -3056,9 +3088,9 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
   let rows = if points.length() == 1 { "1 row" } else { "{points.length()} rows" }
   let covers = html"""
     <p class=muted>{rows}, one for each {each} the host sampled, from
-    {text.isoTime(first * 1000)} to {text.isoTime(last * 1000)}. Each chart is scaled from zero
+    {jst(first * 1000)} to {jst(last * 1000)}. Each chart is scaled from zero
     to a round number past its own largest value, the latest value of each line is written at
-    its end, and the times are UTC. Hover a point, or tap it, for its {each}.</p>
+    its end, and the times are JST. Hover a point, or tap it, for its {each}.</p>
     """
   let traffic = metricsChart(
     "requests served and errors a {each}, {span}",
@@ -3323,9 +3355,9 @@ fn platformPage(base: String, request: web.Request) -> Html {
   let rows = if points.length() == 1 { "1 row" } else { "{points.length()} rows" }
   let covers = html"""
     <p class=muted>{rows}, one for each {each} the host sampled, from
-    {text.isoTime(first * 1000)} to {text.isoTime(final * 1000)}. The CPU is what the
+    {jst(first * 1000)} to {jst(final * 1000)}. The CPU is what the
     {each} used of the quota (of one CPU without one); memory, disk and workers are as they
-    were at its end, and an hour is its worst minute. The times are UTC.</p>
+    were at its end, and an hour is its worst minute. The times are JST.</p>
     """
   let memoryChart = metricsChart(
     "memory used and MemoryMax, {span}",
@@ -3517,7 +3549,7 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
       html"""<span class="state refused">unset</span>"""
     }
     let updated = if secret.set {
-      html"{text.isoTime(secret.updatedMs)}"
+      html"{jst(secret.updatedMs)}"
     } else {
       html"<span class=muted>–</span>"
     }
@@ -3557,7 +3589,7 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
       <tr>
         <td class=title data-label=name><code>{secret.name}</code></td>
         <td data-label=state>{state}</td>
-        <td class=when data-label="set at (UTC)">{updated}</td>
+        <td class=when data-label="set at (JST)">{updated}</td>
         <td data-label="used by">{used}</td>
         <td class=block data-label="set or replace">{replace}</td>
         <td class=block data-label=delete>{delete}</td>
@@ -3571,7 +3603,7 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
       <div class="scroll cardwrap">
         <table class=cards>
           <tr class=head>
-            <th>name</th><th>state</th><th>set at (UTC)</th><th>used by</th>
+            <th>name</th><th>state</th><th>set at (JST)</th><th>used by</th>
             <th>set or replace</th><th>delete</th>
           </tr>
           {rows.freeze()}
@@ -3620,7 +3652,7 @@ fn historyPage(base: String, changes: Array<host.Change>) -> Html {
   for change in changes {
     rows.push(html"""
       <tr>
-        <td class="title when" data-label="at (UTC)">{text.isoTime(change.atMs)}</td>
+        <td class="title when" data-label="at (JST)">{jst(change.atMs)}</td>
         <td class=nowrap data-label=who>{change.who}</td>
         <td data-label=app>{historyApp(base, change.app)}</td>
         <td class=nowrap data-label=action><code>{change.action}</code></td>
@@ -3636,7 +3668,7 @@ fn historyPage(base: String, changes: Array<host.Change>) -> Html {
       <div class="scroll cardwrap">
         <table class=cards>
           <tr class=head>
-            <th>at (UTC)</th><th>who</th><th>app</th><th>action</th><th>asked for</th>
+            <th>at (JST)</th><th>who</th><th>app</th><th>action</th><th>asked for</th>
             <th>outcome</th>
           </tr>
           {rows.freeze()}

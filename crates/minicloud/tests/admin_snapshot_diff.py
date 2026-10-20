@@ -12,7 +12,8 @@ files it compared, if there is none.
 What is normalised, and nothing else:
 
 - the time a log line, a change, a secret or a metrics window was taken at:
-  an ISO stamp `2026-10-15T01:57:49.235Z` (`text.isoTime`), and the time of
+  an ISO stamp `2026-10-15T01:57:49.235Z` (`text.isoTime`) or, as the pages
+  write it since they show JST, `2026-10-15 10:57:49` (`jst`), and the time of
   day a log line shows beside it as `<span title="<stamp>">01:57:49.235</span>`
   (`atTime`). The run happens when it happens. The queue's stamps are fixed
   by the test and come out the same either way.
@@ -42,6 +43,9 @@ import sys
 
 # `text.isoTime`: always milliseconds, always UTC.
 STAMP = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
+# `jst`: the same moment as the pages write it since they show JST,
+# `2026-10-15 10:57:49`, and `atTime`'s title adds ` JST`.
+JST = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
 
 PATTERNS = [
     # `atTime`: the clock beside a log line, its whole stamp as the title.
@@ -50,7 +54,12 @@ PATTERNS = [
         re.compile(r'<span title="' + STAMP + r'">\d{2}:\d{2}:\d{2}\.\d{3}</span>'),
         '<span title="<STAMP>"><CLOCK></span>',
     ),
+    (
+        re.compile(r'<span title="' + JST + r' JST">\d{2}:\d{2}:\d{2}\.\d{3}</span>'),
+        '<span title="<STAMP>"><CLOCK></span>',
+    ),
     (re.compile(STAMP), "<STAMP>"),
+    (re.compile(JST), "<STAMP>"),
     # `std::env::temp_dir()/minicloud-test-<pid>-<n>` (tests/common).
     (
         re.compile(r"(?:/[A-Za-z0-9._-]+)*/minicloud-test-\d+-\d+"),
