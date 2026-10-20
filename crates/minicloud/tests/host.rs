@@ -465,6 +465,11 @@ fn a_run_that_outgrows_its_heap_fails_while_it_allocates() {
         "the second run never parked"
     );
     assert!(count(&host, "hoarder", "heap_peak_words") <= 65536);
+    // A run is collected before it is refused more heap, and what it
+    // allocated before it failed is counted all the same.
+    assert_eq!(count(&host, "hoarder", "gc_runs"), 1, "the second run");
+    assert!(count(&host, "hoarder", "gc_collections") >= 1);
+    assert!(count(&host, "hoarder", "allocated_words") > peak);
 }
 
 #[test]

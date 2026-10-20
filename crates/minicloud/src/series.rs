@@ -64,6 +64,13 @@ pub struct Sample {
     /// Microseconds, estimated from the request-time histogram.
     pub p50_us: u64,
     pub p99_us: u64,
+    /// Garbage collections the app's runs made, runs that collected at
+    /// least once, and words their heaps handed out (eight bytes a word,
+    /// reuse counted each time), over the runs that finished in the span.
+    /// A row written before the store had these columns reads 0.
+    pub gc_collections: u64,
+    pub gc_runs: u64,
+    pub allocated_words: u64,
 }
 
 /// What the host's process and machine looked like over one minute or one
@@ -96,13 +103,19 @@ pub struct HostRow {
     pub queued: u64,
     pub busy: u64,
     pub workers: u64,
+    /// The apps' [`Sample::gc_collections`], [`Sample::gc_runs`] and
+    /// [`Sample::allocated_words`] over the span, summed across apps. `None`
+    /// for a row written before the store kept them.
+    pub gc_collections: Option<u64>,
+    pub gc_runs: Option<u64>,
+    pub allocated_words: Option<u64>,
 }
 
 /// The host rows' columns after `at`, in [`HostRow`]'s order, each with how
 /// an hour is made of its minutes. SQLite's aggregates skip `NULL`, so an
 /// hour with some unknown minutes is made of the known ones, and an hour of
 /// none is `NULL` again.
-pub const HOST_COLUMNS: [(&str, &str); 17] = [
+pub const HOST_COLUMNS: [(&str, &str); 20] = [
     ("memory_bytes", "MAX"),
     ("memory_max_bytes", "MAX"),
     ("rss_bytes", "MAX"),
@@ -120,6 +133,9 @@ pub const HOST_COLUMNS: [(&str, &str); 17] = [
     ("queued", "MAX"),
     ("busy", "MAX"),
     ("workers", "MAX"),
+    ("gc_collections", "SUM"),
+    ("gc_runs", "SUM"),
+    ("allocated_words", "SUM"),
 ];
 
 /// The four engine gauges, which are always known.
@@ -127,7 +143,7 @@ const HOST_NOT_NULL: [&str; 4] = ["in_flight", "queued", "busy", "workers"];
 
 impl HostRow {
     /// The values after `at`, in [`HOST_COLUMNS`]' order.
-    fn values(&self) -> [Option<u64>; 17] {
+    fn values(&self) -> [Option<u64>; 20] {
         [
             self.memory_bytes,
             self.memory_max_bytes,
@@ -146,10 +162,13 @@ impl HostRow {
             Some(self.queued),
             Some(self.busy),
             Some(self.workers),
+            self.gc_collections,
+            self.gc_runs,
+            self.allocated_words,
         ]
     }
 
-    fn from_values(at_unix: i64, v: [Option<u64>; 17]) -> HostRow {
+    fn from_values(at_unix: i64, v: [Option<u64>; 20]) -> HostRow {
         HostRow {
             at_unix,
             memory_bytes: v[0],
@@ -169,6 +188,9 @@ impl HostRow {
             queued: v[14].unwrap_or(0),
             busy: v[15].unwrap_or(0),
             workers: v[16].unwrap_or(0),
+            gc_collections: v[17],
+            gc_runs: v[18],
+            allocated_words: v[19],
         }
     }
 }
@@ -196,7 +218,50 @@ pub struct Series {
     conn: Connection,
 }
 
-const COLUMNS: &str = "app, at, served, ok, errors, rejected, worker_ms, p50_us, p99_us";
+const COLUMNS: &str = "app, at, served, ok, errors, rejected, worker_ms, p50_us, p99_us, \
+                       gc_collections, gc_runs, allocated_words";
+
+/// The apps' columns added after the first release of the store, which an
+/// older file is given when it is opened ([`migrate`]): a row written
+/// before them reads 0.
+const APP_ADDED: [&str; 3] = ["gc_collections", "gc_runs", "allocated_words"];
+
+/// Brings a store an older host made up to this one's columns, in place: a
+/// column the table lacks is added. The apps' new columns default to 0; the
+/// host's are `NULL`, which [`HostRow`] reads as unknown. `ADD COLUMN` keeps
+/// every row, and checking the columns first makes opening twice a no-op.
+fn migrate(conn: &Connection) -> Result<(), String> {
+    let columns_of = |table: &str| -> Result<Vec<String>, String> {
+        let mut statement = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(fail)?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(fail)?;
+        names.collect::<Result<_, _>>().map_err(fail)
+    };
+    for table in ["minute", "hour"] {
+        let have = columns_of(table)?;
+        for name in APP_ADDED {
+            if !have.iter().any(|h| h == name) {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0;"
+                ))
+                .map_err(fail)?;
+            }
+        }
+    }
+    for table in ["host_minute", "host_hour"] {
+        let have = columns_of(table)?;
+        for (name, _) in HOST_COLUMNS {
+            if !have.iter().any(|h| h == name) {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} INTEGER;"))
+                    .map_err(fail)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 fn fail(e: rusqlite::Error) -> String {
     e.to_string()
@@ -250,6 +315,9 @@ impl Series {
                     worker_ms INTEGER NOT NULL,
                     p50_us INTEGER NOT NULL,
                     p99_us INTEGER NOT NULL,
+                    gc_collections INTEGER NOT NULL DEFAULT 0,
+                    gc_runs INTEGER NOT NULL DEFAULT 0,
+                    allocated_words INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (app, at)
                 ) WITHOUT ROWID;"
             ))
@@ -276,6 +344,7 @@ impl Series {
             ))
             .map_err(fail)?;
         }
+        migrate(&conn)?;
         Ok(Series { conn })
     }
 
@@ -330,7 +399,7 @@ impl Series {
         let mut statement = self.conn.prepare_cached(&sql).map_err(fail)?;
         let rows = statement
             .query_map(params![since], |row| {
-                let mut values = [None; 17];
+                let mut values = [None; 20];
                 for (i, value) in values.iter_mut().enumerate() {
                     *value = row.get::<_, Option<i64>>(i + 1)?.map(|v| v.max(0) as u64);
                 }
@@ -362,13 +431,17 @@ impl Series {
         {
             let mut insert = tx
                 .prepare_cached(
-                    "INSERT INTO minute (app, at, served, ok, errors, rejected, worker_ms, p50_us, p99_us)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    "INSERT INTO minute (app, at, served, ok, errors, rejected, worker_ms, p50_us, p99_us,
+                                         gc_collections, gc_runs, allocated_words)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                      ON CONFLICT(app, at) DO UPDATE SET
                         served = excluded.served, ok = excluded.ok,
                         errors = excluded.errors, rejected = excluded.rejected,
                         worker_ms = excluded.worker_ms,
-                        p50_us = excluded.p50_us, p99_us = excluded.p99_us",
+                        p50_us = excluded.p50_us, p99_us = excluded.p99_us,
+                        gc_collections = excluded.gc_collections,
+                        gc_runs = excluded.gc_runs,
+                        allocated_words = excluded.allocated_words",
                 )
                 .map_err(fail)?;
             for s in samples {
@@ -383,6 +456,9 @@ impl Series {
                         to_sql(s.worker_ms),
                         to_sql(s.p50_us),
                         to_sql(s.p99_us),
+                        to_sql(s.gc_collections),
+                        to_sql(s.gc_runs),
+                        to_sql(s.allocated_words),
                     ])
                     .map_err(fail)?;
             }
@@ -416,16 +492,21 @@ impl Series {
         // and an average of percentiles would smooth a bad minute into
         // nothing.
         tx.execute(
-            "INSERT INTO hour (app, at, served, ok, errors, rejected, worker_ms, p50_us, p99_us)
+            "INSERT INTO hour (app, at, served, ok, errors, rejected, worker_ms, p50_us, p99_us,
+                               gc_collections, gc_runs, allocated_words)
              SELECT app, at / 3600 * 3600, SUM(served), SUM(ok), SUM(errors),
-                    SUM(rejected), SUM(worker_ms), MAX(p50_us), MAX(p99_us)
+                    SUM(rejected), SUM(worker_ms), MAX(p50_us), MAX(p99_us),
+                    SUM(gc_collections), SUM(gc_runs), SUM(allocated_words)
              FROM minute WHERE at < ?1
              GROUP BY app, at / 3600 * 3600
              ON CONFLICT(app, at) DO UPDATE SET
                 served = excluded.served, ok = excluded.ok,
                 errors = excluded.errors, rejected = excluded.rejected,
                 worker_ms = excluded.worker_ms,
-                p50_us = excluded.p50_us, p99_us = excluded.p99_us",
+                p50_us = excluded.p50_us, p99_us = excluded.p99_us,
+                gc_collections = excluded.gc_collections,
+                gc_runs = excluded.gc_runs,
+                allocated_words = excluded.allocated_words",
             params![this_hour],
         )
         .map_err(fail)?;
@@ -507,6 +588,9 @@ impl Series {
                     worker_ms: n(6)?,
                     p50_us: n(7)?,
                     p99_us: n(8)?,
+                    gc_collections: n(9)?,
+                    gc_runs: n(10)?,
+                    allocated_words: n(11)?,
                 })
             })
             .map_err(fail)?;
@@ -535,6 +619,9 @@ mod tests {
             worker_ms: 10,
             p50_us: p99 / 2,
             p99_us: p99,
+            gc_collections: served / 2,
+            gc_runs: served / 3,
+            allocated_words: served * 1000,
         }
     }
 
@@ -596,6 +683,9 @@ mod tests {
         assert_eq!(h.worker_ms, 30);
         assert_eq!(h.p99_us, 300);
         assert_eq!(h.p50_us, 150);
+        assert_eq!(h.gc_collections, 2 + 3);
+        assert_eq!(h.gc_runs, 1 + 2);
+        assert_eq!(h.allocated_words, 13_000);
     }
 
     #[test]
@@ -667,6 +757,8 @@ mod tests {
             queued: 1,
             busy: 1,
             workers: 2,
+            gc_collections: Some(cpu / 1000),
+            allocated_words: Some(memory * 10),
             ..HostRow::default()
         }
     }
@@ -724,11 +816,110 @@ mod tests {
         assert_eq!(h.disk_available_bytes, Some(310), "the least free");
         assert_eq!(h.load1_milli, Some(1500), "the mean of the known");
         assert_eq!(h.rss_bytes, None, "unknown all hour");
+        assert_eq!(h.gc_collections, Some(6), "collections are summed");
+        assert_eq!(h.allocated_words, Some(18_000));
+        assert_eq!(h.gc_runs, None);
         assert_eq!(h.in_flight, 9);
         assert_eq!(h.workers, 2);
         // And the host's rows go with the apps' when they are old.
         let dropped = s.sweep(H + 10 * 3600, 3600, 3600).unwrap();
         assert_eq!(dropped, 6, "four minutes and the two hours they made");
         assert_eq!(s.host_rows().unwrap(), (0, 0));
+    }
+
+    /// The store as the hosts before the GC columns made it: what a
+    /// production `series.sqlite3` holds when this host is first started on
+    /// it.
+    const OLD_SCHEMA: &str = "
+        CREATE TABLE minute (app TEXT NOT NULL, at INTEGER NOT NULL,
+            served INTEGER NOT NULL, ok INTEGER NOT NULL, errors INTEGER NOT NULL,
+            rejected INTEGER NOT NULL, worker_ms INTEGER NOT NULL,
+            p50_us INTEGER NOT NULL, p99_us INTEGER NOT NULL,
+            PRIMARY KEY (app, at)) WITHOUT ROWID;
+        CREATE TABLE hour (app TEXT NOT NULL, at INTEGER NOT NULL,
+            served INTEGER NOT NULL, ok INTEGER NOT NULL, errors INTEGER NOT NULL,
+            rejected INTEGER NOT NULL, worker_ms INTEGER NOT NULL,
+            p50_us INTEGER NOT NULL, p99_us INTEGER NOT NULL,
+            PRIMARY KEY (app, at)) WITHOUT ROWID;
+        CREATE TABLE host_minute (at INTEGER PRIMARY KEY NOT NULL,
+            memory_bytes INTEGER, memory_max_bytes INTEGER, rss_bytes INTEGER,
+            cpu_usec INTEGER, cpu_throttled_usec INTEGER, cpu_throttled_periods INTEGER,
+            cpu_quota_millicores INTEGER, disk_total_bytes INTEGER,
+            disk_available_bytes INTEGER, store_bytes INTEGER, load1_milli INTEGER,
+            host_memory_total_bytes INTEGER, host_memory_available_bytes INTEGER,
+            in_flight INTEGER NOT NULL, queued INTEGER NOT NULL,
+            busy INTEGER NOT NULL, workers INTEGER NOT NULL);
+        CREATE TABLE host_hour (at INTEGER PRIMARY KEY NOT NULL,
+            memory_bytes INTEGER, memory_max_bytes INTEGER, rss_bytes INTEGER,
+            cpu_usec INTEGER, cpu_throttled_usec INTEGER, cpu_throttled_periods INTEGER,
+            cpu_quota_millicores INTEGER, disk_total_bytes INTEGER,
+            disk_available_bytes INTEGER, store_bytes INTEGER, load1_milli INTEGER,
+            host_memory_total_bytes INTEGER, host_memory_available_bytes INTEGER,
+            in_flight INTEGER NOT NULL, queued INTEGER NOT NULL,
+            busy INTEGER NOT NULL, workers INTEGER NOT NULL);
+        INSERT INTO minute VALUES ('a', 1000000 / 3600 * 3600, 5, 4, 1, 0, 10, 100, 200);
+        INSERT INTO host_minute (at, memory_bytes, in_flight, queued, busy, workers)
+            VALUES (1000000 / 3600 * 3600, 300, 1, 0, 1, 2);
+    ";
+
+    #[test]
+    fn a_store_with_the_old_columns_opens_and_keeps_its_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "minicloud-series-migrate-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("series.sqlite3");
+        std::fs::create_dir_all(&dir).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(OLD_SCHEMA)
+            .unwrap();
+
+        let s = Series::open(&path).unwrap();
+        // The old rows read with the new columns as 0, and as unknown.
+        let old = s.minutes(None, 0).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!((old[0].served, old[0].p99_us), (5, 200));
+        assert_eq!(
+            (
+                old[0].gc_collections,
+                old[0].gc_runs,
+                old[0].allocated_words
+            ),
+            (0, 0, 0)
+        );
+        let host_old = s.host_minutes(0).unwrap();
+        assert_eq!(host_old[0].memory_bytes, Some(300));
+        assert_eq!(host_old[0].gc_collections, None, "unknown, not 0");
+
+        // New rows are written and read whole, and roll up beside the old.
+        s.record(&[sample("a", H + 60, 7, 300)]).unwrap();
+        s.record_host(&HostRow {
+            at_unix: H + 60,
+            gc_collections: Some(4),
+            allocated_words: Some(9000),
+            gc_runs: Some(2),
+            ..HostRow::default()
+        })
+        .unwrap();
+        s.sweep(H + 3600, KEEP_MINUTES_SECS, KEEP_HOURS_SECS)
+            .unwrap();
+        let hours = s.hours(None, 0).unwrap();
+        assert_eq!(hours.len(), 1);
+        assert_eq!(hours[0].served, 12);
+        assert_eq!(hours[0].gc_collections, 3);
+        assert_eq!(hours[0].allocated_words, 7000);
+        let host_hours = s.host_hours(0).unwrap();
+        assert_eq!(host_hours[0].gc_collections, Some(4));
+        assert_eq!(host_hours[0].memory_bytes, Some(300));
+        drop(s);
+
+        // Opening it again changes nothing.
+        let s = Series::open(&path).unwrap();
+        assert_eq!(s.minutes(None, 0).unwrap().len(), 2);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

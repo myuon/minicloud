@@ -353,6 +353,14 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("rejected", INT),
                 field("inFlight", INT),
                 field("queued", INT),
+                // Since the host started: garbage collections, runs that
+                // collected at least once, words allocated (eight bytes a
+                // word, reuse counted each time) and runs that failed for
+                // want of heap (`max_heap_words`).
+                field("gcCollections", INT),
+                field("gcRuns", INT),
+                field("allocatedWords", INT),
+                field("heapFailures", INT),
                 // -1 for an app with no store open.
                 field("kvKeys", INT),
                 field("kvBytes", INT),
@@ -558,6 +566,13 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 // of all time.
                 field("p50Us", INT),
                 field("p99Us", INT),
+                // Over the row's span, the runs that finished in it:
+                // garbage collections, runs that collected at least once,
+                // and words allocated (eight bytes a word, reuse counted
+                // each time). 0 in a row kept before these were.
+                field("gcCollections", INT),
+                field("gcRuns", INT),
+                field("allocatedWords", INT),
             ],
         },
         // One row of the host's own history ([`crate::series::HostRow`]):
@@ -589,6 +604,11 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("queued", INT),
                 field("busy", INT),
                 field("workers", INT),
+                // The apps' `host.Point` figures of the same name, summed
+                // across apps; `None` in a row kept before they were.
+                field("gcCollections", OPT_INT),
+                field("gcRuns", OPT_INT),
+                field("allocatedWords", OPT_INT),
             ],
         },
         // The request timeline over a window ([`crate::timeline::Window`]).
@@ -677,6 +697,10 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("workerUs", INT),
                 field("instructions", OPT_INT),
                 field("heapWords", OPT_INT),
+                // Collections the run made and words it allocated; `None`
+                // for a request that never ran.
+                field("gcCollections", OPT_INT),
+                field("allocatedWords", OPT_INT),
                 field("yields", INT),
                 field("parks", INT),
                 field("moves", INT),
@@ -1023,6 +1047,10 @@ fn app_value(info: AppInfo) -> Value {
             ("rejected", int(info.rejected)),
             ("inFlight", int(info.in_flight)),
             ("queued", int(info.queued)),
+            ("gcCollections", int(info.gc_collections)),
+            ("gcRuns", int(info.gc_runs)),
+            ("allocatedWords", int(info.allocated_words)),
+            ("heapFailures", int(info.heap_failures)),
             (
                 "kvKeys",
                 info.kv.map_or(Value::int(-1), |(keys, _)| int(keys)),
@@ -1164,6 +1192,9 @@ fn point_value(row: Sample) -> Value {
             ("workerMs", int(row.worker_ms)),
             ("p50Us", int(row.p50_us)),
             ("p99Us", int(row.p99_us)),
+            ("gcCollections", int(row.gc_collections)),
+            ("gcRuns", int(row.gc_runs)),
+            ("allocatedWords", int(row.allocated_words)),
         ],
     )
 }
@@ -1200,6 +1231,9 @@ fn platform_point_value(row: crate::series::HostRow) -> Value {
             ("queued", int(row.queued)),
             ("busy", int(row.busy)),
             ("workers", int(row.workers)),
+            ("gcCollections", maybe(row.gc_collections)),
+            ("gcRuns", maybe(row.gc_runs)),
+            ("allocatedWords", maybe(row.allocated_words)),
         ],
     )
 }
@@ -1256,6 +1290,7 @@ fn phase_value(phase: &crate::timeline::Phase, now: u64) -> Value {
 
 fn timeline_request_value(span: &crate::timeline::Span) -> Value {
     let end = span.end.as_ref();
+    let meter = end.and_then(|end| end.meter);
     let known = |value: Option<u64>| maybe(value);
     Value::structure(
         "host.TimelineRequest",
@@ -1279,8 +1314,10 @@ fn timeline_request_value(span: &crate::timeline::Span) -> Value {
             ),
             ("latencyUs", known(span.latency_ns().map(|ns| ns / 1000))),
             ("workerUs", us(end.map_or(0, |end| end.worker_ns))),
-            ("instructions", known(end.and_then(|end| end.instructions))),
-            ("heapWords", known(end.and_then(|end| end.heap_words))),
+            ("instructions", known(meter.map(|m| m.instructions))),
+            ("heapWords", known(meter.map(|m| m.heap_words))),
+            ("gcCollections", known(meter.map(|m| m.gc_collections))),
+            ("allocatedWords", known(meter.map(|m| m.allocated_words))),
             ("yields", int(span.yields)),
             ("parks", int(span.parks)),
             ("moves", int(span.moves)),

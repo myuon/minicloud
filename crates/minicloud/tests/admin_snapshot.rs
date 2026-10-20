@@ -196,6 +196,11 @@ fn minute(
         worker_ms: served,
         p50_us,
         p99_us,
+        // Half the requests collected once each, a third more than once;
+        // each allocated 50 000 words.
+        gc_collections: served / 2 + served / 3,
+        gc_runs: served / 2,
+        allocated_words: served * 50_000,
     }
 }
 
@@ -221,6 +226,10 @@ fn host_minute(at_unix: i64, k: u64) -> minicloud::series::HostRow {
         queued: k % 4 / 3,
         busy: k % 3,
         workers: 2,
+        gc_collections: Some(3 + k % 4),
+        gc_runs: Some(1 + k % 3),
+        // (20 + 5k) MiB: a word is eight bytes.
+        allocated_words: Some((20 + 5 * k) << 17),
     }
 }
 

@@ -882,7 +882,16 @@ impl Engine {
                     .instructions
                     .fetch_add(vm.instructions(), Ordering::Relaxed);
                 note_progress(&mut flight.tally, counters, heap, vm.yields_declined());
-                flight.track.meter(vm.instructions(), heap);
+                // The run's heap is its own (`Ready::isolate`), so the
+                // machine's totals are this run's, parks and yields included.
+                let (collections, allocated) = (vm.collections(), vm.allocated_words());
+                counters.heap_run(collections, allocated);
+                flight.track.meter(crate::timeline::Meter {
+                    instructions: vm.instructions(),
+                    heap_words: heap,
+                    gc_collections: collections,
+                    allocated_words: allocated,
+                });
                 let answered = match outcome {
                     // The heap's capacity is the app's `max_heap_words`
                     // (`Ready::isolate`), so a run that needed more has

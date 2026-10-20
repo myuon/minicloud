@@ -240,6 +240,7 @@ fn anApp(
   sqlMaxBytes: Int = 0,
   accessOff: String = "",
   isAdmin: Bool = false,
+  heapFailures: Int = 0,
 ) -> host.App {
   host.App(
     name: name,
@@ -272,6 +273,10 @@ fn anApp(
     rejected: rejected,
     inFlight: 0,
     queued: 0,
+    gcCollections: 0,
+    gcRuns: 0,
+    allocatedWords: 0,
+    heapFailures: heapFailures,
     kvKeys: kvKeys,
     kvBytes: kvBytes,
     kvMaxKeys: kvMaxKeys,
@@ -506,6 +511,33 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
   assert(!metricsChart("x", "count", Vector.of(0).freeze(), Vector.of(1).freeze(), "a", "a", Vector.of(1).freeze(), "b", "b").render().contains("<svg class=chart"))?
   let zeros = Vector.of(0, 0, 0).freeze()
   assert(!metricsChart("x", "count", times, zeros, "a", "a", zeros, "b", "b").render().contains("<svg class=chart"))?
+  Ok(())
+}
+
+/// A chart of one line: no second key, line, end or figure in a hover.
+test fn drawsAChartOfOneLine() -> Result<Unit, Error> {
+  let times = Vector.of(0, 60, 120).freeze()
+  let mib = 1048576
+  let bytes = Vector.of(mib, 3 * mib, 2 * mib).freeze()
+  let chart = metricsChart("allocated", "bytes", times, bytes, "ln-used", "allocated", [], "", "").render()
+  assert(chart.contains("<title>allocated: now allocated 2.0 MiB</title>"))?
+  assertEqual(chart.split("<polyline").length() - 1, 1)?
+  assertEqual(chart.split("class=key").length() - 1, 1)?
+  assertEqual(chart.split("class=ch-end").length() - 1, 1)?
+  assert(chart.contains("text-anchor=end>2.0 MiB</text>"))?
+  assert(chart.contains("<title>01-01 09:01 JST: allocated 3.0 MiB</title>"))?
+  assertEqual(
+    chartHoverTitle("count", times, Vector.of(1, 5, 2).freeze(), "collections", [], "", 0, 2),
+    "01-01 09:00 JST – 01-01 09:02 JST: collections up to 5",
+  )?
+  Ok(())
+}
+
+test fn writesWordsAsBytesAndASharePerHundred() -> Result<Unit, Error> {
+  assertEqual(wordBytes(131072), 1048576)?
+  assertEqual(shareOf(1, 3), 33)?
+  assertEqual(shareOf(0, 0), 0)?
+  assertEqual(shareOf(5, 5), 100)?
   Ok(())
 }
 
@@ -1227,6 +1259,7 @@ fn aRequest(
   status: Option<Int> = Some(200),
   reason: String = "",
   endedUs: Option<Int> = Some(28000),
+  gcCollections: Option<Int> = Some(2),
 ) -> host.TimelineRequest {
   host.TimelineRequest(
     id: id,
@@ -1246,6 +1279,11 @@ fn aRequest(
     workerUs: 3000,
     instructions: Some(1234),
     heapWords: Some(56),
+    gcCollections: gcCollections,
+    allocatedWords: match gcCollections {
+      Some(_) => Some(131072)
+      None => None
+    },
     yields: 1,
     parks: 1,
     moves: 1,
@@ -1395,7 +1433,17 @@ test fn drawsALaneWithItsMarks() -> Result<Unit, Error> {
   assert(gone.contains("class=tl-err"))?
   // A lane is the way to its request, and says what it is on hover.
   let one = lane("/x", aRequest(7, parkedAndMoved()), 0, 100000, 0, 10, "0").render()
-  assert(one.contains("<a href=\"/x/requests/7\"><title>#7 slow: GET /slow/&lt;b&gt; — 200, 18.0 ms</title>"))?
+  assert(one.contains("<a href=\"/x/requests/7\"><title>#7 slow: GET /slow/&lt;b&gt; — 200, 18.0 ms, 2 collections, 1.0 MiB allocated</title>"))?
+  Ok(())
+}
+
+test fn saysWhatARequestsHeapCameTo() -> Result<Unit, Error> {
+  assertEqual(heapSaid(aRequest(7, [])), ", 2 collections, 1.0 MiB allocated")?
+  assertEqual(heapSaid(aRequest(7, [], gcCollections: Some(1))), ", 1 collection, 1.0 MiB allocated")?
+  // A request that never ran has no heap to speak of.
+  assertEqual(heapSaid(aRequest(9, [], outcome: "rejected", status: Some(429), gcCollections: None)), "")?
+  assertEqual(knownAllocated(Some(128)), "1.0 KiB")?
+  assertEqual(knownAllocated(None), "—")?
   Ok(())
 }
 
@@ -1447,6 +1495,8 @@ test fn showsARequestsPhasesAndWhatItCameTo() -> Result<Unit, Error> {
   assert(page.contains("resumed on #1 (moved), ran 1.0 ms"))?
   assert(page.contains("<span class=\"ph ph-park\">park</span> <span class=\"nums muted\">+3.0 ms</span> parked on timer.sleep 10.0 ms (answered)"))?
   assert(page.contains("<td class=nums>1234</td>"))?
+  assert(page.contains("<tr><th>collections</th><td class=nums>2</td></tr>"))?
+  assert(page.contains("<tr><th>allocated</th><td class=nums>1.0 MiB <span class=muted>(131072 words, reuse counted each time)</span></td></tr>"))?
   assert(page.contains("<svg class=timeline"))?
   let turned = requestPage("", aRequest(9, [], outcome: "rejected", status: Some(429), reason: "queue_full")).render()
   assert(turned.contains("No phases"))?

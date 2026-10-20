@@ -148,8 +148,23 @@ pub struct End {
     /// Turned away before its app's queue.
     pub rejected: bool,
     pub worker_ns: u64,
-    pub instructions: Option<u64>,
-    pub heap_words: Option<u64>,
+    /// What its run came to: `None` for a request that never ran. One
+    /// `Option` for the four, which keeps the record small
+    /// (`a_record_is_small`).
+    pub meter: Option<Meter>,
+}
+
+/// What a run came to, read from its machine when it ends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Meter {
+    /// Instructions the encoded VM dispatched.
+    pub instructions: u64,
+    /// The heap's size at the end, in words.
+    pub heap_words: u64,
+    /// Garbage collections over the run.
+    pub gc_collections: u64,
+    /// Words handed out over the run, reuse counted each time.
+    pub allocated_words: u64,
 }
 
 /// One request's record.
@@ -582,8 +597,7 @@ impl Recorder {
             reason: Some(reason),
             rejected: true,
             worker_ns: 0,
-            instructions: None,
-            heap_words: None,
+            meter: None,
         };
         self.track(id, app, method, path, arrived, None, Some(end), at);
     }
@@ -754,8 +768,8 @@ pub struct Tracker {
     track: Arc<Track>,
     started: Instant,
     done: bool,
-    /// What its run came to: instructions and heap words.
-    meter: Option<(u64, u64)>,
+    /// What its run came to.
+    meter: Option<Meter>,
 }
 
 impl Tracker {
@@ -797,8 +811,8 @@ impl Tracker {
     }
 
     /// What the run came to, for its end.
-    pub fn meter(&mut self, instructions: u64, heap_words: u64) {
-        self.meter = Some((instructions, heap_words));
+    pub fn meter(&mut self, meter: Meter) {
+        self.meter = Some(meter);
     }
 
     /// The request is answered `status`, for `reason` (an error kind's
@@ -836,18 +850,13 @@ impl Tracker {
             return;
         }
         self.done = true;
-        let (instructions, heap_words) = match self.meter {
-            Some((instructions, heap)) => (Some(instructions), Some(heap)),
-            None => (None, None),
-        };
         let end = End {
             at_ns,
             status,
             reason,
             rejected,
             worker_ns: worker.as_nanos() as u64,
-            instructions,
-            heap_words,
+            meter: self.meter,
         };
         self.track.state.with(|state| state.end = Some(end));
         self.track.ended_ns.store(at_ns, Ordering::Release);
@@ -994,6 +1003,7 @@ impl Span {
 
     pub fn to_json(&self) -> Json {
         let end = self.end.as_ref();
+        let meter = end.and_then(|end| end.meter);
         json!({
             "id": self.id,
             "app": self.app,
@@ -1007,8 +1017,10 @@ impl Span {
             "reason": end.and_then(|end| end.reason),
             "latency_us": self.latency_ns().map(us),
             "worker_us": end.map_or(0, |end| us(end.worker_ns)),
-            "instructions": end.and_then(|end| end.instructions),
-            "heap_words": end.and_then(|end| end.heap_words),
+            "instructions": meter.map(|m| m.instructions),
+            "heap_words": meter.map(|m| m.heap_words),
+            "gc_collections": meter.map(|m| m.gc_collections),
+            "allocated_words": meter.map(|m| m.allocated_words),
             "yields": self.yields,
             "parks": self.parks,
             "moves": self.moves,
@@ -1533,7 +1545,12 @@ mod tests {
         t.run(25 * MS, 1, Began::Resume);
         t.yielded(26 * MS);
         t.run(27 * MS, 1, Began::Continue);
-        t.meter(1234, 56);
+        t.meter(Meter {
+            instructions: 1234,
+            heap_words: 56,
+            gc_collections: 2,
+            allocated_words: 789,
+        });
         t.end(28 * MS, 200, None, Duration::from_millis(3));
         drop(t);
         let span = rec.request(7).unwrap();
@@ -1566,7 +1583,15 @@ mod tests {
         assert_eq!(span.outcome(), "ok");
         assert_eq!(span.latency_ns(), Some(18 * MS));
         let end = span.end.unwrap();
-        assert_eq!((end.instructions, end.heap_words), (Some(1234), Some(56)));
+        assert_eq!(
+            end.meter,
+            Some(Meter {
+                instructions: 1234,
+                heap_words: 56,
+                gc_collections: 2,
+                allocated_words: 789,
+            })
+        );
         assert!(rec.live().requests.is_empty());
     }
 

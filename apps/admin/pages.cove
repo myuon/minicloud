@@ -2878,14 +2878,25 @@ fn chartEnds(aY: Int, aText: String, bY: Int, bText: String) -> Html {
 /// What a hover says of the rows from index `from` to `to` (inclusive): the
 /// time and both values, or for more than one row the times and the
 /// largest of each.
+///
+/// A chart of one line (`bName` empty) says that line's alone.
 fn chartHoverTitle(kind: String, times: Array<Int>, a: Array<Int>, aName: String, b: Array<Int>, bName: String, from: Int, to: Int) -> String {
   let start = timeFull(times.get(from).unwrapOr(0))
   if from == to {
-    return "{start}: {aName} {chartValue(kind, a.get(from).unwrapOr(0))}, {bName} {chartValue(kind, b.get(from).unwrapOr(0))}"
+    let aSaid = "{aName} {chartValue(kind, a.get(from).unwrapOr(0))}"
+    if bName == "" {
+      return "{start}: {aSaid}"
+    }
+    return "{start}: {aSaid}, {bName} {chartValue(kind, b.get(from).unwrapOr(0))}"
   }
   let aLargest = metricsLargest(a.slice(from, to + 1), [])
   let bLargest = metricsLargest(b.slice(from, to + 1), [])
-  "{start} – {timeFull(times.get(to).unwrapOr(0))}: {aName} up to {chartValue(kind, aLargest)}, {bName} up to {chartValue(kind, bLargest)}"
+  let aUpTo = "{aName} up to {chartValue(kind, aLargest)}"
+  let range = "{start} – {timeFull(times.get(to).unwrapOr(0))}"
+  if bName == "" {
+    return "{range}: {aUpTo}"
+  }
+  "{range}: {aUpTo}, {bName} up to {chartValue(kind, bLargest)}"
 }
 
 /// How many columns a chart's hovers are cut into at most: a day is 1440
@@ -2948,6 +2959,10 @@ fn metricsKey(class: String, name: String) -> Html {
 ///
 /// A line needs two points, and a chart of nothing but zeros is a line along
 /// the floor, so each says what is true instead of drawing that.
+///
+/// A chart of one line is the same with `b` empty and `bName` `""`: what
+/// has no second figure in its unit to compare with, as the bytes allocated
+/// a minute.
 fn metricsChart(
   label: String,
   kind: String,
@@ -2973,6 +2988,20 @@ fn metricsChart(
   let top = ticks.get(ticks.length() - 1).unwrapOr(largest)
   let aLast = a.get(a.length() - 1).unwrapOr(0)
   let bLast = b.get(b.length() - 1).unwrapOr(0)
+  if bName == "" {
+    return html"""
+      <p class=legend>{metricsKey(aClass, aName)}</p>
+      <svg class=chart viewBox="0 0 {chartWidth()} {chartHeight()}" role=img aria-label="{label}">
+        <title>{label}: now {aName} {chartValue(kind, aLast)}</title>
+        {chartTimes(times)}
+        {chartGrid(kind, largest, top)}
+        {chartHovers(kind, times, a, aName, b, bName)}
+        <polyline class="ln {aClass}" fill=none points="{metricsPoints(times, a, top)}"/>
+        {chartScale(kind, largest, top)}
+        <text class=ch-end x="{chartRight() - 2}" y="{chartY(aLast, top)}" dy="-0.45em" text-anchor=end>{chartValue(kind, aLast)}</text>
+      </svg>
+      """
+  }
   html"""
     <p class=legend>{metricsKey(aClass, aName)}{metricsKey(bClass, bName)}</p>
     <svg class=chart viewBox="0 0 {chartWidth()} {chartHeight()}" role=img aria-label="{label}">
@@ -2985,6 +3014,33 @@ fn metricsChart(
       {chartScale(kind, largest, top)}
       {chartEnds(chartY(aLast, top), chartValue(kind, aLast), chartY(bLast, top), chartValue(kind, bLast))}
     </svg>
+    """
+}
+
+/// Words of a run's heap as bytes: a word is eight bytes.
+fn wordBytes(words: Int) -> Int {
+  words * 8
+}
+
+/// `part` as a whole percentage of `whole`, 0 of nothing: the share of runs
+/// that collected, where a window with no runs collected in none.
+fn shareOf(part: Int, whole: Int) -> Int {
+  if whole <= 0 {
+    return 0
+  }
+  part * 100 / whole
+}
+
+/// What a page says of how a heap is collected, the once: each run has a
+/// heap of its own that is gone when it ends, and a collection comes only
+/// when it has allocated twice what was live.
+fn gcAbout() -> Html {
+  html"""
+    <p class=muted>Every run has a heap of its own, thrown away when it ends. The heap is
+    collected when what the run allocated since the last collection reaches twice what was
+    live, so a light run often never collects; a run that needs more than
+    <code>max_heap_words</code> fails with a heap error. Allocated is every word handed out,
+    reuse counted each time, at eight bytes a word.</p>
     """
 }
 
@@ -3035,17 +3091,25 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
   var errors = Vector.of()
   var p50 = Vector.of()
   var p99 = Vector.of()
+  var collections = Vector.of()
+  var collected = Vector.of()
+  var allocated = Vector.of()
   var requests = 0
   var failed = 0
   var worst = 0
+  var runsCollected = 0
   for point in points {
     times.push(point.atUnix)
     served.push(point.served)
     errors.push(point.errors)
     p50.push(point.p50Us)
     p99.push(point.p99Us)
+    collections.push(point.gcCollections)
+    collected.push(point.gcRuns)
+    allocated.push(wordBytes(point.allocatedWords))
     requests = requests + point.served
     failed = failed + point.errors
+    runsCollected = runsCollected + point.gcRuns
     if point.p99Us > worst {
       worst = point.p99Us
     }
@@ -3057,6 +3121,7 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
   let p99Rows = p99.freeze()
   let level = if failed == 0 { " is-ok" } else { " is-bad" }
   let said = if failed == 0 { "none in {span}" } else { "of {requests} in {span}" }
+  let heapLevel = if app.heapFailures == 0 { "" } else { " is-bad" }
   let figures = html"""
     <div class=strip>
       <div class=fig>
@@ -3073,6 +3138,16 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
         <span class=lbl>worst p99</span>
         <span class=big>{millis(worst)} ms</span>
         <span class=note>the slowest minute's estimate</span>
+      </div>
+      <div class=fig>
+        <span class=lbl>runs that collected</span>
+        <span class=big>{shareOf(runsCollected, requests)}%</span>
+        <span class=note>{runsCollected} of {requests} in {span}</span>
+      </div>
+      <div class="fig{heapLevel}">
+        <span class=lbl>heap-limit failures</span>
+        <span class=big>{app.heapFailures}</span>
+        <span class=note>since the host started</span>
       </div>
     </div>
     """
@@ -3114,6 +3189,28 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
     "ln-p99",
     "p99, the slow one in a hundred",
   )
+  let gc = metricsChart(
+    "garbage collections and runs that collected a {each}, {span}",
+    "count",
+    timeRows,
+    collections.freeze(),
+    "ln-used",
+    "collections",
+    collected.freeze(),
+    "ln-held",
+    "runs that collected",
+  )
+  let allocation = metricsChart(
+    "memory allocated a {each}, {span}",
+    "bytes",
+    timeRows,
+    allocated.freeze(),
+    "ln-used",
+    "allocated",
+    [],
+    "",
+    "",
+  )
   layout(
     base,
     "apps",
@@ -3122,6 +3219,8 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
       {head}{lead}{reload.control}{steps}{figures}{covers}
       <h2>Traffic</h2>{traffic}
       <h2>Speed, in milliseconds</h2>{speed}
+      <h2>Garbage collection</h2>{gcAbout()}{gc}
+      <h2>Allocation</h2>{allocation}
       """,
     reload.seconds,
     reload.link,
@@ -3328,6 +3427,9 @@ fn platformPage(base: String, request: web.Request) -> Html {
   var total = Vector.of()
   var inFlight = Vector.of()
   var queued = Vector.of()
+  var collections = Vector.of()
+  var collected = Vector.of()
+  var allocated = Vector.of()
   for point in points {
     let of = point.cpuQuotaMillicores.unwrapOr(1000)
     times.push(point.atUnix)
@@ -3339,6 +3441,9 @@ fn platformPage(base: String, request: web.Request) -> Html {
     total.push(point.diskTotalBytes.unwrapOr(0))
     inFlight.push(point.inFlight)
     queued.push(point.queued)
+    collections.push(point.gcCollections.unwrapOr(0))
+    collected.push(point.gcRuns.unwrapOr(0))
+    allocated.push(wordBytes(point.allocatedWords.unwrapOr(0)))
   }
   let timeRows = times.freeze()
   let memoryRows = memory.freeze()
@@ -3403,6 +3508,28 @@ fn platformPage(base: String, request: web.Request) -> Html {
     "ln-held",
     "queued",
   )
+  let gcChart = metricsChart(
+    "garbage collections and runs that collected a {each}, all apps, {span}",
+    "count",
+    timeRows,
+    collections.freeze(),
+    "ln-used",
+    "collections",
+    collected.freeze(),
+    "ln-held",
+    "runs that collected",
+  )
+  let allocationChart = metricsChart(
+    "memory allocated a {each}, all apps, {span}",
+    "bytes",
+    timeRows,
+    allocated.freeze(),
+    "ln-used",
+    "allocated",
+    [],
+    "",
+    "",
+  )
   layout(
     base,
     "platform",
@@ -3413,6 +3540,11 @@ fn platformPage(base: String, request: web.Request) -> Html {
       <h2>CPU</h2>{cpuChart}
       <h2>Disk</h2>{diskChart}
       <h2>Requests</h2>{workChart}
+      <h2>Garbage collection</h2>
+      <p class=muted>Read the allocation beside the Memory chart: allocation churning while
+      memory stays flat means what the runs allocate is being reclaimed; memory climbing with
+      it would mean something is held.</p>
+      {gcAbout()}{gcChart}{allocationChart}
       """,
     reload.seconds,
     reload.link,

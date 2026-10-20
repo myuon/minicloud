@@ -178,6 +178,13 @@ pub struct AppInfo {
     pub rejected: u64,
     pub in_flight: u64,
     pub queued: u64,
+    /// Garbage collections and runs that collected, words allocated, and
+    /// runs that failed for want of heap (`errors.heap`), all since the
+    /// host started ([`crate::stats::AppCounters`]).
+    pub gc_collections: u64,
+    pub gc_runs: u64,
+    pub allocated_words: u64,
+    pub heap_failures: u64,
     /// `(keys, bytes)` in its store, when one is open.
     pub kv: Option<(u64, u64)>,
     /// `[kv] max_keys` and `[kv] max_bytes`: what that store may hold, so a
@@ -351,6 +358,10 @@ impl Front {
                     rejected: sum(&json["rejected"]),
                     in_flight: json["in_flight"].as_u64().unwrap_or_default(),
                     queued: json["queued"].as_u64().unwrap_or_default(),
+                    gc_collections: json["gc_collections"].as_u64().unwrap_or_default(),
+                    gc_runs: json["gc_runs"].as_u64().unwrap_or_default(),
+                    allocated_words: json["allocated_words"].as_u64().unwrap_or_default(),
+                    heap_failures: json["errors"]["heap"].as_u64().unwrap_or_default(),
                     kv: json["kv"]["keys"]
                         .as_u64()
                         .zip(json["kv"]["bytes"].as_u64()),

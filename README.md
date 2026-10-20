@@ -993,6 +993,10 @@ Per app, `/_host/stats` has `state` (`ready`, `refused`, `disabled` or
 `errors` by kind, `rejected` by reason, `in_flight`, `queued`, `parked`,
 `parks`, `yields`, `yields_declined`, `overdue_yields`,
 `blocking_host_calls`, `instructions`, `worker_ms` and `heap_peak_words`,
+`gc_collections` (garbage collections, summed over finished runs), `gc_runs`
+(finished runs that collected at least once) and `allocated_words` (words the
+runs' heaps handed out, reuse counted each time; a word is eight bytes) — a
+run that failed for want of heap is `errors.heap` —
 `queues` (each queue's name, path, waiting and dead) with `queue_sent`,
 `queue_refused`, `queue_in_flight`, `queue_delivered`, `queue_retried` and
 `queue_buried`,
@@ -1057,10 +1061,13 @@ diagnostic, with the source line.
 The counters are running totals, which say what an app has done and not
 when. Once a minute the host writes **what changed over that minute** to
 `<data>/_host/series.sqlite3` — requests, errors, rejections, worker time,
-and p50 and p99 from the request-time histogram — so a rate can be read off
+p50 and p99 from the request-time histogram, and the garbage collections,
+runs that collected and words allocated — so a rate can be read off
 afterwards. The minutes are kept for 48 hours; at the top of each hour the
 hour that ended is rolled up (counts summed, the percentiles kept at their
-worst) into a second table kept for 90 days.
+worst) into a second table kept for 90 days. A store an older host wrote is
+given the newer columns when it is opened (`ALTER TABLE … ADD COLUMN`), its
+old rows reading 0 for an app and unknown for the host.
 
 - `GET /_host/series?app=hello&over=hour` is the last hour minute by minute;
   `over=day` is 24 hours of minutes and `over=month` 30 days of hours.
@@ -1081,17 +1088,24 @@ host reads its cgroup v2 (`memory.current`, `memory.max`, `cpu.stat`,
 keeps a row a minute beside the apps' — the CPU as what it used over the
 minute, the rest as gauges at its end — rolled up into hours with the CPU
 summed, memory and the queues at their largest minute, free disk and free
-memory at their smallest, and the load averaged. A figure it cannot read
+memory at their smallest, and the load averaged. Each host row also carries
+the apps' collections, runs that collected and words allocated over the
+minute, summed across apps. A figure it cannot read
 (not Linux, cgroup v1, a sandbox that hides the file) is `null`, never zero.
 
 - `GET /_host/platform?over=hour|day|month` is those rows, and `now`.
 - The admin app's **Platform** page (`/platform`) shows them against their
-  limits, with a chart each for memory, CPU, disk and requests.
+  limits, with a chart each for memory, CPU, disk and requests, and the
+  apps' garbage collection and allocation: allocation churning while memory
+  stays flat is memory being reclaimed; memory climbing with it is
+  something held.
 
 **Prometheus** scrapes `GET /_host/metrics`: `minicloud_requests_total`,
 `_requests_ok_total`, `_errors_total` by kind, `_rejected_total` by reason,
 `_worker_seconds_total`, `_in_flight`, `_queued`, `_assets_served_total`,
-`_trigger_runs_total` and `minicloud_request_duration_seconds` as a
+`_trigger_runs_total`, `_app_gc_collections_total`, `_app_gc_runs_total`,
+`_app_allocated_bytes_total` (eight bytes a word) and
+`minicloud_request_duration_seconds` as a
 histogram, each labelled by app; and the host's own figures, unlabelled:
 `minicloud_host_memory_current_bytes`, `_memory_max_bytes`, `_rss_bytes`,
 `_cpu_usage_seconds_total`, `_cpu_throttled_seconds_total`,
@@ -1117,7 +1131,8 @@ or by a trigger, a queue or `defer` — always, in memory, with no setting:
   deadline, or the client going away;
 - each **yield**, its slice up and others waiting;
 - how it **ended**: the status, the error kind (`deadline`, `cancelled`,
-  `queue_timeout`, …), its worker time, instructions and heap; or that it
+  `queue_timeout`, …), its worker time, instructions and heap, and the
+  garbage collections its heap made and the words it allocated; or that it
   was **turned away** before its app's queue, and why (`rate_limited`,
   `queue_full`, `server_busy`, `too_large`, `bad_request`, `disabled`).
 

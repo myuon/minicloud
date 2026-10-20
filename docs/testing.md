@@ -168,7 +168,12 @@ so, and what it asserts is counted.
   as a quiet minute; the operations page draws the last hour. The
   histogram's own tests hold the bucketing, the interpolation and the
   difference; the series' hold the upsert, the roll-up (summed counts,
-  worst percentiles), the pruning and that sweeping twice does not double;
+  worst percentiles), the pruning, that sweeping twice does not double, and
+  that a store made with the old columns opens, keeps its rows and takes the
+  new ones; a run of `algo` that allocates enough to collect is counted in
+  `gc_collections`, `gc_runs` and `allocated_words`, in Prometheus, its
+  minute, the platform's minute and its timeline record, while `hello`
+  allocates and never collects;
 - the platform (`platform.rs`, the Platform page in `admin.rs`, and
   `platform.rs`'s and `series.rs`'s unit tests), with the figures from
   `Host::set_platform_source` and never the machine's: a minute is the CPU
