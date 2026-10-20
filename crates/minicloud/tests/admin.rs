@@ -1294,6 +1294,25 @@ fn the_platform_page_shows_the_host_against_its_limits() {
     ] {
         assert!(body.contains(expected), "no `{expected}` in:\n{body}");
     }
+    // The apps' heaps, summed, with how to read them beside the memory.
+    for expected in [
+        "<h2>Garbage collection</h2>",
+        "allocation churning while memory stays flat",
+        "at eight bytes a word",
+    ] {
+        assert!(body.contains(expected), "no `{expected}` in:\n{body}");
+    }
+    // And an app's own: its share of runs that collected, and the runs
+    // its heap limit failed.
+    let metrics = ui(&host, "GET", "/apps/hello/metrics", &authed(), "").body;
+    for expected in [
+        "<h2>Garbage collection</h2>",
+        "<h2>Allocation</h2>",
+        "<span class=lbl>runs that collected</span>",
+        "<span class=lbl>heap-limit failures</span>",
+    ] {
+        assert!(metrics.contains(expected), "no `{expected}` in:\n{metrics}");
+    }
     // The other windows: the month has no hours rolled up yet.
     let month = ui(&host, "GET", "/platform?over=month", &authed(), "").body;
     assert!(
@@ -1351,7 +1370,8 @@ fn the_timeline_pages_show_where_each_request_was() {
         "<b>the last 10 seconds</b>",
         "<svg class=timeline",
         // A lane is the way to its request, with what it is on hover.
-        "<a href=\"/requests/102\"><title>#102 slow: GET /slow/sleep — 200, 1080.0 ms</title>",
+        "<a href=\"/requests/102\"><title>#102 slow: GET /slow/sleep — 200, 1080.0 ms, 0 collections, \
+         1.5 MiB allocated</title>",
         // 102 resumed on another worker; 105's deadline; 107 turned away.
         "class=tl-moved",
         "class=tl-crit",

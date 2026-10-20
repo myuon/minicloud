@@ -452,7 +452,28 @@ fn laneMarks(request: host.TimelineRequest, since: Int, until: Int, top: Int, ro
 
 /// What a lane says on hover: which request, how it ended, how long.
 fn laneTitle(request: host.TimelineRequest) -> String {
-  "#{request.id} {request.app}: {request.method} {request.path} — {requestStatus(request)}, {requestLatency(request)}"
+  "#{request.id} {request.app}: {request.method} {request.path} — {requestStatus(request)}, {requestLatency(request)}{heapSaid(request)}"
+}
+
+/// What a request's heap came to, for a hover: its collections and what it
+/// allocated, or nothing for a request that never ran.
+fn heapSaid(request: host.TimelineRequest) -> String {
+  match request.gcCollections {
+    Some(collections) => {
+      let gcs = if collections == 1 { "1 collection" } else { "{collections} collections" }
+      ", {gcs}, {knownAllocated(request.allocatedWords)} allocated"
+    }
+    None => ""
+  }
+}
+
+/// Words a run allocated as bytes, or a dash for a run the host has no
+/// figure of.
+fn knownAllocated(words: Option<Int>) -> String {
+  match words {
+    Some(n) => platformBytes(wordBytes(n))
+    None => "—"
+  }
 }
 
 /// A lane as the way to its request: the whole row is the link, and the
@@ -879,6 +900,8 @@ fn requestPage(base: String, request: host.TimelineRequest) -> Html {
         <tr><th>worker time</th><td class=nums>{millis(request.workerUs)} ms</td></tr>
         <tr><th>instructions</th><td class=nums>{knownCount(request.instructions)}</td></tr>
         <tr><th>heap words</th><td class=nums>{knownCount(request.heapWords)}</td></tr>
+        <tr><th>collections</th><td class=nums>{knownCount(request.gcCollections)}</td></tr>
+        <tr><th>allocated</th><td class=nums>{knownAllocated(request.allocatedWords)} <span class=muted>({knownCount(request.allocatedWords)} words, reuse counted each time)</span></td></tr>
         <tr><th>yields</th><td class=nums>{request.yields}</td></tr>
         <tr><th>parks</th><td class=nums>{request.parks}</td></tr>
         <tr><th>moves</th><td class=nums>{request.moves} <span class=muted>(a run on another worker than the one before)</span></td></tr>
