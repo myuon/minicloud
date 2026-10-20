@@ -1222,11 +1222,14 @@ impl Segment {
         (self.busy_ns.min(span) as u128 * 1000 / span as u128) as u64
     }
 
-    /// `other`, which starts after it on its worker, made part of it.
+    /// `other`, which starts after it on its worker, made part of it. Where
+    /// the two overlap — a worker's runs do not, but two clocks read a
+    /// little apart can say so — the time is counted once.
     fn absorb(&mut self, other: &Segment) {
+        let overlap = self.to_ns.min(other.to_ns).saturating_sub(other.from_ns);
+        self.busy_ns += other.busy_ns.saturating_sub(overlap);
         self.to_ns = self.to_ns.max(other.to_ns);
         self.runs += other.runs;
-        self.busy_ns += other.busy_ns;
         for (app, runs) in &other.apps {
             match self.apps.iter_mut().find(|(known, _)| known == app) {
                 Some((_, count)) => *count += runs,
@@ -1900,6 +1903,14 @@ mod tests {
             Segment::run(0, 1, Arc::from("a"), 5, 5).occupancy_milli(),
             1000
         );
+        // Runs that overlap count their time once.
+        let both = merge_segments(&[seg(0, "a", 0, 10), seg(0, "a", 6, 12)], 0);
+        assert_eq!(
+            (both.len(), both[0].busy_ns, both[0].occupancy_milli()),
+            (1, 12, 1000)
+        );
+        let inside = merge_segments(&[seg(0, "a", 0, 10), seg(0, "a", 2, 4)], 0);
+        assert_eq!((inside[0].to_ns, inside[0].busy_ns), (10, 10));
         // Merging what was merged adds up the same.
         let again = merge_segments(&merged, 100);
         assert_eq!(again.len(), 2);

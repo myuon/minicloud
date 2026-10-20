@@ -587,6 +587,27 @@ fn every_admin_page() {
         ("timeline-app-notes-5m", "?app=notes&over=5m"),
         ("timeline-app-nobody", "?app=nobody"),
         ("timeline-app-hostile", &format!("?app={HOSTILE_ENCODED}")),
+        ("timeline-over-15m", "?over=15m"),
+        ("timeline-over-1h", "?over=1h"),
+        // Windows of the past: two seconds, one app's by `span`, before
+        // the host started, and one past now.
+        (
+            "timeline-past-2s",
+            "?from=1790000392000&until=1790000394000",
+        ),
+        (
+            "timeline-past-app-slow",
+            "?app=slow&from=1790000392000&span=2",
+        ),
+        (
+            "timeline-past-before-start",
+            "?from=1789999000000&until=1789999060000",
+        ),
+        (
+            "timeline-past-into-now",
+            "?from=1790000395000&until=1790000999000",
+        ),
+        ("timeline-past-garbled", "?from=soon&until=later"),
     ] {
         snap.page(&host, name, &format!("/timeline{query}"));
     }
@@ -612,6 +633,25 @@ fn every_admin_page() {
             &format!("/requests/{id}"),
         );
     }
+    // A load's worth of runs, at windows where they merge and where they
+    // do not; then the fixed timeline again.
+    host.set_timeline_source(merged_timeline());
+    for (name, query) in [
+        ("timeline-merged-5m", "?over=5m"),
+        ("timeline-merged-app-crunch", "?app=crunch&over=5m"),
+        (
+            "timeline-merged-past-10s",
+            "?from=1790000360000&until=1790000370000",
+        ),
+        (
+            "timeline-merged-past-1s",
+            "?from=1790000360000&until=1790000361000",
+        ),
+    ] {
+        snap.page(&host, name, &format!("/timeline{query}"));
+    }
+    let (timeline, _again) = fixed_timeline();
+    host.set_timeline_source(timeline);
     check_history(&host);
 
     // The store: a page, the next, a prefix, a prefix of nothing, keys.

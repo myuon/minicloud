@@ -403,6 +403,76 @@ pub fn fixed_timeline() -> (
     (rec, vec![parked, running, waiting])
 }
 
+/// A request timeline of fixed times like a closed-loop load's, for the
+/// Timeline page's merged bars ([`minicloud::timeline::Recorder::fixed`]):
+/// two workers, a clock standing at 400 s, and
+///
+/// - from 300 s to 320 s, `crunch` alone on worker #0: an 8 ms run every
+///   20 ms, the worker busy two fifths of the time;
+/// - from 330 s to 390 s, each worker taking one request after another,
+///   3 ms apart: `hello` (a 1 ms run), `crunch` (8 ms) and `slow` (a 1 ms run,
+///   a 30 ms `timer.sleep`, and a 1 ms run on the same worker when it is
+///   next free), in turn.
+///
+/// At five minutes a pixel is more than the 3 ms between runs, so each
+/// worker's runs merge into a few bars; at a second, they do not.
+pub fn merged_timeline() -> minicloud::timeline::Recorder {
+    use minicloud::timeline::{Began, By, Recorder, Tracker};
+    const MS: u64 = 1_000_000;
+    let rec = Recorder::fixed(2, 1_790_000_000_000, 400_000 * MS);
+    let hello = rec.app("hello");
+    let crunch = rec.app("crunch");
+    let slow = rec.app("slow");
+    let mut id = 1_000;
+    let done = |t: &mut Tracker, at: u64, worker_ms: u64| {
+        t.end(at, 200, None, Duration::from_millis(worker_ms));
+    };
+    for k in 0..1_000 {
+        let at = 300_000 * MS + k * 20 * MS;
+        let mut t = rec.admit(id, crunch, "POST", "/crunch/", at, at);
+        t.run(at + MS, 0, Began::Start);
+        done(&mut t, at + 9 * MS, 8);
+        id += 1;
+    }
+    for worker in 0..2u64 {
+        let mut at = 330_000 * MS + worker * MS;
+        // The sleeping requests of this worker, each with when its sleep ends.
+        let mut sleeping: Vec<(Tracker, u64)> = Vec::new();
+        let mut turn = 0;
+        while at < 390_000 * MS {
+            if let Some(k) = sleeping.iter().position(|(_, ready)| *ready <= at) {
+                let (mut t, _) = sleeping.remove(k);
+                t.run(at, worker as usize, Began::Resume);
+                done(&mut t, at + MS, 2);
+                at += 4 * MS;
+                continue;
+            }
+            let (app, path, length) = match turn % 3 {
+                0 => (hello, "/hello/", 1),
+                1 => (crunch, "/crunch/", 8),
+                _ => (slow, "/slow/sleep", 1),
+            };
+            turn += 1;
+            let mut t = rec.admit(id, app, "GET", path, at, at);
+            id += 1;
+            t.run(at, worker as usize, Began::Start);
+            if app == slow {
+                t.park(at + MS, "timer.sleep");
+                t.ready(at + 31 * MS, By::Answer);
+                sleeping.push((t, at + 31 * MS));
+            } else {
+                done(&mut t, at + length * MS, length);
+            }
+            at += (length + 3) * MS;
+        }
+        for (mut t, ready) in sleeping {
+            t.run(ready, worker as usize, Began::Resume);
+            done(&mut t, ready + MS, 2);
+        }
+    }
+    rec
+}
+
 /// A load run's status of fixed figures, for the admin's Load page
 /// ([`minicloud::Host::set_load_status`]): a mixed run at 50 a second, `crunch`
 /// missing.
