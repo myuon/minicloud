@@ -96,7 +96,15 @@ never by trusting it:
   host module holds outside it; above `u32::MAX` words, the most the runtime
   addresses, it is refused. A run's heap and declined yields are read at its
   every park and yield as well as its answer (`heap_peak_words`,
-  `yields_declined`).
+  `yields_declined`). Its garbage collections and the words it allocated
+  are read once, when it ends, from the `OwnedVm` that answered
+  (`OwnedVm::collections`, `allocated_words`): a parked or yielded run does
+  not expose them, and as each run has a heap of its own the machine's
+  totals at the end are the run's (`gc_collections`, `gc_runs`,
+  `allocated_words`). The heap collects when what was allocated since the
+  last collection reaches twice what was live, so most light runs never
+  collect; how often runs do, and how much they churn, is what the admin's
+  Garbage collection charts show.
 - **The native tier is used where it exists.** `--backend auto` compiles each
   app with `PreparedProgram::with_native` once at load on Unix x86-64 and
   says once, on stderr, that it falls back to the encoded VM elsewhere;
