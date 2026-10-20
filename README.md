@@ -973,7 +973,7 @@ token` secret is the way in. See
 | `GET /_host/metrics` | the same, in the text format Prometheus scrapes (`version=0.0.4`), with the request times as a histogram |
 | `GET /_host/series?app=&over=hour\|day\|month` | what each app did minute by minute (or, for a month, hour by hour) |
 | `GET /_host/platform?over=hour\|day\|month` | the host itself — its cgroup's memory against `MemoryMax`, CPU against `CPUQuota` and throttling, the data directory's disk, the machine's load and memory, workers busy and requests queued — now, and minute by minute (or hour by hour) |
-| `GET /_host/timeline?app=&over=10s\|1m\|5m` | **where each request went**: when it arrived, how long it waited for a worker, each run on which worker, each park at which host call and what ended it, each yield, and how it ended — with the workers' run segments, three strips (workers running, runs parked, requests waiting) and p50/p99 per app; `since=`/`until=` (Unix milliseconds) instead of `over`. See [The request timeline](#the-request-timeline) |
+| `GET /_host/timeline?app=&over=10s\|1m\|5m\|15m\|1h` | **where each request went**: when it arrived, how long it waited for a worker, each run on which worker, each park at which host call and what ended it, each yield, and how it ended — with the workers' run segments, three strips (workers running, runs parked, requests waiting) and p50/p99 per app; `since=`/`until=` (Unix milliseconds) instead of `over`. See [The request timeline](#the-request-timeline) |
 | `GET /_host/timeline/<id>` | one request of it, its phases whole; 404 once it is no longer kept |
 | `GET /_host/live` | the requests in flight now — waiting for a worker, running on worker N, parked at `fetch` since t, yielded — and what each worker is running |
 | `GET /_host/load` | the host's own load run — `running`, the `current` and the `last` run with what it sent and how it was answered, and the `limits`. Started and stopped on the admin listener only. See [Load from the admin](#load-from-the-admin) |
@@ -1136,8 +1136,8 @@ or by a trigger, a queue or `defer` — always, in memory, with no setting:
   was **turned away** before its app's queue, and why (`rate_limited`,
   `queue_full`, `server_busy`, `too_large`, `bad_request`, `disabled`).
 
-It keeps the **last 5 minutes, and at most 20,000 requests** (about 8 MB),
-the oldest forgotten first; a request still in flight is kept until it ends.
+It keeps the **last hour, and at most 100,000 requests** (about 40 MB at
+most, a record being about 400 bytes), the oldest forgotten first; a request still in flight is kept until it ends.
 Nothing of it is written to disk, so a restart starts it empty. **The query
 string is not recorded** — only the method and the path, cut at 256 bytes —
 and neither are headers or bodies. `kv` and `sql` calls answer inside the
@@ -1150,13 +1150,32 @@ files served from an app's `assets/` never run and are not in it.
   the workers' `segments`, the `strips`, and the `summary`. Times are
   microseconds since the host started (`started_unix_ms`). At most the
   newest 2,000 requests and 10,000 segments are answered; the summary and
-  the strips count all of them.
+  the strips count all of them. `since=`/`until=` (Unix milliseconds) ask
+  for a window of the past instead of `over`, held between the host's start
+  and now. A segment carries `busy_us` and its runs per app (`apps`). A
+  window reads only the records that overlap it — each shard's ring is in
+  arrival order — so an hour of 100,000 requests answers in about 40 ms.
 - `GET /_host/timeline/<id>` is one request; `GET /_host/live` the ones in
   flight, and what each worker is running.
 - The admin app draws them: **Live** (refreshed every 2 s), **Timeline** —
-  worker swimlanes above, a lane per request below (the newest 200), as the
-  Cove repository's edge sample draws its timeline — and a request's own
-  page from either, its phases in words.
+  worker swimlanes above, a lane per request below (the newest 200 of the
+  window), as the Cove repository's edge sample draws its timeline — and a
+  request's own page from either, its phases in words, with a link to the
+  timeline around it.
+- **Timeline is read in JST and moves through the hour.** The live windows
+  are 10 s, 1 min, 5 min, 15 min and 1 h (`?over=`), refreshed every 5 s;
+  `?from=&until=` (Unix ms) or `?from=&span=` (seconds) is a window of the
+  past, which does not refresh. Links move it — **← earlier** and **later
+  →** by half a window (later past now is live again), **zoom out** five
+  times, **now** — and ten bands over the time axis and the strips, lit
+  under the pointer, **zoom in** on a fifth of the window around them. All
+  links and SVG, no script.
+- Runs on one worker less than a thousandth of the window apart are drawn
+  as one bar — a pixel cannot part them — but **not as one request**: a
+  faint band over their stretch with a bar as high as the worker was busy
+  in it, hatched when they are of several apps, titled
+  `N runs merged (hello 3200, crunch 2100, slow 2150), busy X ms of Y ms`,
+  and a link to that stretch zoomed in.
 
 Recording costs nothing measurable: under 1% of `hello`'s capacity with
 keep-alive, the worst case, within the spread between rounds, and nothing

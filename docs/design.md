@@ -984,8 +984,9 @@ The end is recorded before the answer is sent, so a client that has its
 answer finds it recorded. A flight dropped without an end — a panic, a
 queue closed under it — ends its record as the HTTP side answers it, 500.
 
-**Bounded, and cheap where it is hot.** The last 5 minutes and at most
-20,000 requests, the oldest first; a request still in flight is set aside
+**Bounded, and cheap where it is hot.** The last hour and at most
+100,000 requests — about 40 MB at the ~400 bytes a record is — the oldest
+first; a request still in flight is set aside
 rather than forgotten. Nothing is written down: it is a picture of now, and
 the minutes are the history. The HTTP threads are what a host answering
 small requests runs out of first, so what they do for the timeline is one
@@ -1005,6 +1006,15 @@ asked, into phases — waiting for a worker (after arrival, a park or a
 yield), running on a worker (and whether it moved), parked at a host call
 (and what ended it) — and a window of them into the workers' run segments,
 three strips of mean counts (running, parked, waiting) and p50/p99 per app.
+A window reads only what overlaps it: a binary search over each shard's
+ring, which is in arrival order, skips what arrived after it, and of what
+arrived before only the end time — an atomic — is read; only the newest
+2,000 are assembled whole. Segments of one worker closer than a pixel are
+merged for a page, keeping how long the worker ran in them and how many
+runs each app's were, so a merged bar is drawn by how busy the worker was
+and never as one request that held it. A page asks for a window of the past
+in Unix milliseconds (`host.timelineRange`), which the host turns into its
+own time; panning and zooming are links, and the axis is the clock in JST.
 A test hands the views a recorder filled with times of its own
 (`Host::set_timeline_source`, `Recorder::fixed`), so a page of the timeline
 is the same every run.
