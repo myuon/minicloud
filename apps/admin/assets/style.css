@@ -338,7 +338,7 @@ li.app .flags{justify-content:flex-start;margin-top:.15em}
 li.app .count{font-size:13px}
 }
 /* the metrics page: the chart is the width of the page and as tall as its own box makes it — no max-height, which would letterbox it: the viewBox would be fitted to the shorter side and the line would stop short of both edges. two lines on one chart, told apart by their dashes as well as their colour — someone may not see colour — and drawn at the width of the page, which is what the viewBox is for. non-scaling-stroke keeps a line as thick on a phone as on a desk, where scaling the box down would thin it to a hair */
-svg.chart{display:block;width:100%;max-width:56rem;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+svg.chart{display:block;width:100%;max-width:42rem;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
 /* the scale, the times and the ends of the lines. The text is in the units of the viewBox (720 wide), so it is scaled with the chart: about 13px on a desk, and set larger below where the chart is drawn smaller, so that on a phone, where it is half its size, it is still about 12px. Each label has a halo of the card's colour, so a line that crosses it does not cross it out. The grid is recessive, and a phone shows every other time */
 svg.chart text{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;paint-order:stroke;stroke:var(--card);stroke-width:3px;stroke-linejoin:round}
 svg.chart .ch-end{fill:var(--text);font-weight:650}

@@ -480,9 +480,9 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
   assertEqual(metricsLargest(a, b), 10)?
   let times = Vector.of(0, 60, 120).freeze()
   // from 8 to 712 across and from 248 (zero) up to 30 (the top of the scale)
-  assertEqual(metricsPoints(times, a, 10), "8,248 360,139 712,30")?
+  assertEqual(metricsPoints(times, a, 10), "8,428 360,229 712,30")?
   // a minute with no row is a gap, not a closer neighbour
-  assertEqual(metricsPoints(Vector.of(0, 60, 180).freeze(), a, 10), "8,248 242,139 712,30")?
+  assertEqual(metricsPoints(Vector.of(0, 60, 180).freeze(), a, 10), "8,428 242,229 712,30")?
   let chart = metricsChart("two things", "count", times, a, "ln-served", "served", b, "ln-errors", "errors").render()
   assert(chart.contains("role=img aria-label=\"two things\""))?
   assert(chart.contains("<title>two things: now served 10, errors 5</title>"))?
@@ -492,7 +492,7 @@ test fn scalesTwoLinesToTheLargerAndTellsThemApart() -> Result<Unit, Error> {
   assert(chart.contains("class=legend"))?
   // the scale: 0, 5, 10, a line each with its value
   assert(chart.contains("<text x=\"12\" y=\"25\">10</text>"))?
-  assert(chart.contains("<text x=\"12\" y=\"134\">5</text>"))?
+  assert(chart.contains("<text x=\"12\" y=\"224\">5</text>"))?
   // the times under the plot, JST: 9 hours past UTC's
   assert(chart.contains("text-anchor=start>09:00</text>"))?
   assert(chart.contains("text-anchor=end>09:02</text>"))?
@@ -624,7 +624,7 @@ test fn keepsTheEndsOfTwoLinesApart() -> Result<Unit, Error> {
   assert(close.contains("y=\"110\" dy=\"1.15em\" text-anchor=end>5"))?
   assert(close.contains("y=\"100\" dy=\"-0.45em\" text-anchor=end>6"))?
   // close at the floor: the higher one a line further up
-  let floor = chartEnds(248, "0", 248, "1").render()
+  let floor = chartEnds(428, "0", 428, "1").render()
   assert(floor.contains("dy=\"-0.45em\""))?
   assert(floor.contains("dy=\"-1.5em\""))?
   // the same value at the same place: said once

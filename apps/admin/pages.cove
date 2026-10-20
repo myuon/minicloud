@@ -2540,7 +2540,7 @@ fn metricsLargest(a: Array<Int>, b: Array<Int>) -> Int {
   largest
 }
 
-// The charts' box, in the units of their `viewBox`: 720 wide and 280 tall,
+// The charts' box, in the units of their `viewBox`: 720 wide and 460 tall,
 // the plot inset from the left and right by 8, with 30 above it for the
 // label of its top line and 32 below it for the times. The text is in the
 // same units and is scaled with the box, so the stylesheet sets it larger
@@ -2552,7 +2552,7 @@ fn chartWidth() -> Int {
 }
 
 fn chartHeight() -> Int {
-  280
+  460
 }
 
 fn chartLeft() -> Int {
@@ -2568,7 +2568,7 @@ fn chartTop() -> Int {
 }
 
 fn chartBottom() -> Int {
-  248
+  428
 }
 
 /// The step of a scale from 0 to `largest` with at most `count` steps: 1, 2
