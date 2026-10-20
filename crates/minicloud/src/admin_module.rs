@@ -353,6 +353,14 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("rejected", INT),
                 field("inFlight", INT),
                 field("queued", INT),
+                // Since the host started: garbage collections, runs that
+                // collected at least once, words allocated (eight bytes a
+                // word, reuse counted each time) and runs that failed for
+                // want of heap (`max_heap_words`).
+                field("gcCollections", INT),
+                field("gcRuns", INT),
+                field("allocatedWords", INT),
+                field("heapFailures", INT),
                 // -1 for an app with no store open.
                 field("kvKeys", INT),
                 field("kvBytes", INT),
@@ -677,6 +685,10 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("workerUs", INT),
                 field("instructions", OPT_INT),
                 field("heapWords", OPT_INT),
+                // Collections the run made and words it allocated; `None`
+                // for a request that never ran.
+                field("gcCollections", OPT_INT),
+                field("allocatedWords", OPT_INT),
                 field("yields", INT),
                 field("parks", INT),
                 field("moves", INT),
@@ -1023,6 +1035,10 @@ fn app_value(info: AppInfo) -> Value {
             ("rejected", int(info.rejected)),
             ("inFlight", int(info.in_flight)),
             ("queued", int(info.queued)),
+            ("gcCollections", int(info.gc_collections)),
+            ("gcRuns", int(info.gc_runs)),
+            ("allocatedWords", int(info.allocated_words)),
+            ("heapFailures", int(info.heap_failures)),
             (
                 "kvKeys",
                 info.kv.map_or(Value::int(-1), |(keys, _)| int(keys)),
@@ -1281,6 +1297,14 @@ fn timeline_request_value(span: &crate::timeline::Span) -> Value {
             ("workerUs", us(end.map_or(0, |end| end.worker_ns))),
             ("instructions", known(end.and_then(|end| end.instructions))),
             ("heapWords", known(end.and_then(|end| end.heap_words))),
+            (
+                "gcCollections",
+                known(end.and_then(|end| end.gc_collections)),
+            ),
+            (
+                "allocatedWords",
+                known(end.and_then(|end| end.allocated_words)),
+            ),
             ("yields", int(span.yields)),
             ("parks", int(span.parks)),
             ("moves", int(span.moves)),

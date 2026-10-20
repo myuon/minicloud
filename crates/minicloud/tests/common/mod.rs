@@ -323,7 +323,14 @@ pub fn fixed_timeline() -> (
     let proxy = rec.app("proxy");
     let at = |ms: u64| 392_000 * MS + ms * MS;
     let ok = |t: &mut minicloud::timeline::Tracker, end: u64, worker_ms: u64| {
-        t.meter(1_000 * worker_ms + 345, 120 + worker_ms);
+        // A run of a tenth of a second or more collected, one per tenth;
+        // every run allocated.
+        t.meter(minicloud::timeline::Meter {
+            instructions: 1_000 * worker_ms + 345,
+            heap_words: 120 + worker_ms,
+            gc_collections: worker_ms / 100,
+            allocated_words: 4_096 * worker_ms,
+        });
         t.end(end, 200, None, Duration::from_millis(worker_ms));
     };
 

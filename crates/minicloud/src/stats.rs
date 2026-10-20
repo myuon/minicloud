@@ -169,6 +169,18 @@ pub struct AppCounters {
     pub worker_ns: AtomicU64,
     /// The largest heap a run had at a park, a yield or its answer, in words.
     pub heap_peak_words: AtomicU64,
+    /// Garbage collections, summed over every finished run: the runtime's
+    /// `OwnedVm::collections`, read when the run ends. Each run has a heap of
+    /// its own, collected when what it allocated since the last collection
+    /// reaches twice what was live, so a light run often never collects.
+    pub gc_collections: AtomicU64,
+    /// Finished runs that collected at least once.
+    pub gc_runs: AtomicU64,
+    /// Words the runs' heaps handed out, reuse counted each time
+    /// (`OwnedVm::allocated_words`), summed over every finished run. A word is
+    /// eight bytes. A run that failed for want of heap is
+    /// [`ErrorKind::Heap`], not counted here twice.
+    pub allocated_words: AtomicU64,
     /// `fetch` calls made, refused by the allowlist or a limit before
     /// anything was sent, and failed (no response: unreachable, too slow,
     /// too large).
@@ -251,6 +263,17 @@ impl AppCounters {
         self.recent.lock().unwrap().iter().cloned().collect()
     }
 
+    /// What a finished run's heap came to: `collections` it made and
+    /// `allocated` words it handed out.
+    pub fn heap_run(&self, collections: u64, allocated: u64) {
+        self.gc_collections
+            .fetch_add(collections, Ordering::Relaxed);
+        if collections > 0 {
+            self.gc_runs.fetch_add(1, Ordering::Relaxed);
+        }
+        self.allocated_words.fetch_add(allocated, Ordering::Relaxed);
+    }
+
     pub fn errors(&self, kind: ErrorKind) -> u64 {
         self.errors[kind as usize].load(Ordering::Relaxed)
     }
@@ -299,6 +322,9 @@ impl AppCounters {
             "instructions": read(&self.instructions),
             "worker_ms": read(&self.worker_ns) as f64 / 1e6,
             "heap_peak_words": read(&self.heap_peak_words),
+            "gc_collections": read(&self.gc_collections),
+            "gc_runs": read(&self.gc_runs),
+            "allocated_words": read(&self.allocated_words),
             "updates": read(&self.updates),
             "updates_refused": read(&self.updates_refused),
             "fetch": {

@@ -72,7 +72,7 @@ pub struct OpsContext<'a> {
 }
 
 /// The keys summed into the stats' `totals`.
-const TOTALS: [&str; 15] = [
+const TOTALS: [&str; 18] = [
     "served",
     "ok",
     "assets_served",
@@ -86,6 +86,9 @@ const TOTALS: [&str; 15] = [
     "overdue_yields",
     "blocking_host_calls",
     "instructions",
+    "gc_collections",
+    "gc_runs",
+    "allocated_words",
     "worker_ms",
     "updates",
 ];
@@ -343,6 +346,29 @@ pub fn metrics(context: &OpsContext, platform: &crate::platform::PlatformSample)
             .collect();
         counter(name, help, "gauge", values);
     }
+    counter(
+        "app_gc_collections_total",
+        "Garbage collections an app's runs made, summed over finished runs.",
+        "counter",
+        per_app(&|slot| slot.counters.gc_collections.load(Ordering::Relaxed)),
+    );
+    counter(
+        "app_gc_runs_total",
+        "Finished runs of an app that collected at least once.",
+        "counter",
+        per_app(&|slot| slot.counters.gc_runs.load(Ordering::Relaxed)),
+    );
+    counter(
+        "app_allocated_bytes_total",
+        "Bytes an app's runs allocated, reuse counted each time (eight a word).",
+        "counter",
+        per_app(&|slot| {
+            slot.counters
+                .allocated_words
+                .load(Ordering::Relaxed)
+                .saturating_mul(8)
+        }),
+    );
     counter(
         "assets_served_total",
         "Static files the host answered for an app.",
