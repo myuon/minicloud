@@ -119,16 +119,19 @@ fn assetQuery(version: String) -> String {
 ///
 /// `refresh` is the seconds after which the browser loads the page again
 /// (`<meta http-equiv=refresh>`, which is HTML and not a script, so the CSP
-/// has nothing to say about it); 0, the default, never.
-fn layout(base: String, here: String, title: String, content: Html, refresh: Int = 0) -> Html {
+/// has nothing to say about it); 0, the default, never. `again` is the URL
+/// it loads, "" for the one it is on — which for a page answered to a POST
+/// is the POST's path, which a GET does not answer; [`reloading`] says which.
+fn layout(base: String, here: String, title: String, content: Html, refresh: Int = 0, again: String = "") -> Html {
   let v = assetQuery(host.selfVersion())
-  let again = html.only(refresh > 0, html"""<meta http-equiv=refresh content="{refresh}">""")
+  let when = if again == "" { "{refresh}" } else { "{refresh}; url={again}" }
+  let reload = html.only(refresh > 0, html"""<meta http-equiv=refresh content="{when}">""")
   html"""
     <!doctype html>
     <html lang=en>
     <head>
       <meta charset=utf-8>
-      <meta name=viewport content="width=device-width,initial-scale=1">{again}
+      <meta name=viewport content="width=device-width,initial-scale=1">{reload}
       <title>{title} · minicloud admin</title>
       <link rel=stylesheet href="{base}/style.css{v}">
       <link rel=icon href="{base}/favicon.svg{v}" type="image/svg+xml">
@@ -140,6 +143,44 @@ fn layout(base: String, here: String, title: String, content: Html, refresh: Int
     </body>
     </html>
     """
+}
+
+/// How a page that loads itself again does it: every `seconds`, to `link`,
+/// and the line that says so with the way to stop it — or, paused, no
+/// reload at all and the way to start it again.
+struct Reload {
+  seconds: Int
+  link: String
+  control: Html
+}
+
+/// Whether `?refresh=off` paused a page that reloads itself.
+fn paused(request: web.Request) -> Bool {
+  request.query.get("refresh").unwrapOr("").trim() == "off"
+}
+
+/// A page at `link` — its own query (`over`, `app`) in it, and no
+/// `refresh` — that loads itself again every `seconds`, unless `paused`.
+///
+/// The pause is a link and not a button: there is no script to stop a
+/// `<meta>` refresh, so stopping is a page without one, which is the same
+/// URL with `refresh=off`, and resuming is the URL without it. A paused page
+/// stays paused for as long as it is looked at, which is what pausing is for:
+/// a figure stays still to be read.
+fn reloading(link: String, seconds: Int, paused: Bool) -> Reload {
+  if paused {
+    return Reload(
+      seconds: 0,
+      link: link,
+      control: html"""<p class=reload>paused · <a href="{link}">resume</a></p>""",
+    )
+  }
+  let joint = if link.contains("?") { "&" } else { "?" }
+  Reload(
+    seconds: seconds,
+    link: link,
+    control: html"""<p class=reload>refreshing every {seconds} s · <a href="{link}{joint}refresh=off">pause</a></p>""",
+  )
 }
 
 fn badge(state: String) -> Html {
@@ -2422,10 +2463,9 @@ fn logPage(base: String, app: host.App, request: web.Request) -> Html {
 // ---------------------------------------------------------- metrics
 //
 // How fast an app is and how much it served, over time. The numbers are the
-// ones the host samples each minute (`host.series`), drawn the way the
-// operations page draws its sparkline — scaled to the largest value in the
-// window, the number in a `<title>` and no axis — only bigger, because here
-// the picture is the subject and not a cell in a table.
+// ones the host samples each minute (`host.series`), drawn as a chart with
+// a scale and times to read it by — unlike the operations page's sparkline,
+// which is a cell in a table, here the picture is the subject.
 
 /// Which window `?over=` asks for. One of the three the host knows, and
 /// `hour` for anything else: the host would fall back to an hour as well,
@@ -2500,31 +2540,352 @@ fn metricsLargest(a: Array<Int>, b: Array<Int>) -> Int {
   largest
 }
 
-/// One line's `points`, in a box 640 by 120 with 4 of margin on every side,
-/// so that the stroke of the first, last, highest and lowest value is not
-/// cut in half by the edge. Whole numbers: nothing a screen draws is finer
-/// than a pixel at this size.
+// The charts' box, in the units of their `viewBox`: 720 wide and 280 tall,
+// the plot inset from the left and right by 8, with 30 above it for the
+// label of its top line and 32 below it for the times. The text is in the
+// same units and is scaled with the box, so the stylesheet sets it larger
+// on a narrow screen, where the box is drawn at half its size, and the
+// room above and below the plot is what that larger text needs.
+
+fn chartWidth() -> Int {
+  720
+}
+
+fn chartHeight() -> Int {
+  280
+}
+
+fn chartLeft() -> Int {
+  8
+}
+
+fn chartRight() -> Int {
+  712
+}
+
+fn chartTop() -> Int {
+  30
+}
+
+fn chartBottom() -> Int {
+  248
+}
+
+/// The step of a scale from 0 to `largest` with at most `count` steps: 1, 2
+/// or 5 of a power of ten, the least of them that gets there — so a scale
+/// has 3 to 5 lines with `count` 4, and every one of them is a round number.
+fn niceStep(largest: Int, count: Int) -> Int {
+  let raw = if count > 0 { (largest + count - 1) / count } else { largest }
+  if raw <= 1 {
+    return 1
+  }
+  var magnitude = 1
+  while magnitude * 10 <= raw {
+    magnitude = magnitude * 10
+  }
+  for factor in [1, 2, 5] {
+    if factor * magnitude >= raw {
+      return factor * magnitude
+    }
+  }
+  magnitude * 10
+}
+
+/// The unit a size is written in on a chart: the largest of B, KiB, MiB,
+/// GiB and TiB that `largest` is at least one of.
+fn byteUnit(largest: Int) -> Int {
+  var unit = 1
+  while unit < 1099511627776 && unit * 1024 <= largest {
+    unit = unit * 1024
+  }
+  unit
+}
+
+fn byteUnitName(unit: Int) -> String {
+  if unit >= 1099511627776 {
+    "TiB"
+  } else if unit >= 1073741824 {
+    "GiB"
+  } else if unit >= 1048576 {
+    "MiB"
+  } else if unit >= 1024 {
+    "KiB"
+  } else {
+    "B"
+  }
+}
+
+/// The step of a chart's scale. `kind` is what its values are: `bytes`,
+/// `ms` (microseconds, written as milliseconds), `percent` or `count`.
 ///
-/// A row is put where its *time* is, not where it comes in the list: the
-/// host writes no row for a minute it was down, or a minute an app did
+/// A size steps in round tenths of its unit — 0.5 GiB, 50 MiB — and not in
+/// round bytes, which would be 476.8 MiB; a time steps in no less than a
+/// tenth of a millisecond, the finest the chart writes.
+fn chartStep(kind: String, largest: Int) -> Int {
+  if kind == "bytes" {
+    let unit = byteUnit(largest)
+    if unit == 1 {
+      return niceStep(largest, 4)
+    }
+    let tenths = (largest * 10 + unit - 1) / unit
+    return (niceStep(tenths, 4) * unit + 5) / 10
+  }
+  let step = niceStep(largest, 4)
+  if kind == "ms" && step < 100 {
+    return 100
+  }
+  step
+}
+
+/// The values of a chart's horizontal lines: 0, then a step at a time up to
+/// the first at or past `largest`, which is the top of the scale.
+fn chartTicks(kind: String, largest: Int) -> Array<Int> {
+  let step = chartStep(kind, largest)
+  var out = Vector.of(0)
+  var at = 0
+  while at < largest {
+    at = at + step
+    out.push(at)
+  }
+  out.freeze()
+}
+
+/// A line's label, every line of a chart in one unit — that of its largest
+/// value — and 0 written bare.
+fn chartTickLabel(kind: String, value: Int, largest: Int) -> String {
+  if value == 0 {
+    return "0"
+  }
+  if kind == "bytes" {
+    let unit = byteUnit(largest)
+    if unit == 1 {
+      return "{value} B"
+    }
+    let tenths = (value * 10 + unit / 2) / unit
+    let whole = if tenths % 10 == 0 { "{tenths / 10}" } else { "{tenths / 10}.{tenths % 10}" }
+    return "{whole} {byteUnitName(unit)}"
+  }
+  if kind == "ms" {
+    if chartStep(kind, largest) % 1000 == 0 {
+      return "{value / 1000} ms"
+    }
+    return "{millis(value)} ms"
+  }
+  if kind == "percent" {
+    return "{value}%"
+  }
+  "{value}"
+}
+
+/// One value as the chart writes it at the end of a line and in a hover.
+fn chartValue(kind: String, value: Int) -> String {
+  if kind == "bytes" {
+    platformBytes(value)
+  } else if kind == "ms" {
+    "{millis(value)} ms"
+  } else if kind == "percent" {
+    "{value}%"
+  } else {
+    "{value}"
+  }
+}
+
+/// The spacing of the time axis for a span of `span` seconds with at most
+/// `count` ticks: the least of the steps a clock is read in that does.
+fn timeStep(span: Int, count: Int) -> Int {
+  for step in [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800] {
+    if step * count >= span {
+      return step
+    }
+  }
+  2592000
+}
+
+/// The ticks of the time axis from `first` to `last` (Unix seconds): every
+/// whole `step` between them, so that a tick of a quarter of an hour is at
+/// :00, :15, :30 and :45, and a tick of a day at midnight, UTC.
+fn timeTicks(first: Int, last: Int, step: Int) -> Array<Int> {
+  var out = Vector.of()
+  var at = (first + step - 1) / step * step
+  while at <= last {
+    out.push(at)
+    at = at + step
+  }
+  out.freeze()
+}
+
+/// A tick's label: the time of day, `14:30`, or for ticks a day or more
+/// apart the date, `10-20` — UTC, as every time on these pages is.
+fn timeTickLabel(at: Int, step: Int) -> String {
+  let stamp = text.isoTime(at * 1000)
+  if step >= 86400 {
+    return stamp.sliceBytes(5, 10).unwrapOr(stamp)
+  }
+  stamp.sliceBytes(11, 16).unwrapOr(stamp)
+}
+
+/// A time as a hover says it: `10-20 14:30 UTC`.
+fn timeFull(at: Int) -> String {
+  let stamp = text.isoTime(at * 1000)
+  "{stamp.sliceBytes(5, 10).unwrapOr(stamp)} {stamp.sliceBytes(11, 16).unwrapOr(stamp)} UTC"
+}
+
+/// Where a time is across the plot, for rows from `first` to `first +
+/// span`. A row is put where its *time* is, not where it comes in the list:
+/// the host writes no row for a minute it was down, or a minute an app did
 /// nothing in the first sample after a start, and evenly spaced rows would
 /// draw that gap as if the two sides of it were a minute apart.
-fn metricsPoints(times: Array<Int>, values: Array<Int>, largest: Int) -> String {
+fn chartX(at: Int, first: Int, span: Int) -> Int {
+  chartLeft() + (at - first) * (chartRight() - chartLeft()) / span
+}
+
+/// Where a value is up the plot, for a scale from 0 to `top`.
+fn chartY(value: Int, top: Int) -> Int {
+  chartBottom() - value * (chartBottom() - chartTop()) / top
+}
+
+/// The span the rows cover, in seconds. A row is one minute (`PRIMARY KEY
+/// (app, at)`), so two rows are never the same moment and the span is never
+/// nothing; one rather than a division by it anyway: a page anybody may open
+/// should not be one surprising row away from a trap.
+fn chartSpan(times: Array<Int>) -> Int {
+  let apart = times.get(times.length() - 1).unwrapOr(0) - times.get(0).unwrapOr(0)
+  if apart > 0 { apart } else { 1 }
+}
+
+/// One line's `points`, for a scale from 0 to `top`. Whole numbers: nothing
+/// a screen draws is finer than a pixel at this size.
+fn metricsPoints(times: Array<Int>, values: Array<Int>, top: Int) -> String {
   let first = times.get(0).unwrapOr(0)
-  let apart = times.get(times.length() - 1).unwrapOr(0) - first
-  // A row is one app's one minute (`PRIMARY KEY (app, at)`), so two rows
-  // are never the same moment and the span is never nothing. One rather
-  // than a division by it anyway: a page anybody may open should not be one
-  // surprising row away from a trap.
-  let span = if apart > 0 { apart } else { 1 }
+  let span = chartSpan(times)
   var out = Vector.of()
   var at = 0
   for value in values {
-    let when = times.get(at).unwrapOr(first) - first
-    out.push("{4 + when * 632 / span},{116 - value * 112 / largest}")
+    let when = times.get(at).unwrapOr(first)
+    out.push("{chartX(when, first, span)},{chartY(value, top)}")
     at = at + 1
   }
   " ".join(out.freeze())
+}
+
+/// The horizontal lines of the scale, drawn under everything else.
+fn chartGrid(kind: String, largest: Int, top: Int) -> Html {
+  var out = Vector.of()
+  for value in chartTicks(kind, largest) {
+    let y = chartY(value, top)
+    let line = if value == 0 { "ch-base" } else { "ch-grid" }
+    out.push(html"""<line class={line} x1="{chartLeft()}" y1="{y}" x2="{chartRight()}" y2="{y}"/>""")
+  }
+  html"{out.freeze()}"
+}
+
+/// The value of each horizontal line, above it at the left and inside the
+/// plot — a margin for them would be a fifth of the chart on a phone — and
+/// drawn over the data lines, so that its halo keeps a line that crosses
+/// it from crossing it out.
+fn chartScale(kind: String, largest: Int, top: Int) -> Html {
+  var out = Vector.of()
+  for value in chartTicks(kind, largest) {
+    out.push(html"""<text x="{chartLeft() + 4}" y="{chartY(value, top) - 5}">{chartTickLabel(kind, value, largest)}</text>""")
+  }
+  html"{out.freeze()}"
+}
+
+/// The vertical lines and the times under them. Every other one is `odd`,
+/// which a phone does not show: six times fit across a desk, three across
+/// a phone. The ends are anchored inward, so the first and the last are not
+/// cut by the edge.
+fn chartTimes(times: Array<Int>) -> Html {
+  let first = times.get(0).unwrapOr(0)
+  let last = times.get(times.length() - 1).unwrapOr(0)
+  let span = chartSpan(times)
+  let step = timeStep(span, 6)
+  var out = Vector.of()
+  var n = 0
+  for at in timeTicks(first, last, step) {
+    let x = chartX(at, first, span)
+    let anchor = if x < chartLeft() + 40 { "start" } else if x > chartRight() - 40 { "end" } else { "middle" }
+    let odd = if n % 2 == 1 { " odd" } else { "" }
+    out.push(html"""
+      <g class="ch-t{odd}">
+        <line class=ch-grid x1="{x}" y1="{chartTop()}" x2="{x}" y2="{chartBottom()}"/>
+        <text x="{x}" y="{chartHeight() - 6}" text-anchor={anchor}>{timeTickLabel(at, step)}</text>
+      </g>
+      """)
+    n = n + 1
+  }
+  html"{out.freeze()}"
+}
+
+/// The latest value of each line, at its end: above it, or — where the two
+/// ends are too close for two labels — the lower one under its line, or,
+/// at the floor where there is no room under it, the higher one a line
+/// further up. `dy` is in `em`, so the room is right whatever size the
+/// stylesheet gave the text. Two ends at the same place saying the same
+/// thing are said once.
+fn chartEnds(aY: Int, aText: String, bY: Int, bText: String) -> Html {
+  let aHigher = aY <= bY
+  let high = if aHigher { aY } else { bY }
+  let low = if aHigher { bY } else { aY }
+  let close = low - high < 32
+  let lowUnder = close && low + 32 <= chartBottom()
+  let highUp = close && !lowUnder
+  let highDy = if highUp { "-1.5em" } else { "-0.45em" }
+  let lowDy = if lowUnder { "1.15em" } else { "-0.45em" }
+  let aDy = if aHigher { highDy } else { lowDy }
+  let bDy = if aHigher { lowDy } else { highDy }
+  let same = close && aText == bText
+  let aDySaid = if same { "-0.45em" } else { aDy }
+  let b = html.only(!same, html"""<text class=ch-end x="{chartRight() - 2}" y="{bY}" dy="{bDy}" text-anchor=end>{bText}</text>""")
+  html"""
+    <text class=ch-end x="{chartRight() - 2}" y="{aY}" dy="{aDySaid}" text-anchor=end>{aText}</text>
+    {b}
+    """
+}
+
+/// What a hover says of the rows from index `from` to `to` (inclusive): the
+/// time and both values, or for more than one row the times and the
+/// largest of each.
+fn chartHoverTitle(kind: String, times: Array<Int>, a: Array<Int>, aName: String, b: Array<Int>, bName: String, from: Int, to: Int) -> String {
+  let start = timeFull(times.get(from).unwrapOr(0))
+  if from == to {
+    return "{start}: {aName} {chartValue(kind, a.get(from).unwrapOr(0))}, {bName} {chartValue(kind, b.get(from).unwrapOr(0))}"
+  }
+  let aLargest = metricsLargest(a.slice(from, to + 1), [])
+  let bLargest = metricsLargest(b.slice(from, to + 1), [])
+  "{start} – {timeFull(times.get(to).unwrapOr(0))}: {aName} up to {chartValue(kind, aLargest)}, {bName} up to {chartValue(kind, bLargest)}"
+}
+
+/// How many columns a chart's hovers are cut into at most: a day is 1440
+/// rows, and a `<title>` each would be more page than chart.
+fn chartColumns() -> Int {
+  120
+}
+
+/// A column the height of the plot round each row — or, past
+/// [`chartColumns`] rows, each group of rows — with a `<title>` that is
+/// what a pointer over it (or a tap) shows.
+fn chartHovers(kind: String, times: Array<Int>, a: Array<Int>, aName: String, b: Array<Int>, bName: String) -> Html {
+  let rows = times.length()
+  let columns = if rows < chartColumns() { rows } else { chartColumns() }
+  let first = times.get(0).unwrapOr(0)
+  let span = chartSpan(times)
+  let width = (chartRight() - chartLeft()) / (columns - 1)
+  var out = Vector.of()
+  var from = 0
+  while from < rows {
+    let column = ((times.get(from).unwrapOr(first) - first) * (columns - 1) + span / 2) / span
+    var to = from
+    while to + 1 < rows && ((times.get(to + 1).unwrapOr(first) - first) * (columns - 1) + span / 2) / span == column {
+      to = to + 1
+    }
+    let middle = chartLeft() + column * (chartRight() - chartLeft()) / (columns - 1)
+    let x0 = if middle - width / 2 < chartLeft() { chartLeft() } else { middle - width / 2 }
+    let x1 = if middle + width / 2 > chartRight() { chartRight() } else { middle + width / 2 }
+    out.push(html"""<rect class=ch-hit x="{x0}" y="{chartTop()}" width="{x1 - x0}" height="{chartBottom() - chartTop()}"><title>{chartHoverTitle(kind, times, a, aName, b, bName, from, to)}</title></rect>""")
+    from = to + 1
+  }
+  html"{out.freeze()}"
 }
 
 /// What tells a line from the other in the legend: the same stroke the
@@ -2541,21 +2902,23 @@ fn metricsKey(class: String, name: String) -> Html {
     """
 }
 
-/// Two lines on one chart, scaled together to the larger of them: the
-/// question is how the two compare, and two scales would make a p99 that is
-/// ten times its p50 look like it is touching it.
+/// Two lines on one chart, scaled together from 0 to the larger of them:
+/// the question is how the two compare, and two scales would make a p99
+/// that is ten times its p50 look like it is touching it. A limit drawn
+/// beside what is held to it (MemoryMax and the memory used) puts the used
+/// line low on the chart; the lines of the scale and the value written at
+/// the end of each line are what make it read anyway.
 ///
-/// `peak` is what the largest value is, in the words of the chart, and it
-/// is **written beside the key** and not only in the `<title>`: a line with
-/// no number anywhere on the page is a shape nobody can size, and a title
+/// `kind` is what the values are — `bytes`, `ms` (microseconds), `percent`
+/// or `count` — which is how the scale, the ends and the hovers write them.
+/// The ends are written on the chart and not only in a `<title>`: a title
 /// is a hover, which a phone does not have.
 ///
 /// A line needs two points, and a chart of nothing but zeros is a line along
 /// the floor, so each says what is true instead of drawing that.
 fn metricsChart(
   label: String,
-  peak: String,
-  largest: Int,
+  kind: String,
   times: Array<Int>,
   a: Array<Int>,
   aClass: String,
@@ -2567,21 +2930,28 @@ fn metricsChart(
   if a.length() < 2 {
     return html"<p class=muted>One row so far — a line wants two. Come back in a minute.</p>"
   }
+  let largest = metricsLargest(a, b)
   if largest == 0 {
     return html"""
       <p class=muted>{label}: nothing but zero in this window, which is not worth a line along
       the bottom.</p>
       """
   }
+  let ticks = chartTicks(kind, largest)
+  let top = ticks.get(ticks.length() - 1).unwrapOr(largest)
+  let aLast = a.get(a.length() - 1).unwrapOr(0)
+  let bLast = b.get(b.length() - 1).unwrapOr(0)
   html"""
-    <p class=legend>
-      {metricsKey(aClass, aName)}{metricsKey(bClass, bName)}
-      <span class=peak>up to {peak}</span>
-    </p>
-    <svg class=chart viewBox="0 0 640 120" role=img aria-label="{label}">
-      <title>up to {peak}, over {a.length()} rows</title>
-      <polyline class="ln {aClass}" fill=none points="{metricsPoints(times, a, largest)}"/>
-      <polyline class="ln {bClass}" fill=none points="{metricsPoints(times, b, largest)}"/>
+    <p class=legend>{metricsKey(aClass, aName)}{metricsKey(bClass, bName)}</p>
+    <svg class=chart viewBox="0 0 {chartWidth()} {chartHeight()}" role=img aria-label="{label}">
+      <title>{label}: now {aName} {chartValue(kind, aLast)}, {bName} {chartValue(kind, bLast)}</title>
+      {chartTimes(times)}
+      {chartGrid(kind, largest, top)}
+      {chartHovers(kind, times, a, aName, b, bName)}
+      <polyline class="ln {aClass}" fill=none points="{metricsPoints(times, a, top)}"/>
+      <polyline class="ln {bClass}" fill=none points="{metricsPoints(times, b, top)}"/>
+      {chartScale(kind, largest, top)}
+      {chartEnds(chartY(aLast, top), chartValue(kind, aLast), chartY(bLast, top), chartValue(kind, bLast))}
     </svg>
     """
 }
@@ -2609,6 +2979,7 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
     here is the right range and not an exact time.</p>
     """
   let steps = metricsSteps(at, over)
+  let reload = reloading("{at}/metrics?over={over}", 5, paused(request))
   let title = "{app.name} metrics"
   if points.length() == 0 {
     return layout(
@@ -2616,13 +2987,15 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
       "apps",
       title,
       html"""
-        {head}{lead}{steps}
+        {head}{lead}{reload.control}{steps}
         <p class=muted>Nothing to show for {span}: either the host has not sampled
         <code>{app.name}</code> yet — it takes a sample a minute, so a minute after it has
         served something — or it keeps no history at all, which it does not when it is started
         without a data directory. This page cannot tell which, and a chart of nothing would say
         neither.</p>
         """,
+      reload.seconds,
+      reload.link,
     )
   }
   var times = Vector.of()
@@ -2683,14 +3056,13 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
   let rows = if points.length() == 1 { "1 row" } else { "{points.length()} rows" }
   let covers = html"""
     <p class=muted>{rows}, one for each {each} the host sampled, from
-    {text.isoTime(first * 1000)} to {text.isoTime(last * 1000)}. Each chart is scaled to its
-    own largest value, which is written beside its key; there is no axis to read, because the
-    shape is the question.</p>
+    {text.isoTime(first * 1000)} to {text.isoTime(last * 1000)}. Each chart is scaled from zero
+    to a round number past its own largest value, the latest value of each line is written at
+    its end, and the times are UTC. Hover a point, or tap it, for its {each}.</p>
     """
   let traffic = metricsChart(
-    "requests served and errors, {span}",
-    "{metricsLargest(servedRows, errorRows)} a {each}",
-    metricsLargest(servedRows, errorRows),
+    "requests served and errors a {each}, {span}",
+    "count",
     timeRows,
     servedRows,
     "ln-served",
@@ -2699,11 +3071,9 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
     "ln-errors",
     "errors",
   )
-  let slowest = metricsLargest(p50Rows, p99Rows)
   let speed = metricsChart(
     "request time, p50 and p99 in milliseconds, {span}",
-    "{millis(slowest)} ms",
-    slowest,
+    "ms",
     timeRows,
     p50Rows,
     "ln-p50",
@@ -2717,10 +3087,12 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
     "apps",
     title,
     html"""
-      {head}{lead}{steps}{figures}{covers}
+      {head}{lead}{reload.control}{steps}{figures}{covers}
       <h2>Traffic</h2>{traffic}
       <h2>Speed, in milliseconds</h2>{speed}
       """,
+    reload.seconds,
+    reload.link,
   )
 }
 
@@ -2896,6 +3268,7 @@ fn platformPage(base: String, request: web.Request) -> Html {
     </div>
     """
   let steps = windowSteps("{base}/platform", over)
+  let reload = reloading("{base}/platform?over={over}", 5, paused(request))
   let points = host.platform(over)
   if points.length() == 0 {
     return layout(
@@ -2903,12 +3276,14 @@ fn platformPage(base: String, request: web.Request) -> Html {
       "platform",
       "platform",
       html"""
-        <h1>Platform</h1>{lead}{figures}{steps}
+        <h1>Platform</h1>{lead}{reload.control}{figures}{steps}
         <p class=muted>Nothing to chart for {span}: either the host has not sampled itself
         yet — the first minute after a start keeps nothing, as there is nothing yet to take
         the CPU's difference from — or it keeps no history, which it does not without a data
         directory.</p>
         """,
+      reload.seconds,
+      reload.link,
     )
   }
   let seconds = if over == "month" { 3600 } else { 60 }
@@ -2950,13 +3325,11 @@ fn platformPage(base: String, request: web.Request) -> Html {
     <p class=muted>{rows}, one for each {each} the host sampled, from
     {text.isoTime(first * 1000)} to {text.isoTime(final * 1000)}. The CPU is what the
     {each} used of the quota (of one CPU without one); memory, disk and workers are as they
-    were at its end, and an hour is its worst minute.</p>
+    were at its end, and an hour is its worst minute. The times are UTC.</p>
     """
-  let memoryLargest = metricsLargest(memoryRows, limitRows)
   let memoryChart = metricsChart(
     "memory used and MemoryMax, {span}",
-    platformBytes(memoryLargest),
-    memoryLargest,
+    "bytes",
     timeRows,
     memoryRows,
     "ln-used",
@@ -2965,11 +3338,9 @@ fn platformPage(base: String, request: web.Request) -> Html {
     "ln-limit",
     "MemoryMax",
   )
-  let cpuLargest = metricsLargest(cpuRows, throttledRows)
   let cpuChart = metricsChart(
     "CPU used and throttled, percent, {span}",
-    "{cpuLargest}%",
-    cpuLargest,
+    "percent",
     timeRows,
     cpuRows,
     "ln-used",
@@ -2978,11 +3349,9 @@ fn platformPage(base: String, request: web.Request) -> Html {
     "ln-held",
     "throttled, % of the {each}",
   )
-  let diskLargest = metricsLargest(freeRows, totalRows)
   let diskChart = metricsChart(
     "disk free and disk size, {span}",
-    platformBytes(diskLargest),
-    diskLargest,
+    "bytes",
     timeRows,
     freeRows,
     "ln-used",
@@ -2991,11 +3360,9 @@ fn platformPage(base: String, request: web.Request) -> Html {
     "ln-limit",
     "size",
   )
-  let workLargest = metricsLargest(flightRows, queuedRows)
   let workChart = metricsChart(
     "requests in flight and queued, {span}",
-    "{workLargest}",
-    workLargest,
+    "count",
     timeRows,
     flightRows,
     "ln-used",
@@ -3009,12 +3376,14 @@ fn platformPage(base: String, request: web.Request) -> Html {
     "platform",
     "platform",
     html"""
-      <h1>Platform</h1>{lead}{figures}{steps}{covers}
+      <h1>Platform</h1>{lead}{reload.control}{figures}{steps}{covers}
       <h2>Memory</h2>{memoryChart}
       <h2>CPU</h2>{cpuChart}
       <h2>Disk</h2>{diskChart}
       <h2>Requests</h2>{workChart}
       """,
+    reload.seconds,
+    reload.link,
   )
 }
 
