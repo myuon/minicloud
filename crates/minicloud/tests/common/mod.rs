@@ -434,39 +434,56 @@ pub fn merged_timeline() -> minicloud::timeline::Recorder {
         done(&mut t, at + 9 * MS, 8);
         id += 1;
     }
-    for worker in 0..2u64 {
-        let mut at = 330_000 * MS + worker * MS;
-        // The sleeping requests of this worker, each with when its sleep ends.
-        let mut sleeping: Vec<(Tracker, u64)> = Vec::new();
-        let mut turn = 0;
-        while at < 390_000 * MS {
-            if let Some(k) = sleeping.iter().position(|(_, ready)| *ready <= at) {
-                let (mut t, _) = sleeping.remove(k);
-                t.run(at, worker as usize, Began::Resume);
-                done(&mut t, at + MS, 2);
-                at += 4 * MS;
-                continue;
-            }
-            let (app, path, length) = match turn % 3 {
-                0 => (hello, "/hello/", 1),
-                1 => (crunch, "/crunch/", 8),
-                _ => (slow, "/slow/sleep", 1),
-            };
-            turn += 1;
-            let mut t = rec.admit(id, app, "GET", path, at, at);
-            id += 1;
-            t.run(at, worker as usize, Began::Start);
-            if app == slow {
-                t.park(at + MS, "timer.sleep");
-                t.ready(at + 31 * MS, By::Answer);
-                sleeping.push((t, at + 31 * MS));
-            } else {
-                done(&mut t, at + length * MS, length);
-            }
-            at += (length + 3) * MS;
+    // Both workers stepped together, whichever is earlier first: the
+    // recorder's rings are in arrival order, as on a host.
+    struct Worker {
+        at: u64,
+        turn: u32,
+        // Its sleeping requests, each with when its sleep ends.
+        sleeping: Vec<(Tracker, u64)>,
+    }
+    let mut workers: Vec<Worker> = (0..2)
+        .map(|worker| Worker {
+            at: 330_000 * MS + worker * MS,
+            turn: 0,
+            sleeping: Vec::new(),
+        })
+        .collect();
+    loop {
+        let worker = if workers[0].at <= workers[1].at { 0 } else { 1 };
+        let w = &mut workers[worker];
+        let at = w.at;
+        if at >= 390_000 * MS {
+            break;
         }
-        for (mut t, ready) in sleeping {
-            t.run(ready, worker as usize, Began::Resume);
+        if let Some(k) = w.sleeping.iter().position(|(_, ready)| *ready <= at) {
+            let (mut t, _) = w.sleeping.remove(k);
+            t.run(at, worker, Began::Resume);
+            done(&mut t, at + MS, 2);
+            w.at += 4 * MS;
+            continue;
+        }
+        let (app, path, length) = match w.turn % 3 {
+            0 => (hello, "/hello/", 1),
+            1 => (crunch, "/crunch/", 8),
+            _ => (slow, "/slow/sleep", 1),
+        };
+        w.turn += 1;
+        let mut t = rec.admit(id, app, "GET", path, at, at);
+        id += 1;
+        t.run(at, worker, Began::Start);
+        if app == slow {
+            t.park(at + MS, "timer.sleep");
+            t.ready(at + 31 * MS, By::Answer);
+            w.sleeping.push((t, at + 31 * MS));
+        } else {
+            done(&mut t, at + length * MS, length);
+        }
+        w.at += (length + 3) * MS;
+    }
+    for (worker, w) in workers.into_iter().enumerate() {
+        for (mut t, ready) in w.sleeping {
+            t.run(ready, worker, Began::Resume);
             done(&mut t, ready + MS, 2);
         }
     }
