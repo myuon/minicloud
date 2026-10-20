@@ -6,7 +6,7 @@ use std.html.Html
 
 // The request timeline: where each request waited, ran, parked and resumed,
 // and what the workers were doing meanwhile. The host keeps it in memory —
-// the last 5 minutes, at most 20,000 requests, a path without its query
+// the last hour, at most 100,000 requests, a path without its query
 // string — and a restart empties it (`host.timeline`, `host.request`,
 // `host.live`). Three pages read it: what is in flight now (Live), a
 // picture of a window of it (Timeline), and one request's phases in words.
@@ -160,7 +160,7 @@ fn livePage(base: String, request: web.Request) -> Html {
 
 /// What the timeline keeps (`crate::timeline::KEEP` and `KEEP_REQUESTS`).
 fn timelineKeep() -> String {
-  "5 minutes, at most 20,000 requests"
+  "hour, at most 100,000 requests"
 }
 
 // ------------------------------------------------------------ timeline

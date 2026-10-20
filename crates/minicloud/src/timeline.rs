@@ -1,5 +1,5 @@
 //! The request timeline: where each request waited, ran, parked and
-//! resumed, kept in memory for the last few minutes ([`KEEP`], at most
+//! resumed, kept in memory for the last hour ([`KEEP`], at most
 //! [`KEEP_REQUESTS`] requests), always on.
 //!
 //! The design is the Cove repository's edge sample's (`examples/edge/host/
@@ -28,8 +28,15 @@
 //! - **Bounded.** A shard keeps its share of [`KEEP_REQUESTS`] requests and
 //!   none that ended more than [`KEEP`] ago; the oldest go first. A request
 //!   still in flight past either bound is set aside, not forgotten, until it
-//!   ends. A record is about 400 bytes, so the whole is about 8 MB at most.
-//!   Nothing is written to disk: a restart starts empty.
+//!   ends. A record is about 400 bytes, so the whole is about 40 MB at most
+//!   (a path past 48 bytes, or more than four events, adds its own on the
+//!   heap). Nothing is written to disk: a restart starts empty.
+//! - **A view reads what it needs.** A shard's ring is in arrival order, so
+//!   a window skips what arrived after it by a binary search, and of what
+//!   arrived before it reads only the end time — an atomic, no latch — to
+//!   find what still overlaps. Only the newest [`JSON_REQUESTS`] of a
+//!   window are assembled whole; the rest are reduced to their phases for
+//!   the strips, the segments and the figures.
 //!
 //! The events, each a time in nanoseconds since the recorder started:
 //!
@@ -59,9 +66,9 @@ use serde_json::{json, Value as Json};
 use smallvec::SmallVec;
 
 /// How long a finished request is kept.
-pub const KEEP: Duration = Duration::from_secs(300);
+pub const KEEP: Duration = Duration::from_secs(3600);
 /// The most finished requests kept, over every shard.
-pub const KEEP_REQUESTS: usize = 20_000;
+pub const KEEP_REQUESTS: usize = 100_000;
 /// How many locks the requests are spread over, by id.
 pub const SHARDS: usize = 32;
 /// The longest path kept; past it the path is cut (at a character).
@@ -674,17 +681,64 @@ impl Recorder {
         let now = self.now_ns();
         let until_ns = until_ns.min(now).max(since_ns);
         let names = self.names();
-        let wanted = app.map(|app| names.iter().position(|name| &**name == app));
-        let mut requests: Vec<Span> = self
-            .all()
-            .iter()
-            .filter(|track| wanted.is_none_or(|index| index == Some(track.app as usize)))
-            .filter(|track| track.arrived_ns <= until_ns)
-            .filter(|track| track.ended_ns().is_none_or(|ended| ended >= since_ns))
-            .map(|track| Span::of(track, &names, now))
-            .collect();
-        requests.sort_by_key(|span| (span.arrived_ns, span.id));
-        Window::of(self, requests, now, since_ns, until_ns)
+        let wanted = match app {
+            None => None,
+            Some(app) => match names.iter().position(|name| &**name == app) {
+                Some(index) => Some(index as u32),
+                // An app the recorder never saw has nothing in any window.
+                None => return Window::of(self, &names, Vec::new(), now, since_ns, until_ns),
+            },
+        };
+        let tracks = self.overlapping(wanted, since_ns, until_ns);
+        Window::of(self, &names, tracks, now, since_ns, until_ns)
+    }
+
+    /// The records of `app` (every app's for `None`) that overlap
+    /// `since_ns`..=`until_ns`, in arrival order. Each shard's ring is in
+    /// the order its requests arrived, so what arrived after the window is
+    /// skipped by a binary search; of what arrived before it, only the end
+    /// time is read — an atomic, without the record's latch.
+    ///
+    /// Two requests of one shard admitted at once on two threads may be
+    /// pushed a few microseconds out of order; at the window's very edge
+    /// the search may then miss one, which a picture cannot show anyway.
+    fn overlapping(&self, app: Option<u32>, since_ns: u64, until_ns: u64) -> Vec<Arc<Track>> {
+        let oldest = self.now_ns().saturating_sub(self.shared.keep_ns);
+        let wanted = |track: &Arc<Track>| {
+            app.is_none_or(|app| track.app == app)
+                && track.arrived_ns <= until_ns
+                && track.ended_ns().is_none_or(|ended| ended >= since_ns)
+        };
+        let mut tracks = Vec::new();
+        let mut gone = Vec::new();
+        for shard in &self.shared.shards {
+            shard.with(|shard| {
+                shard.evict(self.shared.per_shard, oldest, &mut gone);
+                let arrived = shard
+                    .ring
+                    .partition_point(|track| track.arrived_ns <= until_ns);
+                tracks.extend(shard.ring.range(..arrived).filter(|t| wanted(t)).cloned());
+                tracks.extend(shard.aside.iter().filter(|t| wanted(t)).cloned());
+            });
+        }
+        drop(gone);
+        tracks.sort_by_key(|track| (track.arrived_ns, track.id));
+        tracks
+    }
+
+    /// `from_unix_ms`..`until_unix_ms` as nanoseconds since the recorder
+    /// started, each held between its start and now: what a window asked
+    /// for in the wall clock's time is in the recorder's.
+    pub fn unix_range(&self, from_unix_ms: u64, until_unix_ms: u64) -> (u64, u64) {
+        let now = self.now_ns();
+        let at = |unix_ms: u64| {
+            unix_ms
+                .saturating_sub(self.shared.started_unix_ms)
+                .saturating_mul(1_000_000)
+                .min(now)
+        };
+        let until = at(until_unix_ms);
+        (at(from_unix_ms).min(until), until)
     }
 
     /// The requests in flight now, oldest first, and what each worker runs.
@@ -966,8 +1020,18 @@ impl Span {
     fn of(track: &Track, names: &[Arc<str>], now: u64) -> Span {
         // Copied out, so the latch is held for a copy and no longer.
         let state = track.state.with(|state| state.clone());
-        let (phases, yields, parks, moves) =
-            assemble(state.queued_ns, &state.events, state.end.as_ref());
+        let assembled = assemble(state.queued_ns, &state.events, state.end.as_ref());
+        Span::assembled(track, state, assembled, names, now)
+    }
+
+    /// `track`, its state copied out and made into phases.
+    fn assembled(
+        track: &Track,
+        state: TrackState,
+        (phases, yields, parks, moves): (Vec<Phase>, u32, u32, u32),
+        names: &[Arc<str>],
+        now: u64,
+    ) -> Span {
         Span {
             id: track.id,
             app: name_of(names, track.app),
@@ -1120,29 +1184,76 @@ pub struct Segment {
     pub worker: u32,
     /// The request (the first, when merged).
     pub id: u64,
-    pub app: String,
+    /// Its app (the first run's, when merged).
+    pub app: Arc<str>,
     pub from_ns: u64,
     pub to_ns: u64,
     /// How many runs it is.
     pub runs: u32,
+    /// The time the worker ran inside it: all of it for one run, less
+    /// where merged runs left gaps between them.
+    pub busy_ns: u64,
+    /// How many of its runs each app's are, in the order they first came:
+    /// one app's `runs` for a segment that is not merged.
+    pub apps: SmallVec<[(Arc<str>, u32); 1]>,
 }
 
 impl Segment {
+    /// One run of `app`'s request `id` on `worker`.
+    pub fn run(worker: u32, id: u64, app: Arc<str>, from_ns: u64, to_ns: u64) -> Segment {
+        Segment {
+            worker,
+            id,
+            apps: SmallVec::from_buf([(Arc::clone(&app), 1)]),
+            app,
+            from_ns,
+            to_ns,
+            runs: 1,
+            busy_ns: to_ns.saturating_sub(from_ns),
+        }
+    }
+
+    /// Thousandths of its length the worker ran: 1000 for one run.
+    pub fn occupancy_milli(&self) -> u64 {
+        let span = self.to_ns.saturating_sub(self.from_ns);
+        if span == 0 {
+            return 1000;
+        }
+        (self.busy_ns.min(span) as u128 * 1000 / span as u128) as u64
+    }
+
+    /// `other`, which starts after it on its worker, made part of it.
+    fn absorb(&mut self, other: &Segment) {
+        self.to_ns = self.to_ns.max(other.to_ns);
+        self.runs += other.runs;
+        self.busy_ns += other.busy_ns;
+        for (app, runs) in &other.apps {
+            match self.apps.iter_mut().find(|(known, _)| known == app) {
+                Some((_, count)) => *count += runs,
+                None => self.apps.push((Arc::clone(app), *runs)),
+            }
+        }
+    }
+
     fn to_json(&self) -> Json {
         json!({
             "worker": self.worker,
             "id": self.id,
-            "app": self.app,
+            "app": &*self.app,
             "from_us": us(self.from_ns),
             "to_us": us(self.to_ns),
             "runs": self.runs,
+            "busy_us": us(self.busy_ns),
+            "apps": self.apps.iter().map(|(app, runs)| json!({"app": &**app, "runs": runs})).collect::<Vec<_>>(),
         })
     }
 }
 
 /// `segments` (in start order), with those of one worker that are less
 /// than `gap_ns` apart made one: what a picture a pixel wide per `gap_ns`
-/// can draw anyway.
+/// can draw anyway. A merged segment keeps how many runs of each app it
+/// is and how long the worker ran inside it, so that it is not drawn as
+/// one request that held the worker the whole time.
 pub fn merge_segments(segments: &[Segment], gap_ns: u64) -> Vec<Segment> {
     let mut last: BTreeMap<u32, usize> = BTreeMap::new();
     let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
@@ -1150,8 +1261,7 @@ pub fn merge_segments(segments: &[Segment], gap_ns: u64) -> Vec<Segment> {
         if let Some(&at) = last.get(&segment.worker) {
             let previous = &mut merged[at];
             if segment.from_ns <= previous.to_ns.saturating_add(gap_ns) {
-                previous.to_ns = previous.to_ns.max(segment.to_ns);
-                previous.runs += segment.runs;
+                previous.absorb(segment);
                 continue;
             }
         }
@@ -1183,7 +1293,11 @@ pub struct Window {
     pub since_ns: u64,
     pub until_ns: u64,
     pub workers: usize,
-    /// Every request overlapping it, in arrival order.
+    /// How many requests overlap it.
+    pub requests_total: usize,
+    /// The newest of them, at most [`JSON_REQUESTS`], in arrival order:
+    /// the others are counted in the figures and drawn in the strips and
+    /// the segments, but not assembled.
     pub requests: Vec<Span>,
     /// Every run segment overlapping it, in start order, clipped to it.
     pub segments: Vec<Segment>,
@@ -1199,7 +1313,14 @@ pub struct Window {
 }
 
 impl Window {
-    fn of(recorder: &Recorder, requests: Vec<Span>, now: u64, since: u64, until: u64) -> Window {
+    fn of(
+        recorder: &Recorder,
+        names: &[Arc<str>],
+        tracks: Vec<Arc<Track>>,
+        now: u64,
+        since: u64,
+        until: u64,
+    ) -> Window {
         let span = (until - since).max(1);
         let bucket_ns = span.div_ceil(STRIP_BUCKETS as u64).max(1);
         let mut strips = [
@@ -1207,10 +1328,18 @@ impl Window {
             vec![0u128; STRIP_BUCKETS],
             vec![0u128; STRIP_BUCKETS],
         ];
+        let nobody: Arc<str> = Arc::from("");
+        let app_name = |app: u32| names.get(app as usize).unwrap_or(&nobody);
         let mut segments = Vec::new();
         let mut busy_ns = 0;
-        for request in &requests {
-            for phase in &request.phases {
+        let mut by_app: BTreeMap<u32, (AppSummary, Vec<u64>)> = BTreeMap::new();
+        let whole_from = tracks.len().saturating_sub(JSON_REQUESTS);
+        let mut requests = Vec::with_capacity(tracks.len() - whole_from);
+        for (k, track) in tracks.iter().enumerate() {
+            // Copied out, so the latch is held for a copy and no longer.
+            let state = track.state.with(|state| state.clone());
+            let assembled = assemble(state.queued_ns, &state.events, state.end.as_ref());
+            for phase in &assembled.0 {
                 let from = phase.from_ns.max(since);
                 let to = phase.until(now).min(until);
                 if to <= from {
@@ -1224,15 +1353,31 @@ impl Window {
                 add_overlap(&mut strips[strip], since, bucket_ns, from, to);
                 if phase.kind == PhaseKind::Run {
                     busy_ns += to - from;
-                    segments.push(Segment {
-                        worker: phase.worker.unwrap_or(0),
-                        id: request.id,
-                        app: request.app.clone(),
-                        from_ns: from,
-                        to_ns: to,
-                        runs: 1,
-                    });
+                    segments.push(Segment::run(
+                        phase.worker.unwrap_or(0),
+                        track.id,
+                        Arc::clone(app_name(track.app)),
+                        from,
+                        to,
+                    ));
                 }
+            }
+            if let Some(end) = &state.end {
+                if end.at_ns >= since && end.at_ns <= until {
+                    let (summary, latencies) = by_app.entry(track.app).or_default();
+                    summary.requests += 1;
+                    if end.rejected {
+                        summary.rejected += 1;
+                    } else {
+                        if end.reason.is_some() {
+                            summary.errors += 1;
+                        }
+                        latencies.push(end.at_ns.saturating_sub(track.arrived_ns));
+                    }
+                }
+            }
+            if k >= whole_from {
+                requests.push(Span::assembled(track, state, assembled, names, now));
             }
         }
         segments.sort_by_key(|segment| (segment.from_ns, segment.worker));
@@ -1243,33 +1388,17 @@ impl Window {
                 .collect()
         };
         let [running, parked, waiting] = &strips;
-        let mut by_app: BTreeMap<&str, (AppSummary, Vec<u64>)> = BTreeMap::new();
-        for request in &requests {
-            let Some(end) = &request.end else { continue };
-            if end.at_ns < since || end.at_ns > until {
-                continue;
-            }
-            let (summary, latencies) = by_app.entry(request.app.as_str()).or_default();
-            summary.requests += 1;
-            if end.rejected {
-                summary.rejected += 1;
-            } else {
-                if end.reason.is_some() {
-                    summary.errors += 1;
-                }
-                latencies.push(end.at_ns.saturating_sub(request.arrived_ns));
-            }
-        }
-        let apps = by_app
+        let mut apps: Vec<AppSummary> = by_app
             .into_iter()
             .map(|(app, (mut summary, mut latencies))| {
                 latencies.sort_unstable();
-                summary.app = app.to_string();
+                summary.app = app_name(app).to_string();
                 summary.p50_ns = percentile(&latencies, 50);
                 summary.p99_ns = percentile(&latencies, 99);
                 summary
             })
             .collect();
+        apps.sort_by(|a, b| a.app.cmp(&b.app));
         Window {
             started_unix_ms: recorder.started_unix_ms(),
             now_ns: now,
@@ -1279,6 +1408,7 @@ impl Window {
             running: means(running),
             parked: means(parked),
             waiting: means(waiting),
+            requests_total: tracks.len(),
             requests,
             segments,
             bucket_ns,
@@ -1314,7 +1444,7 @@ impl Window {
             "workers": self.workers,
             "keep": {"secs": KEEP.as_secs(), "requests": KEEP_REQUESTS},
             "summary": {
-                "requests": self.requests.len(),
+                "requests": self.requests_total,
                 "rejected": self.rejected(),
                 "busy_us": us(self.busy_ns),
                 "utilisation_milli": self.utilisation_milli(),
@@ -1336,7 +1466,7 @@ impl Window {
             },
             "segments_total": self.segments.len(),
             "segments": segments.iter().map(Segment::to_json).collect::<Vec<_>>(),
-            "requests_total": self.requests.len(),
+            "requests_total": self.requests_total,
             "requests": self.newest(JSON_REQUESTS).iter().map(Span::to_json).collect::<Vec<_>>(),
         })
     }
@@ -1489,12 +1619,15 @@ impl Live {
 }
 
 /// A window's length from `over`: seconds (`300`), or with a unit
-/// (`10s`, `1m`, `5m`); at most [`KEEP`].
+/// (`10s`, `1m`, `5m`, `1h`); at most [`KEEP`].
 pub fn parse_over(over: &str) -> Option<Duration> {
     let over = over.trim();
-    let (number, unit) = match over.strip_suffix('m') {
-        Some(minutes) => (minutes, 60),
-        None => (over.strip_suffix('s').unwrap_or(over), 1),
+    let (number, unit) = if let Some(hours) = over.strip_suffix('h') {
+        (hours, 3600)
+    } else if let Some(minutes) = over.strip_suffix('m') {
+        (minutes, 60)
+    } else {
+        (over.strip_suffix('s').unwrap_or(over), 1)
     };
     let secs: u64 = number.parse().ok()?;
     (secs > 0).then(|| Duration::from_secs(secs * unit).min(KEEP))
@@ -1512,9 +1645,8 @@ pub fn asked_window(
     over: Option<&str>,
 ) -> Window {
     let now = recorder.now_ns();
-    let started = recorder.started_unix_ms();
-    let at = |unix_ms: u64| unix_ms.saturating_sub(started).saturating_mul(1_000_000);
-    let until = until_unix_ms.map_or(now, at).min(now);
+    let at = |unix_ms: u64| recorder.unix_range(unix_ms, u64::MAX).0;
+    let until = until_unix_ms.map_or(now, at);
     let since = match since_unix_ms {
         Some(since) => at(since),
         None => {
@@ -1732,41 +1864,149 @@ mod tests {
         let b = window.apps.iter().find(|a| a.app == "b").unwrap();
         assert_eq!((b.p50_ns, b.p99_ns), (100 * MS, 100 * MS));
         // An app's own window, and a window that misses both.
-        assert_eq!(rec.window(Some("a"), 0, 100 * MS).requests.len(), 1);
+        assert_eq!(rec.window(Some("a"), 0, 100 * MS).requests_total, 1);
+        assert_eq!(rec.window(Some("nobody"), 0, 100 * MS).requests_total, 0);
         assert!(rec.window(None, 101 * MS, 200 * MS).requests.is_empty());
     }
 
     #[test]
     fn segments_close_together_on_one_worker_merge() {
-        let seg = |worker, from, to| Segment {
-            worker,
-            id: from,
-            app: "a".into(),
-            from_ns: from,
-            to_ns: to,
-            runs: 1,
-        };
+        let seg =
+            |worker, app: &str, from, to| Segment::run(worker, from, Arc::from(app), from, to);
         let merged = merge_segments(
-            &[seg(0, 0, 10), seg(1, 5, 8), seg(0, 12, 20), seg(0, 40, 50)],
+            &[
+                seg(0, "a", 0, 10),
+                seg(1, "a", 5, 8),
+                seg(0, "b", 12, 20),
+                seg(0, "a", 22, 24),
+                seg(0, "a", 40, 50),
+            ],
             5,
         );
+        assert_eq!(merged.len(), 3);
+        let first = &merged[0];
+        assert_eq!((first.id, &*first.app), (0, "a"), "the first run's");
+        assert_eq!((first.from_ns, first.to_ns, first.runs), (0, 24, 3));
+        // Busy 10 + 8 + 2 of its 24: the gaps between the runs are not.
+        assert_eq!(first.busy_ns, 20);
+        assert_eq!(first.occupancy_milli(), 833);
+        let apps: Vec<(&str, u32)> = first.apps.iter().map(|(app, n)| (&**app, *n)).collect();
+        assert_eq!(apps, [("a", 2), ("b", 1)]);
+        // Not merged: one run, the worker busy the whole of it.
+        assert_eq!(merged[1], seg(1, "a", 5, 8));
+        assert_eq!(merged[2], seg(0, "a", 40, 50));
+        assert_eq!(merged[2].occupancy_milli(), 1000);
         assert_eq!(
-            merged,
-            [
-                Segment {
-                    runs: 2,
-                    to_ns: 20,
-                    ..seg(0, 0, 10)
-                },
-                seg(1, 5, 8),
-                seg(0, 40, 50)
-            ]
+            Segment::run(0, 1, Arc::from("a"), 5, 5).occupancy_milli(),
+            1000
+        );
+        // Merging what was merged adds up the same.
+        let again = merge_segments(&merged, 100);
+        assert_eq!(again.len(), 2);
+        assert_eq!((again[0].runs, again[0].busy_ns), (4, 30));
+        let apps: Vec<(&str, u32)> = again[0].apps.iter().map(|(app, n)| (&**app, *n)).collect();
+        assert_eq!(apps, [("a", 3), ("b", 1)]);
+    }
+
+    #[test]
+    fn a_window_of_a_full_recorder_reads_only_what_overlaps() {
+        // Many requests, in arrival order; a long one that arrived before
+        // the window and ends inside it; one still in flight.
+        let rec = Recorder::fixed(2, 1_000_000, 10_000 * MS);
+        let app = rec.app("a");
+        let mut long = rec.admit(1, app, "GET", "/long", 0u64, 0u64);
+        long.run(0u64, 1, Began::Start);
+        for id in 2..5_000u64 {
+            let at = id * MS;
+            let mut t = rec.admit(id, app, "GET", "/", at, at);
+            t.run(at, 0, Began::Start);
+            t.end(at + MS / 2, 200, None, Duration::ZERO);
+        }
+        long.end(4_500 * MS, 200, None, Duration::ZERO);
+        let _live = rec.admit(9_000, app, "GET", "/live", 9_000 * MS, 9_000 * MS);
+        let window = rec.window(None, 4_000 * MS, 4_100 * MS);
+        // 4000..=4100 arrived inside it, 3999 ended at 3999.5 (before it),
+        // and the long one overlaps it.
+        assert_eq!(window.requests_total, 102);
+        assert_eq!(window.requests.first().map(|r| r.id), Some(1));
+        assert_eq!(window.requests.last().map(|r| r.id), Some(4_100));
+        // The live one, from 9 s on, is in a window there and not before.
+        assert_eq!(rec.window(None, 8_000 * MS, 10_000 * MS).requests_total, 1);
+        // Only the newest are assembled; every one is counted.
+        let all = rec.window(None, 0, 10_000 * MS);
+        assert_eq!(all.requests_total, 5_000);
+        assert_eq!(all.requests.len(), JSON_REQUESTS);
+        assert_eq!(all.requests.last().map(|r| r.id), Some(9_000));
+        assert_eq!(all.apps[0].requests, 4_999);
+        assert_eq!(
+            all.segments.len(),
+            4_999,
+            "every run, the live one never ran"
         );
     }
 
     #[test]
+    fn a_wall_clock_range_is_the_recorder_s_time() {
+        // Started at Unix 1_000_000 ms; now 10 s in.
+        let rec = Recorder::fixed(1, 1_000_000, 10_000 * MS);
+        assert_eq!(
+            rec.unix_range(1_002_000, 1_005_500),
+            (2_000 * MS, 5_500 * MS)
+        );
+        // Before it started is its start; past now is now.
+        assert_eq!(rec.unix_range(0, 1_000_500), (0, 500 * MS));
+        assert_eq!(
+            rec.unix_range(1_009_000, 9_999_999_999),
+            (9_000 * MS, 10_000 * MS)
+        );
+        // A range the wrong way round is empty, at its end.
+        assert_eq!(
+            rec.unix_range(1_005_000, 1_004_000),
+            (4_000 * MS, 4_000 * MS)
+        );
+        let asked = asked_window(&rec, None, Some(1_002_000), Some(1_003_000), None);
+        assert_eq!((asked.since_ns, asked.until_ns), (2_000 * MS, 3_000 * MS));
+        let over = asked_window(&rec, None, None, Some(1_008_000), Some("2s"));
+        assert_eq!((over.since_ns, over.until_ns), (6_000 * MS, 8_000 * MS));
+    }
+
+    #[test]
+    fn the_bounds_hold_at_the_cap_by_count_and_by_age() {
+        const S: u64 = 1_000 * MS;
+        let over = KEEP_REQUESTS as u64 + 500;
+        // By count: everything is younger than KEEP, the oldest go.
+        let rec = Recorder::fixed(2, 0, 100 * S);
+        for id in 0..over {
+            let at = 50 * S + id * 100;
+            let mut t = rec.admit(id, rec.app("a"), "GET", "/", at, at);
+            t.end(at + 50, 200, None, Duration::ZERO);
+            rec.trim(id, at + 50);
+        }
+        assert_eq!(rec.len(), KEEP_REQUESTS);
+        assert!(rec.request(0).is_none());
+        assert!(rec.request(over - 1).is_some());
+        let oldest_kept = (0..over).find(|id| rec.request(*id).is_some()).unwrap();
+        assert!((450..=550).contains(&oldest_kept), "{oldest_kept}");
+        // By age: what ended more than KEEP before now goes, the cap or not.
+        let rec = Recorder::fixed(2, 0, KEEP.as_nanos() as u64 + 10 * S);
+        for id in 0..over {
+            let at = if id < 1_000 { 5 * S } else { 20 * S };
+            let mut t = rec.admit(id, rec.app("a"), "GET", "/", at, at);
+            t.end(at, 200, None, Duration::ZERO);
+            rec.trim(id, at);
+        }
+        // The count took the oldest ~500 and age the rest of the first 1000.
+        assert_eq!(rec.len(), over as usize - 1_000);
+        assert!(rec.request(999).is_none());
+        assert!(rec.request(1_000).is_some());
+        // A window over the whole hour sees what is kept and no more.
+        let all = rec.window(None, 0, rec.now_ns());
+        assert_eq!(all.requests_total, over as usize - 1_000);
+    }
+
+    #[test]
     fn a_record_is_small() {
-        // What the module's "about 8 MB at most" rests on: a record, its
+        // What the module's "about 40 MB at most" rests on: a record, its
         // `Arc`'s counts and a ring slot, times KEEP_REQUESTS.
         let record = std::mem::size_of::<Track>() + 16 + 8;
         assert!(record <= 400, "{record} bytes");
@@ -1782,7 +2022,9 @@ mod tests {
         assert_eq!(parse_over("10s"), Some(Duration::from_secs(10)));
         assert_eq!(parse_over("1m"), Some(Duration::from_secs(60)));
         assert_eq!(parse_over("90"), Some(Duration::from_secs(90)));
-        assert_eq!(parse_over("1h"), None);
+        assert_eq!(parse_over("1h"), Some(KEEP));
+        assert_eq!(parse_over("15m"), Some(Duration::from_secs(900)));
+        assert_eq!(parse_over("2h"), Some(KEEP));
         assert_eq!(parse_over("60m"), Some(KEEP));
         assert_eq!(parse_over("0"), None);
     }
