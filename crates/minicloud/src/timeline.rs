@@ -148,12 +148,10 @@ pub struct End {
     /// Turned away before its app's queue.
     pub rejected: bool,
     pub worker_ns: u64,
-    pub instructions: Option<u64>,
-    pub heap_words: Option<u64>,
-    /// Collections the run's heap made, and the words it handed out
-    /// (reuse counted each time): `None` for a request that never ran.
-    pub gc_collections: Option<u64>,
-    pub allocated_words: Option<u64>,
+    /// What its run came to: `None` for a request that never ran. One
+    /// `Option` for the four, which keeps the record small
+    /// (`a_record_is_small`).
+    pub meter: Option<Meter>,
 }
 
 /// What a run came to, read from its machine when it ends.
@@ -599,10 +597,7 @@ impl Recorder {
             reason: Some(reason),
             rejected: true,
             worker_ns: 0,
-            instructions: None,
-            heap_words: None,
-            gc_collections: None,
-            allocated_words: None,
+            meter: None,
         };
         self.track(id, app, method, path, arrived, None, Some(end), at);
     }
@@ -855,17 +850,13 @@ impl Tracker {
             return;
         }
         self.done = true;
-        let meter = self.meter;
         let end = End {
             at_ns,
             status,
             reason,
             rejected,
             worker_ns: worker.as_nanos() as u64,
-            instructions: meter.map(|m| m.instructions),
-            heap_words: meter.map(|m| m.heap_words),
-            gc_collections: meter.map(|m| m.gc_collections),
-            allocated_words: meter.map(|m| m.allocated_words),
+            meter: self.meter,
         };
         self.track.state.with(|state| state.end = Some(end));
         self.track.ended_ns.store(at_ns, Ordering::Release);
@@ -1012,6 +1003,7 @@ impl Span {
 
     pub fn to_json(&self) -> Json {
         let end = self.end.as_ref();
+        let meter = end.and_then(|end| end.meter);
         json!({
             "id": self.id,
             "app": self.app,
@@ -1025,10 +1017,10 @@ impl Span {
             "reason": end.and_then(|end| end.reason),
             "latency_us": self.latency_ns().map(us),
             "worker_us": end.map_or(0, |end| us(end.worker_ns)),
-            "instructions": end.and_then(|end| end.instructions),
-            "heap_words": end.and_then(|end| end.heap_words),
-            "gc_collections": end.and_then(|end| end.gc_collections),
-            "allocated_words": end.and_then(|end| end.allocated_words),
+            "instructions": meter.map(|m| m.instructions),
+            "heap_words": meter.map(|m| m.heap_words),
+            "gc_collections": meter.map(|m| m.gc_collections),
+            "allocated_words": meter.map(|m| m.allocated_words),
             "yields": self.yields,
             "parks": self.parks,
             "moves": self.moves,
@@ -1591,10 +1583,14 @@ mod tests {
         assert_eq!(span.outcome(), "ok");
         assert_eq!(span.latency_ns(), Some(18 * MS));
         let end = span.end.unwrap();
-        assert_eq!((end.instructions, end.heap_words), (Some(1234), Some(56)));
         assert_eq!(
-            (end.gc_collections, end.allocated_words),
-            (Some(2), Some(789))
+            end.meter,
+            Some(Meter {
+                instructions: 1234,
+                heap_words: 56,
+                gc_collections: 2,
+                allocated_words: 789,
+            })
         );
         assert!(rec.live().requests.is_empty());
     }

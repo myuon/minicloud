@@ -1272,6 +1272,7 @@ fn phase_value(phase: &crate::timeline::Phase, now: u64) -> Value {
 
 fn timeline_request_value(span: &crate::timeline::Span) -> Value {
     let end = span.end.as_ref();
+    let meter = end.and_then(|end| end.meter);
     let known = |value: Option<u64>| maybe(value);
     Value::structure(
         "host.TimelineRequest",
@@ -1295,16 +1296,10 @@ fn timeline_request_value(span: &crate::timeline::Span) -> Value {
             ),
             ("latencyUs", known(span.latency_ns().map(|ns| ns / 1000))),
             ("workerUs", us(end.map_or(0, |end| end.worker_ns))),
-            ("instructions", known(end.and_then(|end| end.instructions))),
-            ("heapWords", known(end.and_then(|end| end.heap_words))),
-            (
-                "gcCollections",
-                known(end.and_then(|end| end.gc_collections)),
-            ),
-            (
-                "allocatedWords",
-                known(end.and_then(|end| end.allocated_words)),
-            ),
+            ("instructions", known(meter.map(|m| m.instructions))),
+            ("heapWords", known(meter.map(|m| m.heap_words))),
+            ("gcCollections", known(meter.map(|m| m.gc_collections))),
+            ("allocatedWords", known(meter.map(|m| m.allocated_words))),
             ("yields", int(span.yields)),
             ("parks", int(span.parks)),
             ("moves", int(span.moves)),
