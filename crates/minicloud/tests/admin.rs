@@ -1247,6 +1247,8 @@ fn the_platform_page_shows_the_host_against_its_limits() {
     let body = page.body;
     for expected in [
         "<a href=\"/platform\" aria-current=page>platform</a>",
+        "<meta http-equiv=refresh content=\"5; url=/platform?over=hour\">",
+        "<a href=\"/platform?over=hour&amp;refresh=off\">pause</a>",
         // Memory: 1 GiB of 2, half.
         "<span class=big>1.0 GiB</span>",
         "of 2.0 GiB, 50%",
@@ -1290,7 +1292,8 @@ fn the_timeline_pages_show_where_each_request_was() {
     let live = ui(&host, "GET", "/live", &authed(), "");
     assert_eq!(live.status, 200, "{}", live.body);
     for expected in [
-        "<meta http-equiv=refresh content=\"2\">",
+        "<meta http-equiv=refresh content=\"2; url=/live\">",
+        "<a href=\"/live?refresh=off\">pause</a>",
         "<a href=\"/live\" aria-current=page>live</a>",
         "<a href=\"/timeline\">timeline</a>",
         "<a href=\"/platform\">platform</a>",
@@ -1416,9 +1419,17 @@ fn the_load_page_starts_stops_and_shows_a_run() {
         "{}",
         again.body
     );
+    // It reloads the page, not the path the form was posted to.
+    assert!(
+        again
+            .body
+            .contains("<meta http-equiv=refresh content=\"2; url=/load\">"),
+        "{}",
+        again.body
+    );
     let running = ui(&host, "GET", "/load", &authed(), "");
     for expected in [
-        "<meta http-equiv=refresh content=\"2\">",
+        "<meta http-equiv=refresh content=\"2; url=/load\">",
         "<h2>Running</h2>",
         "action=\"/load/stop\"",
         "closed loop on 1 connections",

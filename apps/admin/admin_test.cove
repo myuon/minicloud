@@ -381,6 +381,36 @@ test fn fallsBackToTheHourForAWindowItDoesNotKnow() -> Result<Unit, Error> {
   Ok(())
 }
 
+test fn reloadsUntilPausedAndKeepsTheQuery() -> Result<Unit, Error> {
+  let going = reloading("/timeline?app=a%26b&over=5m", 5, false)
+  assertEqual(going.seconds, 5)?
+  assertEqual(
+    going.control.render(),
+    "<p class=reload>refreshing every 5 s · <a href=\"/timeline?app=a%26b&amp;over=5m&amp;refresh=off\">pause</a></p>",
+  )?
+  let still = reloading("/timeline?app=a%26b&over=5m", 5, true)
+  assertEqual(still.seconds, 0)?
+  assertEqual(still.control.render(), "<p class=reload>paused · <a href=\"/timeline?app=a%26b&amp;over=5m\">resume</a></p>")?
+  assert(reloading("/live", 2, false).control.render().contains("href=\"/live?refresh=off\""))?
+  assert(paused(asking(Map.of(MapEntry(key: "refresh", value: "off")))))?
+  assert(!paused(asking(Map.of(MapEntry(key: "refresh", value: "on")))))?
+  assert(!paused(asking(Map.of())))?
+  // The pages that reload: every 5 s, and none when paused.
+  let metrics = metricsPage("", anApp("hello"), asking(Map.of(MapEntry(key: "over", value: "day")))).render()
+  assert(metrics.contains("<meta http-equiv=refresh content=\"5; url=/apps/hello/metrics?over=day\">"))?
+  assert(metrics.contains("<a href=\"/apps/hello/metrics?over=day&amp;refresh=off\">pause</a>"))?
+  let pausedMetrics = metricsPage("", anApp("hello"), asking(Map.of(MapEntry(key: "over", value: "day"), MapEntry(key: "refresh", value: "off")))).render()
+  assert(!pausedMetrics.contains("http-equiv"))?
+  assert(pausedMetrics.contains("paused · <a href=\"/apps/hello/metrics?over=day\">resume</a>"))?
+  let platform = platformPage("", asking(Map.of())).render()
+  assert(platform.contains("<meta http-equiv=refresh content=\"5; url=/platform?over=hour\">"))?
+  let timeline = timelinePage("", asking(Map.of(MapEntry(key: "app", value: "hello"), MapEntry(key: "refresh", value: "off")))).render()
+  assert(!timeline.contains("http-equiv"))?
+  assert(timeline.contains("paused · <a href=\"/timeline?app=hello&amp;over=1m\">resume</a>"))?
+  assert(!requestAnswer("", "42").body.contains("http-equiv"))?
+  Ok(())
+}
+
 test fn marksTheWindowItShowsAndLinksTheOthers() -> Result<Unit, Error> {
   let steps = metricsSteps("/apps/hello", "day").render()
   assert(steps.contains("<b>the last day</b>"))?
@@ -1218,10 +1248,11 @@ test fn drawsAStripAsSteps() -> Result<Unit, Error> {
 /// Under `minicloud test` the timeline is empty: nothing in flight, no
 /// request in the window, and no request kept.
 test fn theTimelinePagesSayWhatTheyHaveNot() -> Result<Unit, Error> {
-  let live = livePage("").render()
+  let live = livePage("", asking(Map.of())).render()
   assert(live.contains("<h1>Live</h1>"))?
   assert(live.contains("<a href=\"/live\" aria-current=page>live</a>"))?
-  assert(live.contains("<meta http-equiv=refresh content=\"2\">"))?
+  assert(live.contains("<meta http-equiv=refresh content=\"2; url=/live\">"))?
+  assert(live.contains("refreshing every 2 s · <a href=\"/live?refresh=off\">pause</a>"))?
   assert(live.contains("Nothing is in flight."))?
   assert(live.contains("<td class=title data-label=worker>#0</td>"))?
   assert(live.contains("<span class=\"state idle\">idle</span>"))?
@@ -1231,7 +1262,7 @@ test fn theTimelinePagesSayWhatTheyHaveNot() -> Result<Unit, Error> {
   assert(page.contains("No request in the last 10 seconds"))?
   assert(page.contains("<b>the last 10 seconds</b>"))?
   assert(!page.contains("<svg class=timeline"))?
-  assert(!page.contains("http-equiv"))?
+  assert(page.contains("<meta http-equiv=refresh content=\"5; url=/timeline?over=10s\">"))?
   let missing = requestAnswer("", "42")
   assertEqual(missing.status, 404)?
   assert(missing.body.contains("no request 42 in the timeline"))?
@@ -1328,6 +1359,7 @@ test fn readsTheLoadFormsFigures() -> Result<Unit, Error> {
 /// refused with the form as it was posted.
 test fn theLoadPageWithNoHost() -> Result<Unit, Error> {
   let page = loadPage("", host.loadStatus(), html"", Map.of()).render()
+  assert(!page.contains("class=reload"))?
   assert(page.contains("<h1>Load</h1>"))?
   assert(page.contains("<a href=\"/load\" aria-current=page>load</a>"))?
   assert(page.contains("No load has been run since the host started."))?
@@ -1354,7 +1386,11 @@ test fn theLoadPageWithNoHost() -> Result<Unit, Error> {
 test fn showsTheRunGoingOnWithTheWayToStopIt() -> Result<Unit, Error> {
   let running = aLoadStatus(Some(aLoadRun(notDeployed: Vector.of("slow").freeze())), Some(aLoadRun(state: "finished")))
   let page = loadPage("/admin", running, html"", Map.of()).render()
-  assert(page.contains("<meta http-equiv=refresh content=\"2\">"))?
+  assert(page.contains("<meta http-equiv=refresh content=\"2; url=/admin/load\">"))?
+  assert(page.contains("<a href=\"/admin/load?refresh=off\">pause</a>"))?
+  let still = loadPage("/admin", running, html"", Map.of(), true).render()
+  assert(!still.contains("http-equiv"))?
+  assert(still.contains("paused · <a href=\"/admin/load\">resume</a>"))?
   assert(page.contains("<h2>Running</h2>"))?
   assert(!page.contains("<h2>Last run</h2>"))?
   assert(page.contains("<form method=post action=\"/admin/load/stop\">"))?

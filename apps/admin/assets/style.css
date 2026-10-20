@@ -401,3 +401,5 @@ table.facts,table.facts tbody,table.facts tr,table.facts th,table.facts td{displ
 table.facts th{width:auto;padding-bottom:0;border-bottom:0;font-size:12px;text-transform:uppercase;letter-spacing:.04em;white-space:normal}
 table.facts td{padding-top:.2em}
 }
+/* a page that reloads itself (Live, Timeline, Platform, an app's Metrics, Load while a run goes on): how often, and the way to stop it — a link to the same page with refresh=off, since without a script stopping a <meta> refresh is a page that has none */
+p.reload{margin:.2em 0 .6em;color:var(--muted);font-size:13px}

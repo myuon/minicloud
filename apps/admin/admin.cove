@@ -93,7 +93,7 @@ export fn handle(request: web.Request) -> web.Response {
     return htmlResponse(200, platformPage(at, request))
   }
   if section == "live" && name == "" && get {
-    return htmlResponse(200, livePage(at))
+    return htmlResponse(200, livePage(at, request))
   }
   if section == "timeline" && name == "" && get {
     return htmlResponse(200, timelinePage(at, request))
@@ -103,7 +103,7 @@ export fn handle(request: web.Request) -> web.Response {
   }
   if section == "load" {
     if name == "" && get {
-      return htmlResponse(200, loadPage(at, host.loadStatus(), html"", Map.of()))
+      return htmlResponse(200, loadPage(at, host.loadStatus(), html"", Map.of(), paused(request)))
     }
     if get || parts.length() > 3 {
       return textResponse(404, "no such page\n")

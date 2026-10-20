@@ -125,8 +125,9 @@ fn workersTable(base: String, live: host.Live) -> Html {
 /// The Live page: the requests in flight now and where each is, then each
 /// worker and what it runs. It reloads itself every 2 seconds — a `<meta>`
 /// refresh, which is HTML and no script.
-fn livePage(base: String) -> Html {
+fn livePage(base: String, request: web.Request) -> Html {
   let live = host.live()
+  let reload = reloading("{base}/live", 2, paused(request))
   let listed = live.requests.length()
   let more = html.only(
     live.total > listed,
@@ -147,11 +148,13 @@ fn livePage(base: String) -> Html {
     html"""
       <h1>Live</h1>
       {about(summary, said)}
+      {reload.control}
       <h2>In flight</h2>{liveTable(base, live)}{more}
       <h2>Workers</h2>{workersTable(base, live)}
       <p class=actions><a href="{base}/timeline">the timeline →</a></p>
       """,
-    2,
+    reload.seconds,
+    reload.link,
   )
 }
 
@@ -678,6 +681,7 @@ fn timelinePage(base: String, request: web.Request) -> Html {
   let all = host.timeline("", timelineSecs(over))
   let timeline = if app == "" { all } else { host.timeline(app, timelineSecs(over)) }
   let order = timelineOrder(all)
+  let reload = reloading(timelineLink(base, app, over), 5, paused(request))
   let summary = html"Where each request waited, ran, parked and resumed, over {span}."
   let said = html"""
     The host records every request in memory — the last {timelineKeep()}, its path without
@@ -690,6 +694,7 @@ fn timelinePage(base: String, request: web.Request) -> Html {
   let head = html"""
     <h1>Timeline</h1>
     {about(summary, said)}
+    {reload.control}
     {timelineChips(base, order, app, over)}
     {timelineSteps(base, app, over)}
     """
@@ -704,6 +709,8 @@ fn timelinePage(base: String, request: web.Request) -> Html {
         <p class=muted>No request{whose} in {span}: nothing arrived, ran or ended in it that the
         host still keeps.</p>
         """,
+      reload.seconds,
+      reload.link,
     )
   }
   let shown = timeline.lanes.length()
@@ -723,6 +730,8 @@ fn timelinePage(base: String, request: web.Request) -> Html {
       {newest}
       <h2>Apps</h2>{timelineApps(base, timeline, order, over)}
       """,
+    reload.seconds,
+    reload.link,
   )
 }
 

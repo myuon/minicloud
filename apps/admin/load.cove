@@ -205,7 +205,7 @@ fn loadState(base: String, status: host.LoadStatus) -> Html {
 
 /// The Load page. While a run goes on it reloads every 2 seconds, as Live
 /// does; `notice` is said above everything, and `form` fills the form.
-fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<String, String>) -> Html {
+fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<String, String>, pause: Bool = false) -> Html {
   let summary = html"Puts load on this host's own apps, so that Live and Timeline have something to show."
   let said = html"""
     The host sends real requests to its own public listener, over loopback — through the
@@ -218,7 +218,12 @@ fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<Strin
     host has deployed. <b>Every app on this host shares its workers with the run</b> — two in
     production — so they all slow down while it lasts.
     """
-  let refresh = if status.running { 2 } else { 0 }
+  // While a run goes on, and only then: a page that reloads to show a run
+  // that is over would be reloading for nothing. The URL is the page's own,
+  // and not the path of the form this page may be the answer to.
+  let reload = reloading("{base}/load", 2, pause)
+  let refresh = if status.running { reload.seconds } else { 0 }
+  let control = html.only(status.running, reload.control)
   layout(
     base,
     "load",
@@ -227,6 +232,7 @@ fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<Strin
       <h1>Load</h1>
       {about(summary, said)}
       {notice}
+      {control}
       {loadState(base, status)}
       <p class=actions>
         <a href="{base}/live">what is in flight →</a>
@@ -236,6 +242,7 @@ fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<Strin
       {loadForm(base, form, status)}
       """,
     refresh,
+    reload.link,
   )
 }
 

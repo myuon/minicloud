@@ -119,16 +119,19 @@ fn assetQuery(version: String) -> String {
 ///
 /// `refresh` is the seconds after which the browser loads the page again
 /// (`<meta http-equiv=refresh>`, which is HTML and not a script, so the CSP
-/// has nothing to say about it); 0, the default, never.
-fn layout(base: String, here: String, title: String, content: Html, refresh: Int = 0) -> Html {
+/// has nothing to say about it); 0, the default, never. `again` is the URL
+/// it loads, "" for the one it is on — which for a page answered to a POST
+/// is the POST's path, which a GET does not answer; [`reloading`] says which.
+fn layout(base: String, here: String, title: String, content: Html, refresh: Int = 0, again: String = "") -> Html {
   let v = assetQuery(host.selfVersion())
-  let again = html.only(refresh > 0, html"""<meta http-equiv=refresh content="{refresh}">""")
+  let when = if again == "" { "{refresh}" } else { "{refresh}; url={again}" }
+  let reload = html.only(refresh > 0, html"""<meta http-equiv=refresh content="{when}">""")
   html"""
     <!doctype html>
     <html lang=en>
     <head>
       <meta charset=utf-8>
-      <meta name=viewport content="width=device-width,initial-scale=1">{again}
+      <meta name=viewport content="width=device-width,initial-scale=1">{reload}
       <title>{title} · minicloud admin</title>
       <link rel=stylesheet href="{base}/style.css{v}">
       <link rel=icon href="{base}/favicon.svg{v}" type="image/svg+xml">
@@ -140,6 +143,44 @@ fn layout(base: String, here: String, title: String, content: Html, refresh: Int
     </body>
     </html>
     """
+}
+
+/// How a page that loads itself again does it: every `seconds`, to `link`,
+/// and the line that says so with the way to stop it — or, paused, no
+/// reload at all and the way to start it again.
+struct Reload {
+  seconds: Int
+  link: String
+  control: Html
+}
+
+/// Whether `?refresh=off` paused a page that reloads itself.
+fn paused(request: web.Request) -> Bool {
+  request.query.get("refresh").unwrapOr("").trim() == "off"
+}
+
+/// A page at `link` — its own query (`over`, `app`) in it, and no
+/// `refresh` — that loads itself again every `seconds`, unless `paused`.
+///
+/// The pause is a link and not a button: there is no script to stop a
+/// `<meta>` refresh, so stopping is a page without one, which is the same
+/// URL with `refresh=off`, and resuming is the URL without it. A paused page
+/// stays paused for as long as it is looked at, which is what pausing is for:
+/// a figure stays still to be read.
+fn reloading(link: String, seconds: Int, paused: Bool) -> Reload {
+  if paused {
+    return Reload(
+      seconds: 0,
+      link: link,
+      control: html"""<p class=reload>paused · <a href="{link}">resume</a></p>""",
+    )
+  }
+  let joint = if link.contains("?") { "&" } else { "?" }
+  Reload(
+    seconds: seconds,
+    link: link,
+    control: html"""<p class=reload>refreshing every {seconds} s · <a href="{link}{joint}refresh=off">pause</a></p>""",
+  )
 }
 
 fn badge(state: String) -> Html {
@@ -2609,6 +2650,7 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
     here is the right range and not an exact time.</p>
     """
   let steps = metricsSteps(at, over)
+  let reload = reloading("{at}/metrics?over={over}", 5, paused(request))
   let title = "{app.name} metrics"
   if points.length() == 0 {
     return layout(
@@ -2616,13 +2658,15 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
       "apps",
       title,
       html"""
-        {head}{lead}{steps}
+        {head}{lead}{reload.control}{steps}
         <p class=muted>Nothing to show for {span}: either the host has not sampled
         <code>{app.name}</code> yet — it takes a sample a minute, so a minute after it has
         served something — or it keeps no history at all, which it does not when it is started
         without a data directory. This page cannot tell which, and a chart of nothing would say
         neither.</p>
         """,
+      reload.seconds,
+      reload.link,
     )
   }
   var times = Vector.of()
@@ -2717,10 +2761,12 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
     "apps",
     title,
     html"""
-      {head}{lead}{steps}{figures}{covers}
+      {head}{lead}{reload.control}{steps}{figures}{covers}
       <h2>Traffic</h2>{traffic}
       <h2>Speed, in milliseconds</h2>{speed}
       """,
+    reload.seconds,
+    reload.link,
   )
 }
 
@@ -2896,6 +2942,7 @@ fn platformPage(base: String, request: web.Request) -> Html {
     </div>
     """
   let steps = windowSteps("{base}/platform", over)
+  let reload = reloading("{base}/platform?over={over}", 5, paused(request))
   let points = host.platform(over)
   if points.length() == 0 {
     return layout(
@@ -2903,12 +2950,14 @@ fn platformPage(base: String, request: web.Request) -> Html {
       "platform",
       "platform",
       html"""
-        <h1>Platform</h1>{lead}{figures}{steps}
+        <h1>Platform</h1>{lead}{reload.control}{figures}{steps}
         <p class=muted>Nothing to chart for {span}: either the host has not sampled itself
         yet — the first minute after a start keeps nothing, as there is nothing yet to take
         the CPU's difference from — or it keeps no history, which it does not without a data
         directory.</p>
         """,
+      reload.seconds,
+      reload.link,
     )
   }
   let seconds = if over == "month" { 3600 } else { 60 }
@@ -3009,12 +3058,14 @@ fn platformPage(base: String, request: web.Request) -> Html {
     "platform",
     "platform",
     html"""
-      <h1>Platform</h1>{lead}{figures}{steps}{covers}
+      <h1>Platform</h1>{lead}{reload.control}{figures}{steps}{covers}
       <h2>Memory</h2>{memoryChart}
       <h2>CPU</h2>{cpuChart}
       <h2>Disk</h2>{diskChart}
       <h2>Requests</h2>{workChart}
       """,
+    reload.seconds,
+    reload.link,
   )
 }
 
