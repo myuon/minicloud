@@ -1553,9 +1553,10 @@ test fn saysHowALoadRunSends() -> Result<Unit, Error> {
   assertEqual(loadSeconds(60000), "60.0 s")?
   assertEqual(loadLatency(Some(1500)), "1.5 ms")?
   assertEqual(loadLatency(None), "–")?
-  assertEqual(",".join(loadMixes()), "light,cpu,wait,mixed")?
-  assert(loadMixSaid("wait").render().contains("<code>slow</code>"))?
-  assertEqual(loadMixSaid("<b>").render(), "<code>&lt;b&gt;</code>")?
+  assertEqual(",".join(loadMixes()), "light,cpu,wait,alloc,mixed")?
+  assert(loadMixSaid("/admin", "alloc").render().contains("<a href=\"/admin/platform\">Platform</a>"))?
+  assert(loadMixSaid("", "wait").render().contains("<code>slow</code>"))?
+  assertEqual(loadMixSaid("", "<b>").render(), "<code>&lt;b&gt;</code>")?
   Ok(())
 }
 

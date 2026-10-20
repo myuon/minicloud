@@ -8,8 +8,9 @@
 //! loopback to its own public listener — through the router, the queues and
 //! the workers like any other request, so they appear in the timeline.
 //!
-//! A run is one of four [`Mix`]es of the example apps — `light` (`hello`),
-//! `cpu` (`crunch`), `wait` (`slow`) and `mixed` (the three in turn) — open
+//! A run is one of five [`Mix`]es of the example apps — `light` (`hello`),
+//! `cpu` (`crunch`), `wait` (`slow`), `alloc` (`algo`, a large matching that allocates heavily and
+//! collects garbage) and `mixed` (hello, crunch and slow in turn) — open
 //! loop at `rate` requests a second (latency from when each was due, as
 //! `minicloud-load --rate`), or closed loop (`rate` 0) on `connections`
 //! kept-alive connections, for `seconds`. One at a time, bounded by
@@ -235,6 +236,9 @@ pub enum Mix {
     Cpu,
     /// `slow`: three 60 ms sleeps, parked; holds no worker while it waits.
     Wait,
+    /// `algo`: a large matching, about 4 MB allocated and several garbage
+    /// collections a request.
+    Alloc,
     /// The three in turn.
     Mixed,
 }
@@ -245,6 +249,7 @@ impl Mix {
             Mix::Light => "light",
             Mix::Cpu => "cpu",
             Mix::Wait => "wait",
+            Mix::Alloc => "alloc",
             Mix::Mixed => "mixed",
         }
     }
@@ -255,6 +260,7 @@ impl Mix {
             Mix::Light => &["hello"],
             Mix::Cpu => &["crunch"],
             Mix::Wait => &["slow"],
+            Mix::Alloc => &["algo"],
             Mix::Mixed => &["hello", "crunch", "slow"],
         }
     }
@@ -267,9 +273,10 @@ impl std::str::FromStr for Mix {
             "light" => Ok(Mix::Light),
             "cpu" => Ok(Mix::Cpu),
             "wait" => Ok(Mix::Wait),
+            "alloc" => Ok(Mix::Alloc),
             "mixed" => Ok(Mix::Mixed),
             other => Err(format!(
-                "mix `{other}` is none of light, cpu, wait or mixed"
+                "mix `{other}` is none of light, cpu, wait, alloc or mixed"
             )),
         }
     }
@@ -863,8 +870,18 @@ mod tests {
         assert!(Params::new("light", 500, 64, 60).is_ok());
         assert!(Params::new("wait", 1, 1, 1).is_ok());
         assert!(Params::new(" mixed ", 0, 1, 1).is_ok());
+        let alloc = Params::new("alloc", 0, 1, 1).unwrap();
+        assert_eq!(alloc.mix, Mix::Alloc);
+        assert_eq!(alloc.mix.name(), "alloc");
+        assert_eq!(alloc.mix.targets(), ["algo"]);
         for (mix, rate, connections, seconds, says) in [
-            ("heavy", 0, 4, 10, "none of light, cpu, wait or mixed"),
+            (
+                "heavy",
+                0,
+                4,
+                10,
+                "none of light, cpu, wait, alloc or mixed",
+            ),
             ("light", 501, 4, 10, "rate is 0 (closed loop) to 500"),
             ("light", -1, 4, 10, "rate is"),
             ("light", 0, 0, 10, "connections is 1 to 64"),

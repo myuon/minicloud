@@ -10,19 +10,21 @@ use std.html.Html
 // router, the queues and the workers like anybody's. One run at a time; the
 // host holds it, and this page only starts it, stops it and reads it.
 
-/// The four mixes, in the order the form offers them.
+/// The five mixes, in the order the form offers them.
 fn loadMixes() -> Array<String> {
-  Vector.of("light", "cpu", "wait", "mixed").freeze()
+  Vector.of("light", "cpu", "wait", "alloc", "mixed").freeze()
 }
 
 /// What a mix asks, in words.
-fn loadMixSaid(mix: String) -> Html {
+fn loadMixSaid(base: String, mix: String) -> Html {
   if mix == "light" {
     html"<code>hello</code>: next to no work — what a request costs the host itself"
   } else if mix == "cpu" {
     html"<code>crunch</code>: primes up to 20,000 to 150,000 in turn — each holds a worker for milliseconds"
   } else if mix == "wait" {
     html"<code>slow</code>: three sleeps of 60 ms — parked, holding no worker while it waits"
+  } else if mix == "alloc" {
+    html"""<code>algo</code>: a large matching that allocates heavily (about 4 MB) and triggers garbage collection — watch the Garbage collection and Memory charts on <a href="{base}/platform">Platform</a> while it runs"""
   } else if mix == "mixed" {
     html"<code>hello</code>, <code>crunch</code> and <code>slow</code> in turn"
   } else {
@@ -120,7 +122,7 @@ fn loadRun(base: String, run: host.LoadRun) -> Html {
     "took {loadSeconds(run.elapsedMs)}"
   }
   html"""
-    <p><b>{run.mix}</b> — {loadMixSaid(run.mix)}; {loadMode(run.rate, run.connections)}, for
+    <p><b>{run.mix}</b> — {loadMixSaid(base, run.mix)}; {loadMode(run.rate, run.connections)}, for
     {run.seconds} s. Started {atTime(run.startedUnixMs)}, {badge(run.state)} — {elapsed}.</p>
     {missing}
     <div class=strip>
@@ -210,8 +212,9 @@ fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<Strin
   let said = html"""
     The host sends real requests to its own public listener, over loopback — through the
     router, the queues and the workers like anybody's — each with <code>x-minicloud-load: 1</code>.
-    <b>light</b> asks {loadMixSaid("light")}; <b>cpu</b> asks {loadMixSaid("cpu")};
-    <b>wait</b> asks {loadMixSaid("wait")}; <b>mixed</b> asks {loadMixSaid("mixed")}. A rate
+    <b>light</b> asks {loadMixSaid(base, "light")}; <b>cpu</b> asks {loadMixSaid(base, "cpu")};
+    <b>wait</b> asks {loadMixSaid(base, "wait")}; <b>alloc</b> asks {loadMixSaid(base, "alloc")};
+    <b>mixed</b> asks {loadMixSaid(base, "mixed")}. A rate
     sends that many a second whether or not the last were answered, and times each from when
     it was due; 0 sends the next as soon as a connection has its answer. One run at a time,
     for at most {status.maxSeconds} s. The apps are examples, and a mix asks only what this

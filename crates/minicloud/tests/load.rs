@@ -181,7 +181,10 @@ fn starting_takes_the_admin_token_and_figures_within_their_caps() {
     );
     assert_eq!(anonymous.status, 401, "{}", anonymous.body);
     for (body, says) in [
-        (r#"{"mix":"heavy"}"#, "none of light, cpu, wait or mixed"),
+        (
+            r#"{"mix":"heavy"}"#,
+            "none of light, cpu, wait, alloc or mixed",
+        ),
         (r#"{"rate":501}"#, "rate is 0 (closed loop) to 500"),
         (r#"{"connections":65}"#, "connections is 1 to 64"),
         (r#"{"seconds":61}"#, "seconds is 1 to 60"),
@@ -210,4 +213,48 @@ fn an_open_loop_run_sends_at_its_rate() {
     assert_eq!(n(&last["sent"]), 20, "{last}");
     assert_eq!(n(&last["ok"]), 20, "{last}");
     assert_eq!(last["rate"], 20);
+}
+
+#[test]
+fn an_alloc_run_asks_algo_and_makes_it_collect_garbage() {
+    let apps = apps(&[sample("algo")]);
+    let host = start(&apps, 2);
+    let collections = |host: &minicloud::Host| {
+        let answer = get(host.addr, "/_host/apps/algo");
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        let json: Json = serde_json::from_str(&answer.body).expect("JSON");
+        n(&json["gc_collections"])
+    };
+    let before = collections(&host);
+    let started = admin_post(
+        &host,
+        "/_host/load",
+        r#"{"mix":"alloc","connections":1,"seconds":1}"#,
+    );
+    assert_eq!(started.status, 200, "{}", started.body);
+    let last = ended(&host)["last"].clone();
+    assert_eq!(last["state"], "finished", "{last}");
+    assert_eq!(last["targets"], serde_json::json!(["algo"]));
+    assert_eq!(last["not_deployed"], serde_json::json!([]));
+    assert!(n(&last["ok"]) >= 1, "{last}");
+    assert_eq!(n(&last["errors"]), 0, "{last}");
+    assert!(collections(&host) > before);
+}
+
+#[test]
+fn an_alloc_run_without_algo_says_so() {
+    let apps = apps(&[sample("hello")]);
+    let host = start(&apps, 1);
+    let started = admin_post(
+        &host,
+        "/_host/load",
+        r#"{"mix":"alloc","connections":1,"seconds":5}"#,
+    );
+    assert_eq!(started.status, 200, "{}", started.body);
+    let last = ended(&host)["last"].clone();
+    assert_eq!(last["not_deployed"], serde_json::json!(["algo"]));
+    assert_eq!(
+        last["problems"],
+        serde_json::json!(["target app algo is not deployed"])
+    );
 }

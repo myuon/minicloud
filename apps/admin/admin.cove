@@ -48,8 +48,8 @@ use std.html
 ///   each app's figures. Reading only, from the host's in-memory timeline.
 /// - `GET /requests/<id>` is one request's phases in words, and what it
 ///   came to; a 404 for one the timeline no longer keeps.
-/// - `GET /load` puts load on the host's own apps — `light`, `cpu`, `wait`
-///   or `mixed`, at a rate or closed loop, for at most a minute — so that
+/// - `GET /load` puts load on the host's own apps — `light`, `cpu`, `wait`,
+///   `alloc` or `mixed`, at a rate or closed loop, for at most a minute — so that
 ///   Live and Timeline have something to show; `POST /load/start` and
 ///   `POST /load/stop` start and stop the one run there may be. While it
 ///   goes on the page reloads itself every 2 seconds.

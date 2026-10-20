@@ -1170,8 +1170,11 @@ move. One run at a time, held by the host; it needs no tool outside it.
 
 - A **mix**: `light` (`hello`, `/hello/?name=load`), `cpu` (`crunch`,
   `/crunch/?n=` 20000, 50000, 100000 and 150000 in turn), `wait` (`slow`,
-  `/slow/?ms=60&times=3`, which parks on a timer three times) or `mixed`
-  (the three in turn).
+  `/slow/?ms=60&times=3`, which parks on a timer three times), `alloc` (`algo`,
+  `/algo/matching?example=large&algorithm=augmenting&part=result`, which
+  allocates about 4 MB and triggers garbage collection: watch the Platform
+  page's Garbage collection and Memory charts) or `mixed` (`hello`, `crunch`
+  and `slow` in turn).
 - A **rate** in requests a second, at most 500, open loop: each latency is
   measured from when its request was due. Rate 0 is closed loop on
   `connections` kept-alive connections (at most 64; they also bound an
@@ -1184,7 +1187,7 @@ move. One run at a time, held by the host; it needs no tool outside it.
   terminates TLS is refused: the runner speaks plain HTTP.
 - **The apps share the workers with the run**, so on a deployed host
   (two workers) they slow down while it lasts.
-- The targets are the example apps `hello`, `crunch` and `slow`, and must be
+- The targets are the example apps `hello`, `crunch`, `slow` and `algo`, and must be
   deployed. One the host does not have is reported as `target app X is not
   deployed` (`not_deployed` and `problems`), is not asked again, and a run
   with none left ends early.
