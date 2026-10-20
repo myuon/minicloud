@@ -1288,6 +1288,7 @@ fn aRequest(
     parks: 1,
     moves: 1,
     nowUs: 100000,
+    startedUnixMs: 1790000000000,
     phases: phases,
   )
 }
@@ -1359,18 +1360,225 @@ test fn choosesAWindowOfTheTimeline() -> Result<Unit, Error> {
   assertEqual(timelineWindow(asking(Map.of())), "1m")?
   assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "10s")))), "10s")?
   assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "5m")))), "5m")?
-  assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "1h")))), "1m")?
+  assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "1h")))), "1h")?
+  assertEqual(timelineWindow(asking(Map.of(MapEntry(key: "over", value: "2h")))), "1m")?
   assertEqual(timelineSecs("10s"), 10)?
   assertEqual(timelineSecs("1m"), 60)?
   assertEqual(timelineSecs("5m"), 300)?
+  assertEqual(timelineSecs("15m"), 900)?
+  assertEqual(timelineSecs("1h"), 3600)?
   assertEqual(timelineLink("", "", "5m"), "/timeline?over=5m")?
   assertEqual(timelineLink("/x", "a b", "10s"), "/x/timeline?app=a%20b&over=10s")?
-  let steps = timelineSteps("", "hello", "10s").render()
+  let steps = timelineSteps("", "hello", liveWindow("10s")).render()
   assert(steps.contains("<b>the last 10 seconds</b>"))?
   assert(steps.contains("<a href=\"/timeline?app=hello&amp;over=5m\">the last 5 minutes</a>"))?
-  let chips = timelineChips("", ["hello", "notes"], "notes", "1m").render()
+  assert(steps.contains("<a href=\"/timeline?app=hello&amp;over=1h\">the last hour</a>"))?
+  // A window of the past marks none of them.
+  assert(!timelineSteps("", "", pastWindow(epoch(), epoch() + 5000)).render().contains("<b>"))?
+  let chips = timelineChips("", ["hello", "notes"], "notes", liveWindow("1m")).render()
   assert(chips.contains("<a href=\"/timeline?over=1m\">all apps</a>"))?
   assert(chips.contains("<a href=\"/timeline?app=notes&amp;over=1m\" aria-current=page>notes</a>"))?
+  // The chips keep a window of the past.
+  let past = timelineChips("", ["hello"], "", pastWindow(epoch(), epoch() + 5000)).render()
+  assert(past.contains("<a href=\"/timeline?app=hello&amp;from=1790000000000&amp;until=1790000005000\">hello</a>"))?
+  Ok(())
+}
+
+/// When the fixed timeline's host started, Unix milliseconds: 23:13:20 JST.
+fn epoch() -> Int {
+  1790000000000
+}
+
+/// The fixed timeline's now: 400 s after it started, 23:20:00 JST.
+fn fixedNow() -> Int {
+  epoch() + 400000
+}
+
+fn ask(entries: Array<MapEntry<String, String>>) -> TlWindow {
+  var query = Map.of()
+  for entry in entries {
+    query = query.inserted(entry.key, entry.value)
+  }
+  timelineAsked(asking(query))
+}
+
+test fn readsAWindowOfThePastFromTheQuery() -> Result<Unit, Error> {
+  let e = epoch()
+  assertEqual(ask([MapEntry(key: "from", value: "{e}"), MapEntry(key: "until", value: "{e + 5000}")]), pastWindow(e, e + 5000))?
+  // `span` is seconds after `from`, or before `until` alone; a minute by default.
+  assertEqual(ask([MapEntry(key: "from", value: "{e}"), MapEntry(key: "span", value: "2")]), pastWindow(e, e + 2000))?
+  assertEqual(ask([MapEntry(key: "from", value: "{e}")]), pastWindow(e, e + 60000))?
+  assertEqual(ask([MapEntry(key: "until", value: "{e + 60000}")]), pastWindow(e, e + 60000))?
+  // Never shorter than the least a zoom goes to.
+  assertEqual(ask([MapEntry(key: "from", value: "{e}"), MapEntry(key: "until", value: "{e}")]), pastWindow(e, e + 10))?
+  assertEqual(pastWindow(e, e - 5).untilMs, e + 10)?
+  // Not a number: the live window of `over`.
+  assertEqual(ask([MapEntry(key: "from", value: "soon"), MapEntry(key: "over", value: "15m")]), liveWindow("15m"))?
+  assertEqual(ask([]), liveWindow("1m"))?
+  assertEqual(windowLink("", "a b", pastWindow(e, e + 5000)), "/timeline?app=a%20b&from=1790000000000&until=1790000005000")?
+  assertEqual(windowLink("/x", "", pastWindow(e, e + 5000)), "/x/timeline?from=1790000000000&until=1790000005000")?
+  assertEqual(windowLink("", "", liveWindow("1h")), "/timeline?over=1h")?
+  Ok(())
+}
+
+test fn pansByHalfAWindowHeldToWhatIsKeptAndNow() -> Result<Unit, Error> {
+  let e = epoch()
+  let now = fixedNow()
+  let window = pastWindow(e + 300000, e + 360000)
+  assertEqual(panned(window, -1, now, e), pastWindow(e + 270000, e + 330000))?
+  assertEqual(panned(window, 1, now, e), pastWindow(e + 330000, e + 390000))?
+  // Later past now is the live window of its length.
+  assertEqual(panned(pastWindow(e + 330000, e + 390000), 1, now, e), liveWindow("1m"))?
+  assertEqual(panned(pastWindow(e + 385000, e + 397000), 1, now, e), liveWindow("1m"))?
+  // Earlier than what is kept starts where it does.
+  assertEqual(panned(pastWindow(e + 10000, e + 70000), -1, now, e), pastWindow(e, e + 60000))?
+  // A live window is where it is now.
+  let live = TlWindow(live: true, over: "1m", fromMs: e + 340000, untilMs: now)
+  assertEqual(panned(live, -1, now, e), pastWindow(e + 310000, e + 370000))?
+  Ok(())
+}
+
+test fn zoomsOutFiveTimesAroundTheMiddle() -> Result<Unit, Error> {
+  let e = epoch()
+  let now = fixedNow()
+  assertEqual(zoomedOut(pastWindow(e + 100000, e + 110000), now, e), Some(pastWindow(e + 80000, e + 130000)))?
+  // As wide as what is kept, at most: here reaching now, so live.
+  assertEqual(zoomedOut(pastWindow(e + 100000, e + 200000), now, e), Some(liveWindow("15m")))?
+  // Held after what is kept.
+  assertEqual(zoomedOut(pastWindow(e + 1000, e + 2000), now, e), Some(pastWindow(e, e + 5000)))?
+  // Reaching now: the live window of its length.
+  assertEqual(zoomedOut(pastWindow(e + 390000, e + 395000), now, e), Some(liveWindow("1m")))?
+  // A live window: the next longer, and nothing past an hour.
+  assertEqual(zoomedOut(liveWindow("10s"), now, e), Some(liveWindow("1m")))?
+  assertEqual(zoomedOut(liveWindow("15m"), now, e), Some(liveWindow("1h")))?
+  assertEqual(zoomedOut(liveWindow("1h"), now, e), None)?
+  Ok(())
+}
+
+test fn zoomsInOnAFifthAroundABand() -> Result<Unit, Error> {
+  let e = epoch()
+  let now = fixedNow()
+  let window = pastWindow(e + 100000, e + 200000)
+  // Held inside the window at either end.
+  assertEqual(zoomedIn(window, 0, 10, now), pastWindow(e + 100000, e + 120000))?
+  assertEqual(zoomedIn(window, 4, 10, now), pastWindow(e + 135000, e + 155000))?
+  assertEqual(zoomedIn(window, 9, 10, now), pastWindow(e + 180000, e + 200000))?
+  // No shorter than the least.
+  assertEqual(zoomedIn(pastWindow(e, e + 20), 3, 10, now), pastWindow(e + 2, e + 12))?
+  // The live window's last band ends now, and is of the past.
+  let live = TlWindow(live: true, over: "1m", fromMs: e + 340000, untilMs: now)
+  assertEqual(zoomedIn(live, 9, 10, now), pastWindow(e + 388000, now))?
+  let bands = zoomBands("", "notes", pastWindow(e, e + 10000), now, 100, 200, [12]).render()
+  assert(bands.contains("<a href=\"/timeline?app=notes&amp;from=1790000000000&amp;until=1790000002000\"><title>zoom in to 23:13:20.000 – 23:13:22.000</title>"))?
+  assert(bands.contains("<a href=\"/timeline?app=notes&amp;from=1790000008000&amp;until=1790000010000\">"))?
+  assert(bands.contains("<rect class=tl-band x=\"64\" y=\"0\" width=\"90\" height=\"16\"/><rect class=tl-band x=\"64\" y=\"100\" width=\"90\" height=\"100\"/>"))?
+  assert(bands.contains("<rect class=tl-band x=\"874\" y=\"0\""))?
+  Ok(())
+}
+
+test fn movesTheWindowWithLinks() -> Result<Unit, Error> {
+  let e = epoch()
+  let now = fixedNow()
+  let live = TlWindow(live: true, over: "1m", fromMs: e + 340000, untilMs: now)
+  let moves = timelineMoves("", "", live, now, e).render()
+  assert(moves.contains("<a href=\"/timeline?from=1790000310000&amp;until=1790000370000\">← earlier</a>"))?
+  assert(moves.contains("<a href=\"/timeline?over=5m\">zoom out</a>"))?
+  // At the live edge there is no later, and no now to go back to.
+  assert(!moves.contains("later"))?
+  assert(!moves.contains(">now<"))?
+  let past = timelineMoves("", "hello", pastWindow(e + 100000, e + 110000), now, e).render()
+  assert(past.contains("from=1790000095000&amp;until=1790000105000\">← earlier</a>"))?
+  assert(past.contains("from=1790000105000&amp;until=1790000115000\">later →</a>"))?
+  assert(past.contains("from=1790000080000&amp;until=1790000130000\">zoom out</a>"))?
+  assert(past.contains("<a href=\"/timeline?app=hello&amp;over=10s\">now</a>"))?
+  // Nothing earlier than what is kept.
+  assert(!timelineMoves("", "", pastWindow(e, e + 10000), now, e).render().contains("earlier"))?
+  let still = pastReload("/timeline?from=1&until=20", "/timeline?over=1m")
+  assertEqual(still.seconds, 0)?
+  assertEqual(still.control.render(), "<p class=reload>viewing a past window · <a href=\"/timeline?over=1m\">back to now</a></p>")?
+  Ok(())
+}
+
+test fn writesTheClockInJst() -> Result<Unit, Error> {
+  let e = epoch()
+  assertEqual(clockLabel(e, 60000000), "23:13:20")?
+  assertEqual(clockLabel(e + 1234, 5000000), "23:13:21.234")?
+  assertEqual(clockMillis(e + 7), "23:13:20.007")?
+  // The steps a clock is read in.
+  assertEqual(clockStep(10000, 6), 2000)?
+  assertEqual(clockStep(10000000, 6), 2000000)?
+  assertEqual(clockStep(300000000, 6), 60000000)?
+  assertEqual(clockStep(3600000000, 6), 600000000)?
+  // Ticks at whole steps of the clock, whatever the window's start.
+  let axis = clockAxis(1500000, 11500000, e, 0, 10, [12]).render()
+  assert(axis.contains(">23:13:22<"))?
+  assert(!axis.contains(">23:13:21<"))?
+  assert(axis.contains(">23:13:30<"))?
+  assertEqual(lengthSaid(250), "250 ms")?
+  assertEqual(lengthSaid(2500), "2.5 s")?
+  assertEqual(lengthSaid(10000), "10 s")?
+  assertEqual(lengthSaid(90500), "1 min 30 s")?
+  assertEqual(lengthSaid(300000), "5 min")?
+  assertEqual(lengthSaid(3600000), "1 h")?
+  assertEqual(lengthSaid(5400000), "1 h 30 min")?
+  assertEqual(windowSaid(pastWindow(e, e + 5000)), "2026-09-21 23:13:20.000 – 23:13:25.000 JST (5 s)")?
+  assertEqual(windowSaid(pastWindow(e, e + 60000)), "2026-09-21 23:13:20 – 23:14:20 JST (1 min)")?
+  assertEqual(windowSaid(liveWindow("15m")), "the last 15 minutes")?
+  assertEqual(liveOver(10000), "10s")?
+  assertEqual(liveOver(10001), "1m")?
+  assertEqual(liveOver(7200000), "1h")?
+  Ok(())
+}
+
+fn aRun(runs: Int, apps: Array<host.WorkerRunApp>, occupancyMilli: Int = 250) -> host.WorkerRun {
+  host.WorkerRun(
+    worker: 1,
+    id: 7,
+    app: "hello",
+    fromUs: 1000000,
+    toUs: 3000000,
+    runs: runs,
+    busyUs: 2000000 * occupancyMilli / 1000,
+    occupancyMilli: occupancyMilli,
+    apps: apps,
+  )
+}
+
+test fn drawsMergedRunsAsWhatTheyAre() -> Result<Unit, Error> {
+  let e = epoch()
+  let order = ["crunch", "hello"]
+  let mixed = aRun(5, [host.WorkerRunApp(app: "hello", runs: 3), host.WorkerRunApp(app: "crunch", runs: 2)])
+  assertEqual(
+    segmentTitle(mixed, e),
+    "5 runs merged (hello 3, crunch 2), busy 500.0 ms of 2000.0 ms on worker #1 from 23:13:21.000 — zoom in to tell them apart",
+  )?
+  let bar = segmentBar("", "", mixed, 0, 10000000, e, 45, 14, order).render()
+  // A faint band over the stretch, and hatching a quarter as high, at its foot.
+  assert(bar.contains("<rect class=tl-span x=\"154\" y=\"45\" width=\"180\" height=\"14\"/>"))?
+  assert(bar.contains("<rect class=\"tl-mix\" fill=\"url(#tl-mix)\" x=\"154\" y=\"56\" width=\"180\" height=\"3\"/>"))?
+  // The way to its stretch, zoomed in, and not to its first request.
+  assert(bar.contains("<a href=\"/timeline?from=1790000000800&amp;until=1790000003201\">"))?
+  assert(!bar.contains("/requests/"))?
+  // One app's runs merged keep its colour.
+  let one = segmentBar("", "", aRun(5, [host.WorkerRunApp(app: "hello", runs: 5)], occupancyMilli: 1000), 0, 10000000, e, 45, 14, order).render()
+  assert(one.contains("<rect class=\"tl-c1\" fill=\"url(#tl-mix)\" x=\"154\" y=\"45\" width=\"180\" height=\"14\"/>"))?
+  // A worker hardly busy is still a mark.
+  let idle = segmentBar("", "", aRun(2, [host.WorkerRunApp(app: "hello", runs: 2)], occupancyMilli: 10), 0, 10000000, e, 45, 14, order).render()
+  assert(idle.contains("y=\"57\" width=\"180\" height=\"2\""))?
+  // One run: its app's colour, the way to its request.
+  let single = aRun(1, [host.WorkerRunApp(app: "hello", runs: 1)], occupancyMilli: 1000)
+  assertEqual(segmentTitle(single, e), "hello #7, 2000.0 ms on worker #1 from 23:13:21.000")?
+  assert(segmentBar("", "", single, 0, 10000000, e, 45, 14, order).render().contains("<a href=\"/requests/7\"><rect class=\"tl-c1\" x=\"154\" y=\"45\" width=\"180\" height=\"14\">"))?
+  assertEqual(runsByApp(mixed), "hello 3, crunch 2")?
+  Ok(())
+}
+
+test fn opensTheTimelineAroundARequest() -> Result<Unit, Error> {
+  // Arrived 10 ms in, ended at 28: a tenth of a second either side.
+  assertEqual(requestWindow(aRequest(1, [])), pastWindow(epoch() - 90, epoch() + 129))?
+  // In flight: to now (100 ms in), half its length either side.
+  let flying = aRequest(2, [], outcome: "in_flight", status: None, endedUs: None)
+  assertEqual(requestWindow(flying), pastWindow(epoch() - 90, epoch() + 201))?
   Ok(())
 }
 
@@ -1433,7 +1641,7 @@ test fn drawsALaneWithItsMarks() -> Result<Unit, Error> {
   assert(gone.contains("class=tl-err"))?
   // A lane is the way to its request, and says what it is on hover.
   let one = lane("/x", aRequest(7, parkedAndMoved()), 0, 100000, 0, 10, "0").render()
-  assert(one.contains("<a href=\"/x/requests/7\"><title>#7 slow: GET /slow/&lt;b&gt; — 200, 18.0 ms, 2 collections, 1.0 MiB allocated</title>"))?
+  assert(one.contains("<a href=\"/x/requests/7\"><title>#7 slow: GET /slow/&lt;b&gt; — 200, 18.0 ms, 2 collections, 1.0 MiB allocated, arrived 23:13:20.010</title>"))?
   Ok(())
 }
 
@@ -1553,9 +1761,10 @@ test fn saysHowALoadRunSends() -> Result<Unit, Error> {
   assertEqual(loadSeconds(60000), "60.0 s")?
   assertEqual(loadLatency(Some(1500)), "1.5 ms")?
   assertEqual(loadLatency(None), "–")?
-  assertEqual(",".join(loadMixes()), "light,cpu,wait,mixed")?
-  assert(loadMixSaid("wait").render().contains("<code>slow</code>"))?
-  assertEqual(loadMixSaid("<b>").render(), "<code>&lt;b&gt;</code>")?
+  assertEqual(",".join(loadMixes()), "light,cpu,wait,alloc,mixed")?
+  assert(loadMixSaid("/admin", "alloc").render().contains("<a href=\"/admin/platform\">Platform</a>"))?
+  assert(loadMixSaid("", "wait").render().contains("<code>slow</code>"))?
+  assertEqual(loadMixSaid("", "<b>").render(), "<code>&lt;b&gt;</code>")?
   Ok(())
 }
 

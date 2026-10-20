@@ -26,10 +26,11 @@
 //! | `host.series(app, over)` | `Array<host.Point>`: what the app did over `over` — `"hour"`, `"day"` or `"month"` — as the host's history keeps it ([`crate::series`]), oldest first: a row a minute for the first two and a row an hour for the last, because the store keeps the two at those granularities and [`crate::series::window`] is the one place that says which. The same rows `GET /_host/series` answers, as values; an `over` that is none of the three is an hour, as there. Empty — not an `Err` — for a host that keeps no history (no `--data`, or `minicloud test`), so a page that draws a graph shows "nothing yet" before there is one; never more than [`SERIES_ROWS`] rows, the newest if there would be |
 //! | `host.platform(over)` | `Array<host.PlatformPoint>`: the host's process and machine over `over` ([`crate::platform`], kept beside the apps' rows in [`crate::series`]), windowed, capped and empty when there is no history exactly as `host.series` is. A figure the host could not read is `None` |
 //! | `host.platformNow()` | `host.PlatformNow`: the same figures as they are now, the CPU's as running totals; every file figure `None` and the engine's zero where there is no host (`minicloud test`) |
-//! | `host.timeline(app, overSecs)` | `host.Timeline`: what every app's requests (or `app`'s; `""` is every app) did over the last `overSecs` seconds (1–[`crate::timeline::KEEP`]), from the in-memory request timeline ([`crate::timeline`]): the summary (requests, rejected, worker utilisation, p50/p99 per app), the three strips (workers running, runs parked, requests waiting for a worker, each a mean in thousandths over [`crate::timeline::STRIP_BUCKETS`] buckets), the workers' run segments — those of one worker less than a thousandth of the window apart merged, at most [`TIMELINE_SEGMENTS`], the newest — and the newest [`crate::timeline::LANES`] requests with their phases, in arrival order. Times are microseconds since the host started (`startedUnixMs`). Empty where there is no host (`minicloud test`) |
+//! | `host.timeline(app, overSecs)` | `host.Timeline`: what every app's requests (or `app`'s; `""` is every app) did over the last `overSecs` seconds (1–[`crate::timeline::KEEP`], an hour), from the in-memory request timeline ([`crate::timeline`]): the summary (requests, rejected, worker utilisation, p50/p99 per app), the three strips (workers running, runs parked, requests waiting for a worker, each a mean in thousandths over [`crate::timeline::STRIP_BUCKETS`] buckets), the workers' run segments — those of one worker less than a thousandth of the window apart merged, each saying how many runs of each app it is and how long the worker ran inside it, at most [`TIMELINE_SEGMENTS`], the newest — and the newest [`crate::timeline::LANES`] requests with their phases, in arrival order. Times are microseconds since the host started (`startedUnixMs`). Empty where there is no host (`minicloud test`) |
+//! | `host.timelineRange(app, fromUnixMs, untilUnixMs)` | `host.Timeline`: the same of an absolute window, in the wall clock's Unix milliseconds, which the host turns into its own time and holds between its start and now ([`crate::timeline::Recorder::unix_range`]): what a page looking back, or zooming in, asks for |
 //! | `host.request(id)` | `Result<host.TimelineRequest, Error>`: one request of the timeline, its phases whole; an `Err` for one it no longer keeps |
 //! | `host.live()` | `host.Live`: the requests in flight now, oldest first (at most [`crate::timeline::LIVE_ROWS`]), each with where it is — waiting for a worker, running, parked at a host call, resuming, yielded — and since when; and each worker with the request it is running |
-//! | `host.loadStart(mix, rate, connections, seconds)` | `Result<String, Error>`: starts a load run on the host's own apps ([`crate::load`]) — `mix` `light`, `cpu`, `wait` or `mixed`; `rate` requests a second, 0 for closed loop; `connections` and `seconds` — real requests over loopback to the public listener, on the I/O runtime; an `Err` for a figure past its cap or while a run is going on |
+//! | `host.loadStart(mix, rate, connections, seconds)` | `Result<String, Error>`: starts a load run on the host's own apps ([`crate::load`]) — `mix` `light`, `cpu`, `wait`, `alloc` or `mixed`; `rate` requests a second, 0 for closed loop; `connections` and `seconds` — real requests over loopback to the public listener, on the I/O runtime; an `Err` for a figure past its cap or while a run is going on |
 //! | `host.loadStop()` | `Result<String, Error>`: stops it; an `Err` when none is going on |
 //! | `host.loadStatus()` | `host.LoadStatus`: the run going on and the last that ended, each a `host.LoadRun` — its figures, state, what it sent, how each was answered by class (429 and 503 apart), what had no answer, p50/p99 so far, and the targets the host has no app for. Idle where there is no host (`minicloud test`) |
 //! | `host.logs(app, limit)` |`Array<host.LogLine>`: the last `limit` (0–[`crate::logs::LOG_LINES`]) lines of the app's log, oldest first |
@@ -251,6 +252,12 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
         op(
             "timeline",
             &[STR, INT],
+            HostType::Named("host.Timeline"),
+            Effect::Read,
+        ),
+        op(
+            "timelineRange",
+            &[STR, INT, INT],
             HostType::Named("host.Timeline"),
             Effect::Read,
         ),
@@ -663,7 +670,10 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
             ],
         },
         // A stretch a worker ran: one request's run, or `runs` of them
-        // close together, `id` the first.
+        // close together, `id` and `app` the first's. `busyUs` is how long
+        // the worker ran inside it — less than its length where merged runs
+        // left gaps — and `occupancyMilli` that in thousandths of its
+        // length (1000 for one run); `apps` how many runs each app's were.
         TypeSchema {
             name: "WorkerRun",
             cases: &[],
@@ -674,7 +684,18 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("fromUs", INT),
                 field("toUs", INT),
                 field("runs", INT),
+                field("busyUs", INT),
+                field("occupancyMilli", INT),
+                field(
+                    "apps",
+                    HostType::Array(&HostType::Named("host.WorkerRunApp")),
+                ),
             ],
+        },
+        TypeSchema {
+            name: "WorkerRunApp",
+            cases: &[],
+            fields: &[field("app", STR), field("runs", INT)],
         },
         // One request ([`crate::timeline::Span`]): `outcome` is `ok`,
         // `error`, `rejected` or `in_flight`, and `reason` the error kind
@@ -705,6 +726,9 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("parks", INT),
                 field("moves", INT),
                 field("nowUs", INT),
+                // When the recorder started, `arrivedUs` and the others
+                // being from there.
+                field("startedUnixMs", INT),
                 field("phases", HostType::Array(&HostType::Named("host.Phase"))),
             ],
         },
@@ -1288,7 +1312,9 @@ fn phase_value(phase: &crate::timeline::Phase, now: u64) -> Value {
     )
 }
 
-fn timeline_request_value(span: &crate::timeline::Span) -> Value {
+/// One request, `started_unix_ms` being when the recorder started, so that
+/// a page can say when it ran in the wall clock's time.
+fn timeline_request_value(span: &crate::timeline::Span, started_unix_ms: u64) -> Value {
     let end = span.end.as_ref();
     let meter = end.and_then(|end| end.meter);
     let known = |value: Option<u64>| maybe(value);
@@ -1322,6 +1348,7 @@ fn timeline_request_value(span: &crate::timeline::Span) -> Value {
             ("parks", int(span.parks)),
             ("moves", int(span.moves)),
             ("nowUs", us(span.now_ns)),
+            ("startedUnixMs", int(started_unix_ms)),
             (
                 "phases",
                 Value::array(
@@ -1349,7 +1376,7 @@ fn timeline_value(window: &crate::timeline::Window) -> Value {
             ("workers", int(window.workers)),
             ("keepSecs", int(crate::timeline::KEEP.as_secs())),
             ("keepRequests", int(crate::timeline::KEEP_REQUESTS)),
-            ("requests", int(window.requests.len())),
+            ("requests", int(window.requests_total)),
             ("rejected", int(window.rejected())),
             ("busyUs", us(window.busy_ns)),
             ("utilisationMilli", int(window.utilisation_milli())),
@@ -1382,10 +1409,21 @@ fn timeline_value(window: &crate::timeline::Window) -> Value {
                         vec![
                             ("worker", int(segment.worker)),
                             ("id", int(segment.id)),
-                            ("app", Value::string(segment.app.clone())),
+                            ("app", Value::string(&*segment.app)),
                             ("fromUs", us(segment.from_ns)),
                             ("toUs", us(segment.to_ns)),
                             ("runs", int(segment.runs)),
+                            ("busyUs", us(segment.busy_ns)),
+                            ("occupancyMilli", int(segment.occupancy_milli())),
+                            (
+                                "apps",
+                                Value::array(segment.apps.iter().map(|(app, runs)| {
+                                    Value::structure(
+                                        "host.WorkerRunApp",
+                                        vec![("app", Value::string(&**app)), ("runs", int(*runs))],
+                                    )
+                                })),
+                            ),
                         ],
                     )
                 })),
@@ -1396,7 +1434,7 @@ fn timeline_value(window: &crate::timeline::Window) -> Value {
                     window
                         .newest(crate::timeline::LANES)
                         .iter()
-                        .map(timeline_request_value),
+                        .map(|span| timeline_request_value(span, window.started_unix_ms)),
                 ),
             ),
         ],
@@ -1803,7 +1841,7 @@ impl HostApi for AdminHost {
         }
         // The request timeline: where there is no host (`minicloud test`),
         // an empty recorder's answers, so a page shows "nothing yet".
-        if op == "timeline" || op == "request" || op == "live" {
+        if op == "timeline" || op == "timelineRange" || op == "request" || op == "live" {
             let front = self.control.as_ref().and_then(|control| control.front());
             let recorder = front.map_or_else(
                 || crate::timeline::Recorder::new(1),
@@ -1820,10 +1858,22 @@ impl HostApi for AdminHost {
                     let app = (!app.is_empty()).then_some(app);
                     timeline_value(&recorder.window(app, since, until))
                 }
+                "timelineRange" => {
+                    let app = args.first().and_then(Value::as_str).unwrap_or_default();
+                    let unix = |at: usize| {
+                        let ms = args.get(at).and_then(Value::as_int).unwrap_or(0);
+                        u64::try_from(ms).unwrap_or(0)
+                    };
+                    let (since, until) = recorder.unix_range(unix(1), unix(2));
+                    let app = (!app.is_empty()).then_some(app);
+                    timeline_value(&recorder.window(app, since, until))
+                }
                 "request" => {
                     let id = args.first().and_then(Value::as_int).unwrap_or(-1);
                     match u64::try_from(id).ok().and_then(|id| recorder.request(id)) {
-                        Some(span) => Value::ok(timeline_request_value(&span)),
+                        Some(span) => {
+                            Value::ok(timeline_request_value(&span, recorder.started_unix_ms()))
+                        }
                         None => Value::err(Value::error(format!(
                             "no request {id} in the timeline: it keeps the last {} s, at most \
                              {} requests",

@@ -24,7 +24,7 @@
 //! | `GET /apps/<app>/logs?n=&follow=1` | its recent log lines as text, or — with `follow` — those and every line as it is written, as server-sent events (`minicloud logs`) |
 //! | `PUT /secrets/<name>` | body: the value. Stores it (mode 0600, atomically), then reloads every app that uses it. 200 with each app's reload; 422 for a name or value refused |
 //! | `DELETE /secrets/<name>` | removes it. 409 while an app uses it, unless `?force=1`, which reloads those apps without it (they are refused); 404 if it is not set |
-//! | `POST /_host/load` | body: `{"mix": "light"\|"cpu"\|"wait"\|"mixed", "rate", "connections", "seconds"}`, each optional. Starts a load run on the host's own apps ([`crate::load`]). 200 with `GET /_host/load`'s answer; 409 while one is going on; 422 for a figure past its cap |
+//! | `POST /_host/load` | body: `{"mix": "light"\|"cpu"\|"wait"\|"alloc"\|"mixed", "rate", "connections", "seconds"}`, each optional. Starts a load run on the host's own apps ([`crate::load`]). 200 with `GET /_host/load`'s answer; 409 while one is going on; 422 for a figure past its cap |
 //! | `POST /_host/load/stop` | stops it. 200 as above; 409 when none is going on |
 //! | `GET /_host/load` | the run going on and the last one, as JSON (also an operations view, below) |
 //!

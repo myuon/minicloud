@@ -387,6 +387,12 @@ svg.timeline .tl-head{fill:var(--text);font-size:12px;font-weight:650}
 .tl-hit{fill:transparent}
 svg.timeline a:hover .tl-hit{fill:var(--soft)}
 svg.timeline a:hover rect[class^=tl-c]{stroke:var(--text);stroke-width:1}
+.tl-span{fill:var(--soft)}
+.tl-mix-bg{fill:var(--tl-x);fill-opacity:.3}
+.tl-mix-ln{stroke:var(--tl-x);stroke-width:2.5}
+svg.timeline a:hover .tl-mix{stroke:var(--text);stroke-width:1}
+.tl-band{fill:transparent}
+svg.timeline a:hover .tl-band{fill:var(--link);fill-opacity:.1}
 td .key{display:inline-flex;align-items:center;gap:.45em}
 /* a request's phases, a line each: what kind it was, when after the arrival, and what happened in words */
 ol.phases{margin:.2em 0 1.5em;padding-left:1.6em;font-size:14px}

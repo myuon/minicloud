@@ -135,8 +135,17 @@ fn a_request_that_sleeps_runs_parks_and_resumes() {
     assert_eq!(apps.len(), 1);
     assert_eq!(apps[0]["app"], "slow");
     assert_eq!(apps[0]["requests"], 1);
-    assert_eq!(window["keep"]["secs"], 300);
-    assert_eq!(window["keep"]["requests"], 20000);
+    // One run a segment, the worker busy the whole of it (to the
+    // microsecond the three are each rounded down to).
+    let run = segments.iter().find(|s| s["id"] == id).unwrap();
+    let length = run["to_us"].as_u64().unwrap() - run["from_us"].as_u64().unwrap();
+    assert!(
+        run["busy_us"].as_u64().unwrap().abs_diff(length) <= 1,
+        "{run}"
+    );
+    assert_eq!(run["apps"], serde_json::json!([{"app": "slow", "runs": 1}]));
+    assert_eq!(window["keep"]["secs"], 3600);
+    assert_eq!(window["keep"]["requests"], 100000);
     // The views asked above are the host's, not an app's: not recorded.
     assert!(requests(&host, "hello").is_empty());
 }
@@ -279,4 +288,80 @@ fn a_request_turned_away_is_recorded_with_why() {
     let summary = json(&host, "/_host/timeline?over=5m")["summary"].clone();
     assert_eq!(summary["rejected"], 1);
     assert_eq!(summary["apps"][0]["rejected"], 1);
+}
+
+#[test]
+fn a_window_in_the_wall_clock_s_time_has_what_ran_in_it() {
+    let apps = apps(&[sample("hello")]);
+    let host = start(&apps, 2);
+    assert_eq!(get(host.addr, "/hello/").status, 200);
+    // Apart by more than the milliseconds a window is asked in. Not a
+    // timing assertion: the two only need to be in different milliseconds.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert_eq!(get(host.addr, "/hello/?second=1").status, 200);
+    let both = json(&host, "/_host/timeline?app=hello&over=5m");
+    let started = both["started_unix_ms"].as_u64().unwrap();
+    let hello = both["requests"].as_array().unwrap();
+    assert_eq!(hello.len(), 2);
+    let ms = |request: &Json, key: &str| started + request[key].as_u64().unwrap() / 1000;
+    let (first, second) = (&hello[0], &hello[1]);
+    assert!(ms(first, "ended_us") + 1 < ms(second, "arrived_us"));
+
+    // From the first's arrival to just after its end: it, and not the second.
+    let asked = format!(
+        "/_host/timeline?app=hello&since={}&until={}",
+        ms(first, "arrived_us"),
+        ms(first, "ended_us") + 1
+    );
+    let window = json(&host, &asked);
+    let ids: Vec<_> = window["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].clone())
+        .collect();
+    assert_eq!(ids, [first["id"].clone()], "{window}");
+    assert_eq!(
+        window["since_us"].as_u64().unwrap() / 1000,
+        first["arrived_us"].as_u64().unwrap() / 1000
+    );
+    // The second's own window.
+    let asked = format!(
+        "/_host/timeline?since={}&until={}",
+        ms(second, "arrived_us"),
+        ms(second, "ended_us") + 1
+    );
+    let window = json(&host, &asked);
+    let ids: Vec<_> = window["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].clone())
+        .collect();
+    assert_eq!(ids, [second["id"].clone()], "{window}");
+
+    // Before the host started: held at its start, and empty.
+    let before = json(
+        &host,
+        &format!(
+            "/_host/timeline?since={}&until={}",
+            started - 60_000,
+            started - 1
+        ),
+    );
+    assert_eq!(
+        (before["since_us"].as_u64(), before["until_us"].as_u64()),
+        (Some(0), Some(0))
+    );
+    assert_eq!(before["requests_total"], 0);
+    // Past now: held at now.
+    let after = json(
+        &host,
+        &format!(
+            "/_host/timeline?since={started}&until={}",
+            started + 86_400_000
+        ),
+    );
+    assert!(after["until_us"].as_u64() <= after["now_us"].as_u64());
+    assert_eq!(after["requests_total"], 2);
 }

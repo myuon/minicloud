@@ -98,3 +98,21 @@ $ git switch main && cargo build --profile checked && cp target/checked/miniclou
 $ git switch - && cargo build --profile checked && cp target/checked/minicloud /tmp/timeline/
 $ sh bench/ab.sh /tmp/main /tmp/timeline 5
 ```
+
+**Keeping an hour and 100,000 requests costs nothing measurable either.**
+The bounds went from 5 minutes and 20,000 requests to an hour and 100,000
+(and a window's read from every record to those that overlap it); the
+recording itself did not change. Three rounds of the same comparison,
+`main` (v0.36.0, `4a88cef`) against the branch, the same machine, medians
+(range):
+
+| | `main` req/s | an hour, 100,000 req/s | difference |
+| --- | --- | --- | ---: |
+| `hello`, 64 in flight, 200,000 requests | 98,491 (97,294–99,054) | 98,224 (97,525–98,277) | −0.3% |
+| `hello`, 256 in flight, 200,000 requests | 96,776 (96,656–97,073) | 97,034 (91,445–97,424) | +0.3% |
+| `--mix cpu-io`, 256 in flight, 3,000 requests | 1,877 (1,865–1,887) | 1,864 (1,857–1,879) | −0.7% |
+
+`hello`'s p99 was 1.0 ms on both at 64 in flight and 4.1 ms at 256. A run
+of 200,000 requests fills the 100,000 records, so the eviction is exercised
+in each. A window over a full hour of 100,000 records is assembled in about
+40 ms, 5 minutes of them in 4 ms (a unit test's figures, not kept).
