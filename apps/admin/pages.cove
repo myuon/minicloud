@@ -2463,10 +2463,9 @@ fn logPage(base: String, app: host.App, request: web.Request) -> Html {
 // ---------------------------------------------------------- metrics
 //
 // How fast an app is and how much it served, over time. The numbers are the
-// ones the host samples each minute (`host.series`), drawn the way the
-// operations page draws its sparkline — scaled to the largest value in the
-// window, the number in a `<title>` and no axis — only bigger, because here
-// the picture is the subject and not a cell in a table.
+// ones the host samples each minute (`host.series`), drawn as a chart with
+// a scale and times to read it by — unlike the operations page's sparkline,
+// which is a cell in a table, here the picture is the subject.
 
 /// Which window `?over=` asks for. One of the three the host knows, and
 /// `hour` for anything else: the host would fall back to an hour as well,
