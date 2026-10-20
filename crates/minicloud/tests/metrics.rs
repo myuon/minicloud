@@ -142,3 +142,77 @@ fn series(host: &minicloud::Host, app: &str) -> Vec<serde_json::Value> {
     assert_eq!(json["kept"], true, "a host with a data directory keeps it");
     json["rows"].as_array().cloned().unwrap_or_default()
 }
+
+/// `algo`'s matching of a 2000 × 2000 graph: enough allocation that its run
+/// collects, on either tier.
+const ALLOCATES: &str = "/algo/matching?example=large&part=result";
+
+#[test]
+fn garbage_collection_is_counted_kept_and_shown_per_request() {
+    let apps = apps(&[sample("hello"), sample("algo")]);
+    let host = start(&apps, 2);
+    host.sample_now(AT);
+    assert_eq!(get(host.addr, "/hello/").status, 200);
+    let heavy = get(host.addr, ALLOCATES);
+    assert_eq!(heavy.status, 200, "{}", heavy.body);
+
+    // The counters: `hello` allocates a little and never collects, a run
+    // whose heap is far below one chunk; `algo`'s one run collected.
+    let hello = app_stats(&host, "hello");
+    assert!(hello["allocated_words"].as_u64() > Some(0), "{hello}");
+    assert_eq!(hello["gc_collections"], 0, "{hello}");
+    assert_eq!(hello["gc_runs"], 0, "{hello}");
+    let algo = app_stats(&host, "algo");
+    let collections = algo["gc_collections"].as_u64().unwrap();
+    let allocated = algo["allocated_words"].as_u64().unwrap();
+    assert!(collections > 0, "{algo}");
+    assert_eq!(algo["gc_runs"], 1, "{algo}");
+    assert!(allocated > 100_000, "{algo}");
+    assert_eq!(algo["errors"]["heap"], 0, "{algo}");
+    let stats = host.stats();
+    assert_eq!(stats["totals"]["gc_collections"], collections);
+
+    // The detail an admin reads.
+    let detail = get(host.addr, "/_host/apps/algo");
+    let detail: serde_json::Value = serde_json::from_str(&detail.body).unwrap();
+    assert_eq!(detail["gc_collections"], collections);
+
+    // Prometheus, in bytes.
+    let text = get(host.addr, "/_host/metrics").body;
+    for expected in [
+        format!("minicloud_app_gc_collections_total{{app=\"algo\"}} {collections}"),
+        "minicloud_app_gc_runs_total{app=\"algo\"} 1".to_string(),
+        format!(
+            "minicloud_app_allocated_bytes_total{{app=\"algo\"}} {}",
+            allocated * 8
+        ),
+        "minicloud_app_gc_collections_total{app=\"hello\"} 0".to_string(),
+        "# TYPE minicloud_app_allocated_bytes_total counter".to_string(),
+    ] {
+        assert!(text.contains(&expected), "no `{expected}` in:\n{text}");
+    }
+
+    // The minute: the app's row, and the platform's sum of every app's.
+    host.sample_now(AT + 60);
+    let minute = &series(&host, "algo")[0];
+    assert_eq!(minute["gc_collections"], collections);
+    assert_eq!(minute["gc_runs"], 1);
+    assert_eq!(minute["allocated_words"], allocated);
+    let platform = get(host.addr, "/_host/platform?over=day");
+    let platform: serde_json::Value = serde_json::from_str(&platform.body).unwrap();
+    let row = platform["rows"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(row["gc_collections"], collections, "{row}");
+    let hello_words = series(&host, "hello")[0]["allocated_words"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(row["allocated_words"], allocated + hello_words, "{row}");
+
+    // The request's own record.
+    let timeline = get(host.addr, "/_host/timeline?app=algo&over=5m");
+    let timeline: serde_json::Value = serde_json::from_str(&timeline.body).unwrap();
+    let id = timeline["requests"][0]["id"].as_u64().unwrap();
+    let request = get(host.addr, &format!("/_host/timeline/{id}"));
+    let request: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(request["gc_collections"], collections, "{request}");
+    assert_eq!(request["allocated_words"], allocated, "{request}");
+}

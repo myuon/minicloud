@@ -566,6 +566,13 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 // of all time.
                 field("p50Us", INT),
                 field("p99Us", INT),
+                // Over the row's span, the runs that finished in it:
+                // garbage collections, runs that collected at least once,
+                // and words allocated (eight bytes a word, reuse counted
+                // each time). 0 in a row kept before these were.
+                field("gcCollections", INT),
+                field("gcRuns", INT),
+                field("allocatedWords", INT),
             ],
         },
         // One row of the host's own history ([`crate::series::HostRow`]):
@@ -597,6 +604,11 @@ pub const ADMIN: ModuleSchema = ModuleSchema {
                 field("queued", INT),
                 field("busy", INT),
                 field("workers", INT),
+                // The apps' `host.Point` figures of the same name, summed
+                // across apps; `None` in a row kept before they were.
+                field("gcCollections", OPT_INT),
+                field("gcRuns", OPT_INT),
+                field("allocatedWords", OPT_INT),
             ],
         },
         // The request timeline over a window ([`crate::timeline::Window`]).
@@ -1180,6 +1192,9 @@ fn point_value(row: Sample) -> Value {
             ("workerMs", int(row.worker_ms)),
             ("p50Us", int(row.p50_us)),
             ("p99Us", int(row.p99_us)),
+            ("gcCollections", int(row.gc_collections)),
+            ("gcRuns", int(row.gc_runs)),
+            ("allocatedWords", int(row.allocated_words)),
         ],
     )
 }
@@ -1216,6 +1231,9 @@ fn platform_point_value(row: crate::series::HostRow) -> Value {
             ("queued", int(row.queued)),
             ("busy", int(row.busy)),
             ("workers", int(row.workers)),
+            ("gcCollections", maybe(row.gc_collections)),
+            ("gcRuns", maybe(row.gc_runs)),
+            ("allocatedWords", maybe(row.allocated_words)),
         ],
     )
 }

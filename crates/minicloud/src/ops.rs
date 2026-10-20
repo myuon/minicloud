@@ -127,6 +127,9 @@ pub fn series(context: &OpsContext, app: Option<&str>, over: &str) -> Json {
                 "worker_ms": row.worker_ms,
                 "p50_us": row.p50_us,
                 "p99_us": row.p99_us,
+                "gc_collections": row.gc_collections,
+                "gc_runs": row.gc_runs,
+                "allocated_words": row.allocated_words,
             })).collect::<Vec<Json>>(),
         }),
         Err(why) => json!({"over": over, "kept": true, "error": why, "rows": []}),
@@ -207,6 +210,9 @@ pub fn platform(context: &OpsContext, now: &crate::platform::PlatformSample, ove
                 "queued": row.queued,
                 "busy": row.busy,
                 "workers": row.workers,
+                "gc_collections": known(row.gc_collections),
+                "gc_runs": known(row.gc_runs),
+                "allocated_words": known(row.allocated_words),
             })).collect::<Vec<Json>>(),
         }),
         Err(why) => json!({"over": over, "kept": true, "now": current, "error": why, "rows": []}),
@@ -595,6 +601,9 @@ pub(crate) fn sample_now(front: &crate::server::Front, at: i64) -> usize {
                 worker_ms: totals.worker_ms.saturating_sub(was.worker_ms),
                 p50_us: over.quantile_us(0.50).unwrap_or(0),
                 p99_us: over.quantile_us(0.99).unwrap_or(0),
+                gc_collections: totals.gc_collections.saturating_sub(was.gc_collections),
+                gc_runs: totals.gc_runs.saturating_sub(was.gc_runs),
+                allocated_words: totals.allocated_words.saturating_sub(was.allocated_words),
             });
         }
         before.insert(slot.name.clone(), (totals, histogram));
@@ -610,7 +619,14 @@ pub(crate) fn sample_now(front: &crate::server::Front, at: i64) -> usize {
         .replace(platform.clone());
     let series = series.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(was) = was {
-        if let Err(why) = series.record_host(&host_row(&was, &platform, at - 60)) {
+        let mut row = host_row(&was, &platform, at - 60);
+        // The apps' heaps over the same minute, summed: the platform's
+        // view of what all of them allocated and collected.
+        let sum = |field: fn(&crate::series::Sample) -> u64| samples.iter().map(field).sum();
+        row.gc_collections = Some(sum(|s| s.gc_collections));
+        row.gc_runs = Some(sum(|s| s.gc_runs));
+        row.allocated_words = Some(sum(|s| s.allocated_words));
+        if let Err(why) = series.record_host(&row) {
             eprintln!("minicloud: cannot keep the platform's history: {why}");
         }
     }
@@ -668,6 +684,10 @@ pub(crate) fn host_row(
         queued: now.queued,
         busy: now.busy,
         workers: now.workers,
+        // The apps', which `sample_now` sums from their rows.
+        gc_collections: None,
+        gc_runs: None,
+        allocated_words: None,
     }
 }
 
@@ -692,6 +712,9 @@ fn totals_of(slot: &Arc<Slot>) -> (crate::series::Sample, crate::histogram::Snap
             worker_ms: json["worker_ms"].as_f64().unwrap_or_default() as u64,
             p50_us: 0,
             p99_us: 0,
+            gc_collections: json["gc_collections"].as_u64().unwrap_or_default(),
+            gc_runs: json["gc_runs"].as_u64().unwrap_or_default(),
+            allocated_words: json["allocated_words"].as_u64().unwrap_or_default(),
         },
         counters.latency.snapshot(),
     )
