@@ -367,10 +367,10 @@ p.legend .ln{vector-effect:none}
 .state.finished{color:var(--ok);background:var(--ok-bg)}
 .state.stopped{color:var(--off);background:var(--off-bg)}
 /* the Timeline page: colour for an app's identity only, six of them in a fixed order and grey past them, each a fill (a run) and a stroke (a park); a status is a mark — a red cross for a deadline, a ring for another error, a square for a rejection — and never a colour alone. The picture is one SVG as wide as the page; its text is in the units of its viewBox, about a pixel each on a desk. */
-:root{--tl-0:#2a78d6;--tl-1:#eb6834;--tl-2:#1baf7a;--tl-3:#eda100;--tl-4:#e87ba4;--tl-5:#008300;--tl-x:#8a8984}
-@media (prefers-color-scheme:dark){:root{--tl-0:#3987e5;--tl-1:#d95926;--tl-2:#199e70;--tl-3:#c98500;--tl-4:#d55181;--tl-5:#2f9a2f;--tl-x:#8a8984}}
-.tl-c0{fill:var(--tl-0)}.tl-c1{fill:var(--tl-1)}.tl-c2{fill:var(--tl-2)}.tl-c3{fill:var(--tl-3)}.tl-c4{fill:var(--tl-4)}.tl-c5{fill:var(--tl-5)}.tl-cx{fill:var(--tl-x)}
-.tl-l0{stroke:var(--tl-0)}.tl-l1{stroke:var(--tl-1)}.tl-l2{stroke:var(--tl-2)}.tl-l3{stroke:var(--tl-3)}.tl-l4{stroke:var(--tl-4)}.tl-l5{stroke:var(--tl-5)}.tl-lx{stroke:var(--tl-x)}
+:root{--tl-0:#2a78d6;--tl-1:#eb6834;--tl-2:#1baf7a;--tl-3:#eda100;--tl-4:#e87ba4;--tl-5:#008300;--tl-6:#8a4fd1;--tl-7:#16a5b8;--tl-8:#9a6a3a;--tl-9:#a8203a;--tl-x:#8a8984}
+@media (prefers-color-scheme:dark){:root{--tl-0:#3987e5;--tl-1:#d95926;--tl-2:#199e70;--tl-3:#c98500;--tl-4:#d55181;--tl-5:#2f9a2f;--tl-6:#a070e0;--tl-7:#2bb8cb;--tl-8:#b58455;--tl-9:#cc4a63;--tl-x:#8a8984}}
+.tl-c0{fill:var(--tl-0)}.tl-c1{fill:var(--tl-1)}.tl-c2{fill:var(--tl-2)}.tl-c3{fill:var(--tl-3)}.tl-c4{fill:var(--tl-4)}.tl-c5{fill:var(--tl-5)}.tl-c6{fill:var(--tl-6)}.tl-c7{fill:var(--tl-7)}.tl-c8{fill:var(--tl-8)}.tl-c9{fill:var(--tl-9)}.tl-cx{fill:var(--tl-x)}
+.tl-l0{stroke:var(--tl-0)}.tl-l1{stroke:var(--tl-1)}.tl-l2{stroke:var(--tl-2)}.tl-l3{stroke:var(--tl-3)}.tl-l4{stroke:var(--tl-4)}.tl-l5{stroke:var(--tl-5)}.tl-l6{stroke:var(--tl-6)}.tl-l7{stroke:var(--tl-7)}.tl-l8{stroke:var(--tl-8)}.tl-l9{stroke:var(--tl-9)}.tl-lx{stroke:var(--tl-x)}
 svg.timeline{display:block;width:100%;height:auto;margin:.2em 0 1.4em;padding:.4em;border:1px solid var(--line);border-radius:12px;background:var(--card)}
 svg.timeline text{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
 svg.timeline .tl-head{fill:var(--text);font-size:12px;font-weight:650}

@@ -295,39 +295,67 @@ fn tickLabel(us: Int, step: Int) -> String {
   "{millis(us)} ms"
 }
 
-/// How many colours an app may have before the rest are grey.
+/// How many colours there are before they begin again.
 fn paletteSize() -> Int {
-  6
+  10
 }
 
-/// An app's colour, `0` to `5` by its place in `order`, and `x` (grey) past
-/// the sixth or for an app not in it. The class is `tl-c<slot>` for a fill
-/// and `tl-l<slot>` for a line.
+/// An app's colour, `0` to `9` by its place in `order`, counting round again
+/// past the tenth, and `x` (grey) for an app not in it. The class is
+/// `tl-c<slot>` for a fill and `tl-l<slot>` for a line.
 fn paletteSlot(order: Array<String>, app: String) -> String {
   match order.indexOf(app) {
-    Some(at) => if at < paletteSize() { "{at}" } else { "x" }
+    Some(at) => "{at % paletteSize()}"
     None => "x"
   }
 }
 
-/// The apps in the order their colours go: the summary's, then any other
-/// app a lane or a run has (one with nothing ended in the window yet).
-fn timelineOrder(timeline: host.Timeline) -> Array<String> {
+/// The names of the apps the host has, or none where it cannot say.
+fn deployedApps() -> Array<String> {
+  var names = Vector.of()
+  for app in host.apps() {
+    names.push(app.name)
+  }
+  names.freeze()
+}
+
+/// The apps in the order their colours go: every deployed app by name, then
+/// any other app the window has (one since removed) by name. It does not
+/// depend on what the window holds, so an app keeps its colour from one
+/// load to the next. With no `deployed` (the host cannot list them) it is
+/// the window's apps by name, which is still the same each time.
+fn colourOrder(deployed: Array<String>, seen: Array<String>) -> Array<String> {
   var order = Vector.of()
-  for app in timeline.apps {
-    order.push(app.app)
-  }
-  for lane in timeline.lanes {
-    if !order.contains(lane.app) {
-      order.push(lane.app)
+  for name in deployed.sorted(by: fn(a, b) { a < b }) {
+    if !order.contains(name) {
+      order.push(name)
     }
   }
-  for segment in timeline.segments {
-    if !order.contains(segment.app) {
-      order.push(segment.app)
+  var others = Vector.of()
+  for name in seen {
+    if !order.contains(name) && !others.contains(name) {
+      others.push(name)
     }
+  }
+  for name in others.freeze().sorted(by: fn(a, b) { a < b }) {
+    order.push(name)
   }
   order.freeze()
+}
+
+/// [`colourOrder`] of the apps a window has.
+fn timelineOrder(deployed: Array<String>, timeline: host.Timeline) -> Array<String> {
+  var seen = Vector.of()
+  for app in timeline.apps {
+    seen.push(app.app)
+  }
+  for lane in timeline.lanes {
+    seen.push(lane.app)
+  }
+  for segment in timeline.segments {
+    seen.push(segment.app)
+  }
+  colourOrder(deployed, seen.freeze())
 }
 
 /// How a request ended, as a status and why: `in flight`, `200`,
@@ -680,7 +708,7 @@ fn timelinePage(base: String, request: web.Request) -> Html {
   // whichever of them is shown.
   let all = host.timeline("", timelineSecs(over))
   let timeline = if app == "" { all } else { host.timeline(app, timelineSecs(over)) }
-  let order = timelineOrder(all)
+  let order = timelineOrder(deployedApps(), all)
   let reload = reloading(timelineLink(base, app, over), 5, paused(request))
   let summary = html"Where each request waited, ran, parked and resumed, over {span}."
   let said = html"""
@@ -823,7 +851,7 @@ fn knownCount(count: Option<Int>) -> String {
 }
 
 /// The request alone, as one lane from its arrival to its end (or now).
-fn requestPicture(request: host.TimelineRequest) -> Html {
+fn requestPicture(request: host.TimelineRequest, slot: String) -> Html {
   let until = match request.endedUs {
     Some(ended) => ended
     None => request.nowUs
@@ -832,7 +860,7 @@ fn requestPicture(request: host.TimelineRequest) -> Html {
   html"""
     <svg class=timeline viewBox="0 0 {tlWidth()} 40" role=img aria-label="the request's phases">
       {axis(since, until, 16, 38, [12])}
-      {laneMarks(request, since, until, 20, 14, "0")}
+      {laneMarks(request, since, until, 20, 14, slot)}
     </svg>
     """
 }
@@ -866,7 +894,7 @@ fn requestPage(base: String, request: host.TimelineRequest) -> Html {
       <h1>Request {request.id}</h1>
       <p class=sub><code>{request.method} {request.path}</code> · {requestStatus(request)} · {requestLatency(request)}</p>
       <p class=lead>{phaseSentence(request.phases)}</p>
-      {requestPicture(request)}
+      {requestPicture(request, paletteSlot(colourOrder(deployedApps(), [request.app]), request.app))}
       <h2>Phases</h2>{phaseList(request)}
       <h2>What it came to</h2>{facts}
       """,
