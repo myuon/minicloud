@@ -1,4 +1,5 @@
 use std.web
+use std.url
 use auth
 use host
 use text
@@ -72,113 +73,113 @@ export fn handle(request: web.Request) -> web.Response {
   let get = request.method == "GET" || request.method == "HEAD"
   if !get {
     if request.method != "POST" {
-      return textResponse(405, "only GET and POST\n")
+      return web.text(405, "only GET and POST\n").withHeaders(pageHeaders())
     }
-    if !sameOrigin(request) {
-      return textResponse(403, "a cross-site form cannot change the host\n")
+    if !request.sameOrigin() {
+      return web.text(403, "a cross-site form cannot change the host\n").withHeaders(pageHeaders())
     }
   }
-  let at = base(request)
+  let at = request.prefix()
   let parts = request.path.split("/")
   let section = parts.get(1).unwrapOr("")
   let name = parts.get(2).unwrapOr("")
   let action = parts.get(3).unwrapOr("")
   if request.path == "/" && get {
-    return htmlResponse(200, appsPage(at, host.apps()))
+    return web.html(200, appsPage(at, host.apps())).withHeaders(pageHeaders())
   }
   if section == "logs" && name == "" && get {
-    return htmlResponse(200, allLogsPage(at, request))
+    return web.html(200, allLogsPage(at, request)).withHeaders(pageHeaders())
   }
   if section == "platform" && name == "" && get {
-    return htmlResponse(200, platformPage(at, request))
+    return web.html(200, platformPage(at, request)).withHeaders(pageHeaders())
   }
   if section == "live" && name == "" && get {
-    return htmlResponse(200, livePage(at, request))
+    return web.html(200, livePage(at, request)).withHeaders(pageHeaders())
   }
   if section == "timeline" && name == "" && get {
-    return htmlResponse(200, timelinePage(at, request))
+    return web.html(200, timelinePage(at, request)).withHeaders(pageHeaders())
   }
   if section == "requests" && name != "" && parts.length() == 3 && get {
     return requestAnswer(at, name)
   }
   if section == "load" {
     if name == "" && get {
-      return htmlResponse(200, loadPage(at, host.loadStatus(), html"", Map.of(), paused(request)))
+      return web.html(200, loadPage(at, host.loadStatus(), html"", url.parseForm(""), paused(request))).withHeaders(pageHeaders())
     }
     if get || parts.length() > 3 {
-      return textResponse(404, "no such page\n")
+      return web.text(404, "no such page\n").withHeaders(pageHeaders())
     }
-    return changeLoad(at, name, text.parseForm(request.body))
+    return changeLoad(at, name, request.form())
   }
   if section == "history" && name == "" && get {
-    return htmlResponse(200, historyPage(at, host.history(200)))
+    return web.html(200, historyPage(at, host.history(200))).withHeaders(pageHeaders())
   }
   if section == "secrets" {
     if name == "" && get {
-      return htmlResponse(200, secretsPage(at, host.secrets(), html"", ""))
+      return web.html(200, secretsPage(at, host.secrets(), html"", "")).withHeaders(pageHeaders())
     }
     if get || parts.length() > 3 {
-      return textResponse(404, "no such page\n")
+      return web.text(404, "no such page\n").withHeaders(pageHeaders())
     }
-    return changeSecret(at, name, text.parseForm(request.body), user(identity))
+    return changeSecret(at, name, request.form(), user(identity))
   }
   if section != "apps" || name == "" {
-    return textResponse(404, "no such page\n")
+    return web.text(404, "no such page\n").withHeaders(pageHeaders())
   }
   let app = match find(name) {
     Some(app) => app
-    None => return textResponse(404, "no app `{name}`\n")
+    None => return web.text(404, "no app `{name}`\n").withHeaders(pageHeaders())
   }
   if action == "" && get {
-    return htmlResponse(200, appOverviewPage(at, app))
+    return web.html(200, appOverviewPage(at, app)).withHeaders(pageHeaders())
   }
   // Everything that changes the app, in one place; the tabs above it are
   // the pages that only read.
   if action == "settings" && get {
-    return htmlResponse(200, settingsPage(at, app, host.capabilities(), notice(request), None))
+    return web.html(200, settingsPage(at, app, host.capabilities(), notice(request), None)).withHeaders(pageHeaders())
   }
   // What the app holds and what it said: reading only, from the host's
   // own copies — its store, which this app cannot write to, and the ring
   // of its last log lines.
   if action == "kv" && get {
-    return htmlResponse(200, storePage(at, app, request))
+    return web.html(200, storePage(at, app, request)).withHeaders(pageHeaders())
   }
   if action == "logs" && get {
-    return htmlResponse(200, logPage(at, app, request))
+    return web.html(200, logPage(at, app, request)).withHeaders(pageHeaders())
   }
   // And what the version it is running *is*: the files of the deploy, from
   // the host's own copies again — the source map the app was compiled with
   // and the assets it serves — with `app.toml` read from the app's
   // directory, the one part a load does not keep.
   if action == "code" && get {
-    return htmlResponse(200, codePage(at, app, request))
+    return web.html(200, codePage(at, app, request)).withHeaders(pageHeaders())
   }
   // And what is in its relational store. `?q=` carries the statement in the
   // URL, and the form that sends it is a GET: a read changes nothing, so
   // there is nothing here for a form on another site to make happen — which
-  // is what `sameOrigin` above is for, and why it is only asked of a POST.
+  // is what `request.sameOrigin()` above is for, and why it is only asked of a POST.
   // The host runs the statement through the same `sql.query` the app's own
   // calls go through, which refuses one that writes.
   if action == "sql" && get {
-    return htmlResponse(200, sqlPage(at, app, request))
+    return web.html(200, sqlPage(at, app, request)).withHeaders(pageHeaders())
   }
   // And what is on its queues. Reading only, and nothing of it is a
   // choice this app makes: the host's window leases nothing, so a page
   // somebody opened cannot take a message the delivery loop was about to.
   if action == "queues" && get {
-    return htmlResponse(200, queuesPage(at, app, request))
+    return web.html(200, queuesPage(at, app, request)).withHeaders(pageHeaders())
   }
   // And how fast it is and how much it served, over time. Reading only: the
   // rows are the host's own history of the app's counters, taken once a
   // minute, and asking for them counts nothing and starts nothing.
   if action == "metrics" && get {
-    return htmlResponse(200, metricsPage(at, app, request))
+    return web.html(200, metricsPage(at, app, request)).withHeaders(pageHeaders())
   }
   if get || parts.length() > 4 {
-    return textResponse(404, "no such page\n")
+    return web.text(404, "no such page\n").withHeaders(pageHeaders())
   }
   let who = user(identity)
-  let form = text.parseForm(request.body)
+  let form = request.form()
   if action == "enable" || action == "disable" {
     return finish(at, app, action, host.setEnabled(app.name, action == "enable", who), form)
   }
@@ -189,14 +190,14 @@ export fn handle(request: web.Request) -> web.Response {
     let capabilities = host.capabilities()
     let read = settingsFrom(form, capabilities)
     if read.problems.length() > 0 {
-      return htmlResponse(
+      return web.html(
         422,
         settingsPage(at, app, capabilities, problemsNotice(read.problems), Some(form)),
-      )
+      ).withHeaders(pageHeaders())
     }
     return finish(at, app, action, host.configure(app.name, read.settings, who), form)
   }
-  textResponse(404, "no such page\n")
+  web.text(404, "no such page\n").withHeaders(pageHeaders())
 }
 
 /// After a change: back to the app's Settings, saying what happened; or
@@ -208,17 +209,17 @@ fn finish(
   app: host.App,
   action: String,
   result: Result<String, Error>,
-  form: Map<String, String>,
+  form: url.Form,
 ) -> web.Response {
   match result {
-    Ok(_) => redirect("{at}/apps/{app.name}/settings?done={action}")
+    Ok(_) => web.redirect("{at}/apps/{app.name}/settings?done={action}").withHeader("cache-control", "no-store")
     Err(error) => {
       // The app as it is now, which the refused change left alone.
       let now = find(app.name).unwrapOr(app)
-      htmlResponse(
+      web.html(
         422,
         settingsPage(at, now, host.capabilities(), refusedNotice(action, error.message), Some(form)),
-      )
+      ).withHeaders(pageHeaders())
     }
   }
 }
@@ -228,28 +229,28 @@ fn finish(
 /// and is never part of a page: a refused set shows the form again with the
 /// name and an empty value. The answer is the Secrets page with what each
 /// app's reload came to.
-fn changeSecret(at: String, action: String, form: Map<String, String>, who: String) -> web.Response {
+fn changeSecret(at: String, action: String, form: url.Form, who: String) -> web.Response {
   let secret = form.get("name").unwrapOr("").trim()
   if action == "set" {
     let value = form.get("value").unwrapOr("")
     if secret == "" || value == "" {
-      return htmlResponse(422, secretsPage(at, host.secrets(), problemsNotice(Vector.of("a secret needs a name and a value").freeze()), secret))
+      return web.html(422, secretsPage(at, host.secrets(), problemsNotice(Vector.of("a secret needs a name and a value").freeze()), secret)).withHeaders(pageHeaders())
     }
     return secretAnswer(at, action, host.setSecret(secret, value, who), secret)
   }
   if action == "delete" {
     if !form.contains("confirm") {
-      return htmlResponse(422, secretsPage(at, host.secrets(), problemsNotice(Vector.of("tick “confirm” to delete `{secret}`").freeze()), ""))
+      return web.html(422, secretsPage(at, host.secrets(), problemsNotice(Vector.of("tick “confirm” to delete `{secret}`").freeze()), "")).withHeaders(pageHeaders())
     }
     return secretAnswer(at, action, host.deleteSecret(secret, form.contains("force"), who), "")
   }
-  textResponse(404, "no such page\n")
+  web.text(404, "no such page\n").withHeaders(pageHeaders())
 }
 
 fn secretAnswer(at: String, action: String, result: Result<String, Error>, name: String) -> web.Response {
   match result {
-    Ok(message) => htmlResponse(200, secretsPage(at, host.secrets(), doneNotice(message), ""))
-    Err(error) => htmlResponse(422, secretsPage(at, host.secrets(), refusedNotice(action, error.message), name))
+    Ok(message) => web.html(200, secretsPage(at, host.secrets(), doneNotice(message), "")).withHeaders(pageHeaders())
+    Err(error) => web.html(422, secretsPage(at, host.secrets(), refusedNotice(action, error.message), name)).withHeaders(pageHeaders())
   }
 }
 
@@ -279,42 +280,11 @@ fn user(identity: auth.Identity) -> String {
 /// login prompt asks for the secret.
 fn refused(why: String) -> web.Response {
   if auth.usesAccess() {
-    return textResponse(403, "the admin pages are reached through Cloudflare Access: {why}\n")
+    return web.text(403, "the admin pages are reached through Cloudflare Access: {why}\n").withHeaders(pageHeaders())
   }
-  web.Response(
-    status: 401,
-    headers: pageHeaders("text/plain; charset=utf-8").inserted("www-authenticate", "Basic realm=\"minicloud admin\""),
-    body: "the admin pages need the admin secret: {why}\n",
-  )
-}
-
-/// Where the host mounted the app: "" when it is reached by hostname.
-fn base(request: web.Request) -> String {
-  request.headers.get("x-forwarded-prefix").unwrapOr("")
-}
-
-/// Whether a request that changes something came from these pages: a
-/// browser says where a form was submitted from, and a form on another site
-/// must not be able to use the browser's stored login. `Sec-Fetch-Site`
-/// decides alone when it is present — a browser sets it and a page cannot
-/// forge it, and it stays `same-origin` where `Origin` is serialized as
-/// `null` (a form posted from a page with `Referrer-Policy: no-referrer`).
-/// Only a browser without it falls back to `Origin`, and a `null` one is
-/// refused there. A client that says neither — curl — is not a browser, and
-/// holds the secret itself.
-fn sameOrigin(request: web.Request) -> Bool {
-  match request.headers.get("sec-fetch-site") {
-    Some(site) => site == "same-origin" || site == "none"
-    None => {
-      match request.headers.get("origin") {
-        Some(from) => {
-          let scheme = request.headers.get("x-forwarded-proto").unwrapOr("http")
-          from == "{scheme}://{request.headers.get("host").unwrapOr("")}"
-        }
-        None => true
-      }
-    }
-  }
+  web.text(401, "the admin pages need the admin secret: {why}\n")
+    .withHeaders(pageHeaders())
+    .withHeader("www-authenticate", "Basic realm=\"minicloud admin\"")
 }
 
 // ------------------------------------------------------------- the form
@@ -369,7 +339,7 @@ fn limitValue(limits: host.Limits, name: String) -> Int {
 
 /// Reads a configure form: `cap.<name>` for each capability granted, `allow`
 /// (one allowlist entry per line), and one field per limit.
-fn settingsFrom(form: Map<String, String>, capabilities: Array<String>) -> Read {
+fn settingsFrom(form: url.Form, capabilities: Array<String>) -> Read {
   var problems = Vector.of()
   var grant = Vector.of()
   for capability in capabilities {
@@ -377,13 +347,18 @@ fn settingsFrom(form: Map<String, String>, capabilities: Array<String>) -> Read 
       grant.push(capability)
     }
   }
-  for entry in form {
-    if entry.key.startsWith("cap.") {
-      let named = entry.key.sliceBytes(4, entry.key.byteLength()).unwrapOr("")
+  // Each name once and in the order of names, however often the form says it.
+  var unknown: Map<String, Bool> = Map.of()
+  for pair in form.pairs {
+    if pair.name.startsWith("cap.") {
+      let named = pair.name.sliceBytes(4, pair.name.byteLength()).unwrapOr("")
       if !capabilities.contains(named) {
-        problems.push("`{named}` is not a capability this host has")
+        unknown = unknown.inserted(named, true)
       }
     }
+  }
+  for entry in unknown {
+    problems.push("`{entry.key}` is not a capability this host has")
   }
   var allow = Vector.of()
   for line in form.get("allow").unwrapOr("").split("\n") {

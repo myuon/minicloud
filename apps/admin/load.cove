@@ -1,4 +1,5 @@
 use std.web
+use std.url
 use host
 use text
 use std.html
@@ -54,12 +55,12 @@ fn loadLatency(us: Option<Int>) -> String {
 }
 
 /// A form field's value: what was posted, or `fallback`.
-fn loadField(form: Map<String, String>, name: String, fallback: String) -> String {
+fn loadField(form: url.Form, name: String, fallback: String) -> String {
   form.get(name).unwrapOr(fallback).trim()
 }
 
 /// A whole number a form field holds, or what is wrong with it.
-fn loadNumber(form: Map<String, String>, name: String) -> Result<Int, String> {
+fn loadNumber(form: url.Form, name: String) -> Result<Int, String> {
   let written = loadField(form, name, "")
   match Int.parse(written) {
     Ok(n) => Ok(n)
@@ -69,7 +70,7 @@ fn loadNumber(form: Map<String, String>, name: String) -> Result<Int, String> {
 
 /// The form: what to ask, how hard and for how long — the last run's
 /// figures, or what was posted.
-fn loadForm(base: String, form: Map<String, String>, status: host.LoadStatus) -> Html {
+fn loadForm(base: String, form: url.Form, status: host.LoadStatus) -> Html {
   let chosen = loadField(form, "mix", "light")
   var options = Vector.of()
   for mix in loadMixes() {
@@ -207,7 +208,7 @@ fn loadState(base: String, status: host.LoadStatus) -> Html {
 
 /// The Load page. While a run goes on it reloads every 2 seconds, as Live
 /// does; `notice` is said above everything, and `form` fills the form.
-fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<String, String>, pause: Bool = false) -> Html {
+fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: url.Form, pause: Bool = false) -> Html {
   let summary = html"Puts load on this host's own apps, so that Live and Timeline have something to show."
   let said = html"""
     The host sends real requests to its own public listener, over loopback — through the
@@ -252,12 +253,12 @@ fn loadPage(base: String, status: host.LoadStatus, notice: Html, form: Map<Strin
 /// `POST /load/start` (`mix`, `rate`, `connections`, `seconds`) or
 /// `/load/stop`. Started or stopped, back to the page; refused, the page
 /// with the host's reason and the form as it was posted.
-fn changeLoad(at: String, action: String, form: Map<String, String>) -> web.Response {
+fn changeLoad(at: String, action: String, form: url.Form) -> web.Response {
   if action == "stop" {
     return loadAnswer(at, action, host.loadStop(), form)
   }
   if action != "start" {
-    return textResponse(404, "no such page\n")
+    return web.text(404, "no such page\n").withHeaders(pageHeaders())
   }
   var problems = Vector.of()
   var figures = Vector.of()
@@ -268,7 +269,7 @@ fn changeLoad(at: String, action: String, form: Map<String, String>) -> web.Resp
     }
   }
   if problems.length() > 0 {
-    return htmlResponse(422, loadPage(at, host.loadStatus(), problemsNotice(problems.freeze()), form))
+    return web.html(422, loadPage(at, host.loadStatus(), problemsNotice(problems.freeze()), form)).withHeaders(pageHeaders())
   }
   let started = host.loadStart(
     loadField(form, "mix", ""),
@@ -279,9 +280,9 @@ fn changeLoad(at: String, action: String, form: Map<String, String>) -> web.Resp
   loadAnswer(at, action, started, form)
 }
 
-fn loadAnswer(at: String, action: String, result: Result<String, Error>, form: Map<String, String>) -> web.Response {
+fn loadAnswer(at: String, action: String, result: Result<String, Error>, form: url.Form) -> web.Response {
   match result {
-    Ok(_) => redirect("{at}/load")
-    Err(error) => htmlResponse(422, loadPage(at, host.loadStatus(), refusedNotice(action, error.message), form))
+    Ok(_) => web.redirect("{at}/load").withHeader("cache-control", "no-store")
+    Err(error) => web.html(422, loadPage(at, host.loadStatus(), refusedNotice(action, error.message), form)).withHeaders(pageHeaders())
   }
 }

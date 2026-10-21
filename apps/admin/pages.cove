@@ -1,4 +1,6 @@
 use std.web
+use std.url
+use std.datetime
 use host
 use text
 use std.html
@@ -13,14 +15,14 @@ use std.html.Html
 // script at all: what the pages do on a narrow screen, they do in CSS
 // (`assets/style.css`).
 
-/// The headers every answer carries: no script, nothing but this site's
+/// The headers every answer carries beside the content type `web.html` and
+/// `web.text` set: no script, nothing but this site's
 /// forms, no framing, no sniffing, no caching, no referrer to another site.
 /// The stylesheet and the icon are files the host serves from `assets/`, so
 /// `style-src 'self'` and `img-src 'self'` are all the page needs: there is no
 /// inline style left that `'unsafe-inline'` would have had to allow.
-fn pageHeaders(contentType: String) -> Map<String, String> {
+fn pageHeaders() -> Map<String, String> {
   Map.of(
-    MapEntry(key: "content-type", value: contentType),
     MapEntry(
       key: "content-security-policy",
       value: "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -29,30 +31,6 @@ fn pageHeaders(contentType: String) -> Map<String, String> {
     MapEntry(key: "x-frame-options", value: "DENY"),
     MapEntry(key: "referrer-policy", value: "same-origin"),
     MapEntry(key: "cache-control", value: "no-store"),
-  )
-}
-
-/// A page as the answer. This is the one place a page stops being `Html`
-/// and becomes the text of a body: everything before it is markup that every
-/// hole was checked into.
-fn htmlResponse(status: Int, page: Html) -> web.Response {
-  let body = page.render()
-  web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: body)
-}
-
-fn textResponse(status: Int, body: String) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("text/plain; charset=utf-8"), body: body)
-}
-
-/// A `303 See Other` to `location`.
-fn redirect(location: String) -> web.Response {
-  web.Response(
-    status: 303,
-    headers: Map.of(
-      MapEntry(key: "location", value: location),
-      MapEntry(key: "cache-control", value: "no-store"),
-    ),
-    body: "",
   )
 }
 
@@ -102,7 +80,7 @@ fn assetQuery(version: String) -> String {
   if version == "" {
     return ""
   }
-  "?v={text.urlEncode(version)}"
+  "?v={url.percentEncode(version)}"
 }
 
 /// The page around `content`. `here` is the navigation entry it belongs to.
@@ -114,8 +92,8 @@ fn assetQuery(version: String) -> String {
 /// slot lookup and a `String` clone (`host.selfVersion`), beside the
 /// `host.apps` and `host.logs` a page already makes.
 ///
-/// What it answers is still `Html`: [`htmlResponse`] is where a page becomes
-/// the text of a body.
+/// What it answers is still `Html`: `web.html` is where a page becomes the
+/// text of a body.
 ///
 /// `refresh` is the seconds after which the browser loads the page again
 /// (`<meta http-equiv=refresh>`, which is HTML and not a script, so the CSP
@@ -839,7 +817,7 @@ fn settingsPage(
   app: host.App,
   capabilities: Array<String>,
   notice: Html,
-  posted: Option<Map<String, String>>,
+  posted: Option<url.Form>,
 ) -> Html {
   let at = appAt(base, app)
   let reason = html.only(app.reason != "", html"<pre>{app.reason}</pre>")
@@ -1128,7 +1106,7 @@ fn configureForm(
   at: String,
   app: host.App,
   capabilities: Array<String>,
-  posted: Option<Map<String, String>>,
+  posted: Option<url.Form>,
 ) -> Html {
   if app.state == "removed" {
     return html""
@@ -1243,9 +1221,7 @@ fn appAt(base: String, app: host.App) -> String {
 
 /// The time of day of `millis` (JST), the whole stamp as its title.
 fn atTime(millis: Int) -> Html {
-  let stamp = jstStamp(millis)
-  let clock = stamp.sliceBytes(11, 23).unwrapOr(stamp)
-  html"""<span title="{jst(millis)} JST">{clock}</span>"""
+  html"""<span title="{jst(millis)} JST">{jstTime(millis).toIsoTime()}</span>"""
 }
 
 /// What a page about one thing of an app's says when the host could not
@@ -1285,7 +1261,7 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
   var last = ""
   for entry in found {
     if at_ < size {
-      let link = "{at}/kv?key={text.urlEncode(entry.key)}"
+      let link = "{at}/kv?key={url.percentEncode(entry.key)}"
       // The host cut at its own length; a row of a table wants less again.
       let preview = text.truncateBytes(entry.value, 140)
       let cut = entry.cut || preview.byteLength() < entry.value.byteLength()
@@ -1329,13 +1305,13 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
   // The `&` between two parameters is written `&amp;`, as an `&` in an
   // attribute is: the parameters are holes and escaped, and the `&` is the
   // page's own.
-  let first = text.urlEncode(prefix)
+  let first = url.percentEncode(prefix)
   var steps = Vector.of()
   if after != "" {
     steps.push(html"""<a href="{at}/kv?prefix={first}">← the first {size}</a>""")
   }
   if more {
-    steps.push(html"""<a href="{at}/kv?prefix={first}&amp;after={text.urlEncode(last)}">the next {size} →</a>""")
+    steps.push(html"""<a href="{at}/kv?prefix={first}&amp;after={url.percentEncode(last)}">the next {size} →</a>""")
   }
   let paging = html.only(steps.length() > 0, html"<p class=actions>{html.join(steps.freeze(), html" ")}</p>")
   let held = if app.kvKeys < 0 {
@@ -1534,7 +1510,7 @@ fn codeRow(at: String, file: host.CodeFile) -> Html {
   if file.kind == "dir" {
     return html"<li class=dir><span class=row><code>{file.label}/</code> {meta}</span>"
   }
-  let link = "{at}/code?file={text.urlEncode(file.name)}"
+  let link = "{at}/code?file={url.percentEncode(file.name)}"
   html"""
     <li>
       <span class=row><a href="{link}" title="{file.name}"><code>{file.label}</code></a> {meta}</span>
@@ -1935,7 +1911,7 @@ fn sqlTablesTable(at: String, tables: Array<host.SqlTable>) -> Html {
     // SQLite takes one: quoted, with a `"` in it doubled.
     let quoted = table.name.replace("\"", "\"\"")
     let statement = "SELECT * FROM \"{quoted}\" LIMIT 50"
-    let link = "{at}/sql?q={text.urlEncode(statement)}"
+    let link = "{at}/sql?q={url.percentEncode(statement)}"
     rows.push(html"""
       <tr>
         <td class=title data-label=table><a href="{link}"><code>{table.name}</code></a></td>
@@ -2698,29 +2674,34 @@ fn jstOffsetSeconds() -> Int {
   32400
 }
 
-/// `millis` shifted to JST, written as `text.isoTime` writes a UTC time:
-/// `2026-10-20T10:14:00.000Z` for 01:14 UTC. Not shown as it is — the Z
-/// would be a lie — but sliced by the helpers below.
-fn jstStamp(millis: Int) -> String {
-  text.isoTime(millis + jstOffsetSeconds() * 1000)
+/// `millis` as a clock in JST reads it.
+fn jstTime(millis: Int) -> datetime.DateTime {
+  datetime.fromUnixMillis(millis, jstOffsetSeconds() / 60)
+}
+
+/// The time of day of `at` to the second, `10:14:00`: `toIsoTime` without
+/// its milliseconds.
+fn toSecond(at: datetime.DateTime) -> String {
+  let clock = at.toIsoTime()
+  clock.sliceBytes(0, 8).unwrapOr(clock)
 }
 
 /// A time as the pages write it: `2026-10-20 10:14:00`, JST.
 fn jst(millis: Int) -> String {
-  let stamp = jstStamp(millis)
-  "{stamp.sliceBytes(0, 10).unwrapOr(stamp)} {stamp.sliceBytes(11, 19).unwrapOr(stamp)}"
+  let at = jstTime(millis)
+  "{at.toIsoDate()} {toSecond(at)}"
 }
 
 /// The time of day in JST, to the minute: `10:14`.
 fn jstClock(millis: Int) -> String {
-  let stamp = jstStamp(millis)
-  stamp.sliceBytes(11, 16).unwrapOr(stamp)
+  let clock = jstTime(millis).toIsoTime()
+  clock.sliceBytes(0, 5).unwrapOr(clock)
 }
 
 /// The date in JST, without the year: `10-20`.
 fn jstDate(millis: Int) -> String {
-  let stamp = jstStamp(millis)
-  stamp.sliceBytes(5, 10).unwrapOr(stamp)
+  let at = jstTime(millis)
+  "{text.padded(at.month, 2)}-{text.padded(at.day, 2)}"
 }
 
 /// The spacing of the time axis for a span of `span` seconds with at most
@@ -3631,7 +3612,7 @@ fn notice(request: web.Request) -> Html {
   if said == "" {
     return html""
   }
-  html"""<div class=notice>{said} <a href="{base(request)}/history">history</a></div>"""
+  html"""<div class=notice>{said} <a href="{request.prefix()}/history">history</a></div>"""
 }
 
 fn problemsNotice(problems: Array<String>) -> Html {
