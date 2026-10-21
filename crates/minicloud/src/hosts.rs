@@ -8,7 +8,6 @@
 //!
 //! | module | capability | what it is |
 //! | --- | --- | --- |
-//! | `web` | — | the `Request` and `Response` types; no operations, so building a `Response` needs no grant (cove#579) |
 //! | `log` | `log` | `info`, `warn` and `error`: a line on standard output, prefixed with the app's name |
 //! | `timer` | `timer` | `sleep(millis)`, answered **pending**: the run parks and holds no worker while it waits |
 //! | `kv` | `kv` | the app's persistent key-value store ([`crate::kv`]) |
@@ -33,8 +32,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cove_runtime::{
-    Effect, FieldSchema, Grants, HostAnswer, HostApi, HostRegistry, HostType, ModuleSchema,
-    OperationSchema, Reentry, RuntimeError, Transfer, TypeSchema, Value,
+    Effect, Grants, HostAnswer, HostApi, HostRegistry, HostType, ModuleSchema, OperationSchema,
+    Reentry, RuntimeError, Transfer, Value,
 };
 
 use crate::config::{FetchPolicy, KvLimits, Secrets};
@@ -102,12 +101,11 @@ pub struct HostModules {
 }
 
 impl HostModules {
-    /// `web`, `log`, `timer`, `kv`, `sql`, `defer`, `queue`, `stream`,
+    /// `log`, `timer`, `kv`, `sql`, `defer`, `queue`, `stream`,
     /// `socket`, `fetch`, `time`, `random`, `auth` and `admin`.
     pub fn standard() -> HostModules {
         HostModules {
             modules: vec![
-                Arc::new(Web),
                 Arc::new(LogModule),
                 Arc::new(TimerModule),
                 Arc::new(crate::kv::KvModule),
@@ -180,93 +178,6 @@ impl PendingWork {
     /// As the [`HostAnswer`] a host returns.
     pub fn answer(self) -> HostAnswer {
         HostAnswer::Pending(Box::new(self))
-    }
-}
-
-// ------------------------------------------------------------------- web
-
-const STRING_MAP: HostType = HostType::Map(&HostType::String, &HostType::String);
-
-/// The handler contract: what an app's `handle` takes and answers.
-///
-/// Types and no operations, so naming the module requires no capability —
-/// an app that only builds a `Response` is pure.
-pub const WEB: ModuleSchema = ModuleSchema {
-    name: "web",
-    capability: "web",
-    operations: &[],
-    types: &[
-        TypeSchema {
-            name: "Request",
-            cases: &[],
-            fields: &[
-                FieldSchema {
-                    name: "method",
-                    ty: HostType::String,
-                },
-                FieldSchema {
-                    name: "path",
-                    ty: HostType::String,
-                },
-                FieldSchema {
-                    name: "query",
-                    ty: STRING_MAP,
-                },
-                FieldSchema {
-                    name: "headers",
-                    ty: STRING_MAP,
-                },
-                FieldSchema {
-                    name: "body",
-                    ty: HostType::String,
-                },
-            ],
-        },
-        TypeSchema {
-            name: "Response",
-            cases: &[],
-            fields: &[
-                FieldSchema {
-                    name: "status",
-                    ty: HostType::Int,
-                },
-                FieldSchema {
-                    name: "headers",
-                    ty: STRING_MAP,
-                },
-                FieldSchema {
-                    name: "body",
-                    ty: HostType::String,
-                },
-            ],
-        },
-    ],
-    resources: &[],
-};
-
-struct Web;
-
-impl HostModule for Web {
-    fn schema(&self) -> ModuleSchema {
-        WEB
-    }
-
-    fn instantiate(&self, _app: &AppContext) -> Result<Box<dyn HostApi>, String> {
-        Ok(Box::new(WebHost))
-    }
-}
-
-struct WebHost;
-
-impl HostApi for WebHost {
-    fn module_schema(&self) -> ModuleSchema {
-        WEB
-    }
-
-    fn call(&self, op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {
-        Err(RuntimeError::new(format!(
-            "`web` declares no operation `{op}`"
-        )))
     }
 }
 

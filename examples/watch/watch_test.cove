@@ -1,4 +1,4 @@
-use web
+use std.web
 use std.html
 
 /// `minicloud test` runs these with the app's grant and limits, so they

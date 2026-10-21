@@ -261,7 +261,7 @@ those places.
 | `simulate.cove` | what an endpoint answers (`reply:<id>`), its delay, and its error schedule (`count:<id>`, by `kv.increment`) |
 | `pages.cove` | the HTML |
 | `fields/` | reading a named field of a stored object as text, an `Int`, a flag or a map of text, with a fallback, over `std.json`'s accessors. The parser and the renderers themselves are `std.json`'s |
-| `text/` | form decoding (`+`, `%XX`, UTF-8), ISO 8601 times, byte sizes, truncation at a character boundary |
+| `text/` | zero-padded ids, byte sizes, truncation at a character boundary (forms, ISO times and responses come from `std.url`, `std.datetime` and `std.web`) |
 
 `minicloud test --apps examples webhooks` runs the Cove tests in `fields/` and `text/`. The Rust
 tests in `crates/minicloud/tests/webhooks.rs` drive the app over HTTP.

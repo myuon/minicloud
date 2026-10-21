@@ -161,14 +161,16 @@ outside the directory is visible: every app is a package of its own with the
 standard library.
 
 The entry is `handle(request: web.Request) -> web.Response` in the main
-module (`<app>.handle`, unless `entry` in `app.toml` says otherwise):
+module (`<app>.handle`, unless `entry` in `app.toml` says otherwise). The two
+types are the standard library's `std.web.Request` and `std.web.Response`
+(Cove ADR 0109), not a host module's:
 
 ```cove
-use web
+use std.web
 
 export fn handle(request: web.Request) -> web.Response {
   // request.method, request.path, request.query, request.headers, request.body
-  web.Response(status: 200, headers: Map.of(), body: "hello\n")
+  web.text(200, "hello\n")
 }
 ```
 
@@ -179,6 +181,11 @@ export fn handle(request: web.Request) -> web.Response {
   (`/hello`) so it can link to itself.
 - `body` is a `String`; a request body that is not UTF-8 is answered 400
   before the app runs.
+- `std.web` also has the constructors (`web.html`, `web.text`, `web.json`,
+  which set only `content-type`, and `web.redirect`), `withHeader` and
+  `withHeaders` to add an app's own headers, and `request.header(name)`,
+  `request.form()`, `request.sameOrigin()` and `request.prefix()`. Security
+  and caching headers are the app's to set.
 - A response without a `content-type` gets `text/plain; charset=utf-8`;
   `content-length`, `transfer-encoding`, `connection`, `keep-alive` and
   `upgrade` are the HTTP layer's and are dropped.
@@ -611,7 +618,6 @@ path = "/cron/rollup"
 
 | module | capability | what |
 | --- | --- | --- |
-| `web` | — | the `Request` and `Response` types; building a response needs no capability |
 | `log` | `log` | `info`, `warn`, `error`: a line on stdout (`[app] level: line`) and in the app's log |
 | `timer` | `timer` | `sleep(millis)`: parks the run, at most 60 s |
 | `kv` | `kv` | the app's own SQLite store: `get`, `put`, `delete`, `increment`, `list`, `listDesc`; a `put` past a quota is the app's `Err` |
@@ -627,7 +633,7 @@ path = "/cron/rollup"
 | `host` | `admin` | the admin app's view of the host and its changes, what the version of an app it is running is made of and how its text is coloured ([`code.rs`](crates/minicloud/src/code.rs), [`highlight.rs`](crates/minicloud/src/highlight.rs)), what an app's SQL store holds and what is on its queues, for reading only ([`sql.rs`](crates/minicloud/src/sql.rs), [`queue.rs`](crates/minicloud/src/queue.rs)); only the app named `admin` may be granted it |
 
 The exact signatures are the schemas in the source:
-[`hosts.rs`](crates/minicloud/src/hosts.rs) (`web`, `log`, `timer`),
+[`hosts.rs`](crates/minicloud/src/hosts.rs) (`log`, `timer`),
 [`kv.rs`](crates/minicloud/src/kv.rs), [`sql.rs`](crates/minicloud/src/sql.rs),
 [`fetch.rs`](crates/minicloud/src/fetch.rs),
 [`sys.rs`](crates/minicloud/src/sys.rs) (`time`, `random`, `auth`) and
@@ -650,7 +656,7 @@ error[minicloud::spawn]: `spawner.handle` can spawn a task, which minicloud does
   rule: A spawned task runs outside the host's worker pool and keeps its parent from parking or yielding; minicloud refuses an app that can spawn.
 greedy     requires [log]  granted [-]  REFUSED: `greedy.handle` requires `log`, which app.toml does not grant
 spawner    requires [-]  granted [-]  REFUSED: `spawner.handle` can spawn a task, which minicloud does not run
-checked 2 app(s) against the host's schemas (web, log, timer, kv, sql, defer, queue, stream, socket, fetch, time, random, auth, host); 0 warning(s), 2 refused
+checked 2 app(s) against the host's schemas (log, timer, kv, sql, defer, queue, stream, socket, fetch, time, random, auth, host); 0 warning(s), 2 refused
 ```
 
 `test` runs every `test fn` the way `cove test` does, with the app's grant,
@@ -1395,6 +1401,30 @@ deployed ([`deploy/smoke.sh`](deploy/smoke.sh); Linux, ports 8790 and 8791).
 [`bench/`](bench/README.md) is the load test (`bench/perf.sh`, with its own
 load generator, `minicloud-load`) and its results;
 [docs/measurements.md](docs/measurements.md) summarises them.
+
+## Migrating from the host module `web` (Cove ADR 0109)
+
+The handler's types are the standard library's now: `std.web.Request` and
+`std.web.Response`, with the fields the host module `web` had. The host
+module is gone, so an app that still writes `use web` no longer checks, and
+`install.sh` refuses to switch to a release while an installed app does not
+check.
+
+- **In every module** write `use std.web` for `use web`. `web.Request`,
+  `web.Response`, `request.headers.get(...)` and `web.Response(status: …,
+  headers: …, body: …)` read as they did. A module may not have both.
+- **Optionally**, replace hand-written helpers with the library's:
+  `web.html` / `web.text` / `web.json` / `web.redirect` with
+  `.withHeaders(...)` for the app's own headers, `request.form()` (a
+  `url.Form`, whose `get` answers the *first* value of a repeated name),
+  `request.sameOrigin()`, `request.prefix()`, `url.percentEncode` and
+  `datetime.formatIso`.
+
+On a server, copy the changed apps' files into place first — the running
+host keeps serving the versions it loaded, and an older host cannot check
+`use std.web` — and then run `install.sh`, whose check of every installed
+app with the new binary then passes. An app that lives only on the server
+has to be changed there.
 
 ## Migrating from fuel (Cove ADR 0091)
 

@@ -7,6 +7,7 @@ use schema.Run
 use schema.Measurement
 use schema.Problem
 use stats
+use std.datetime
 use text
 
 // The ledger's records in the app's key-value store, as JSON:
@@ -107,7 +108,7 @@ fn summaryJson(summary: Summary) -> Json {
     MapEntry(key: "id", value: Json.Text(summary.id)),
     MapEntry(key: "repository", value: Json.Text(summary.repository)),
     MapEntry(key: "commit", value: Json.Text(summary.commit)),
-    MapEntry(key: "measuredAt", value: Json.Text(text.isoTime(summary.measuredAt))),
+    MapEntry(key: "measuredAt", value: Json.Text(datetime.formatIso(summary.measuredAt))),
     MapEntry(key: "measuredAtMs", value: Json.Number(summary.measuredAt.toFloat())),
     MapEntry(key: "results", value: Json.Number(summary.results.toFloat())),
     MapEntry(key: "backends", value: Json.Items(backends.freeze())),

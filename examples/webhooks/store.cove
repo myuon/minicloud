@@ -3,6 +3,7 @@ use random
 use std.json
 use std.json.Json
 use fields
+use std.datetime
 use text
 
 // The lab's records in the app's key-value store, as JSON:
@@ -129,7 +130,7 @@ fn eventJson(event: Event) -> Json {
       MapEntry(key: "id", value: Json.Text(event.id)),
       MapEntry(key: "endpoint", value: Json.Text(event.endpoint)),
       MapEntry(key: "received", value: number(event.received)),
-      MapEntry(key: "receivedAt", value: Json.Text(text.isoTime(event.received))),
+      MapEntry(key: "receivedAt", value: Json.Text(datetime.formatIso(event.received))),
       MapEntry(key: "method", value: Json.Text(event.method)),
       MapEntry(key: "path", value: Json.Text(event.path)),
       MapEntry(key: "query", value: fields.fromTextMap(event.query)),

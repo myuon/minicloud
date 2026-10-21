@@ -1,4 +1,4 @@
-use web
+use std.web
 use sat
 use sat.Formula
 use sat.Outcome
@@ -117,12 +117,12 @@ fn satPage(base: String, fields: Map<String, String>, post: Bool) -> web.Respons
   if post || part {
     let result = satResult(input, budget, known)
     if part {
-      return htmlResponse(200, result)
+      return web.html(200, result).withHeaders(pageHeaders())
     }
-    return htmlResponse(200, page(base, "sat", title, satForm(base, input, budget), resultSection(result)))
+    return web.html(200, page(base, "sat", title, satForm(base, input, budget), resultSection(result))).withHeaders(pageHeaders())
   }
   let result = if chosen { pendingSection() } else { resultSection(html"<p class=muted>Pick an example, or write a formula and run it.</p>") }
-  htmlResponse(200, page(base, "sat", title, satForm(base, input, budget), result))
+  web.html(200, page(base, "sat", title, satForm(base, input, budget), result)).withHeaders(pageHeaders())
 }
 
 fn satForm(base: String, input: String, budget: Int) -> Html {

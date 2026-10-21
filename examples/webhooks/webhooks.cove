@@ -1,9 +1,10 @@
-use web
+use std.web
 use auth
 use log
 use time
 use std.json
 use std.json.Json
+use std.datetime
 use text
 
 /// The webhook lab: receive URLs that keep what they are sent, and pages to
@@ -30,17 +31,15 @@ export fn handle(request: web.Request) -> web.Response {
     return admin(request, parts)
   }
   if request.path == "/" {
-    return redirect("{base(request)}/admin")
+    return web.redirect("{request.prefix()}/admin").withHeader("cache-control", "no-store")
   }
-  textResponse(404, "nothing here; receive URLs are under /in/, the pages under /admin/\n")
+  web.text(404, "nothing here; receive URLs are under /in/, the pages under /admin/\n").withHeaders(pageHeaders())
 }
 
-/// Where the host mounted the app: `/webhooks` for `/webhooks/...`.
-fn base(request: web.Request) -> String {
-  request.headers.get("x-forwarded-prefix").unwrapOr("")
-}
-
-/// `scheme://host` as the client reached the host.
+/// `scheme://host` as the client reached the host, for the receive URLs the
+/// pages show (`localhost` when the request named no host). Whether a form
+/// came from this site is `request.sameOrigin()`, which refuses a missing
+/// host instead.
 fn origin(request: web.Request) -> String {
   let scheme = request.headers.get("x-forwarded-proto").unwrapOr("http")
   let host = request.headers.get("host").unwrapOr("localhost")
@@ -54,7 +53,7 @@ fn receive(request: web.Request, parts: Array<String>) -> web.Response {
   let id = parts.get(2).unwrapOr("")
   let endpoint = match loadEndpoint(id) {
     Some(endpoint) => endpoint
-    None => return textResponse(404, "no endpoint `{id}`\n")
+    None => return web.text(404, "no endpoint `{id}`\n").withHeaders(pageHeaders())
   }
   let rest = "/{"/".join(parts.slice(3, parts.length()))}"
   let reply = loadReply(endpoint.id)
@@ -73,7 +72,7 @@ fn receive(request: web.Request, parts: Array<String>) -> web.Response {
     Ok(_) => {}
     Err(error) => {
       log.error("endpoint {endpoint.id}: not stored: {error.message}")
-      return jsonResponse(507, json.render(problem("the request could not be stored: {error.message}")))
+      return web.json(507, problem("the request could not be stored: {error.message}")).withHeaders(pageHeaders())
     }
   }
   log.info("{endpoint.name}: {request.method} {rest} ({event.bytes} bytes) -> {event.id}, answering {decision.status}")
@@ -137,7 +136,7 @@ fn admin(request: web.Request, parts: Array<String>) -> web.Response {
     Ok(_) => {}
     Err(error) => {
       if auth.usesAccess() {
-        return textResponse(403, "the webhook lab's pages are reached through Cloudflare Access: {error.message}\n")
+        return web.text(403, "the webhook lab's pages are reached through Cloudflare Access: {error.message}\n").withHeaders(pageHeaders())
       }
       return web.Response(
         status: 401,
@@ -150,101 +149,80 @@ fn admin(request: web.Request, parts: Array<String>) -> web.Response {
     }
   }
   if request.method != "GET" && request.method != "HEAD" {
-    if !sameOrigin(request) {
-      return textResponse(403, "a cross-site form cannot change the webhook lab\n")
+    if !request.sameOrigin() {
+      return web.text(403, "a cross-site form cannot change the webhook lab\n").withHeaders(pageHeaders())
     }
   }
-  let at = base(request)
+  let at = request.prefix()
   let section = parts.get(2).unwrapOr("")
   let id = parts.get(3).unwrapOr("")
   let action = parts.get(4).unwrapOr("")
   let get = request.method == "GET" || request.method == "HEAD"
   let post = request.method == "POST"
   if section == "" && get {
-    return htmlResponse(200, endpointsPage(at, origin(request), listEndpoints()))
+    return web.html(200, endpointsPage(at, origin(request), listEndpoints())).withHeaders(pageHeaders())
   }
   if section == "endpoints" && post {
     return create(request)
   }
   if section != "e" {
-    return textResponse(404, "no such page\n")
+    return web.text(404, "no such page\n").withHeaders(pageHeaders())
   }
   let endpoint = match loadEndpoint(id) {
     Some(endpoint) => endpoint
-    None => return textResponse(404, "no endpoint `{id}`\n")
+    None => return web.text(404, "no endpoint `{id}`\n").withHeaders(pageHeaders())
   }
   if action == "" && get {
     return history(request, endpoint)
   }
   if action == "settings" && post {
-    return match replyFromForm(text.parseForm(request.body)) {
+    return match replyFromForm(request.form()) {
       Ok(reply) => match saveReply(endpoint.id, reply) {
         Ok(_) => {
           log.info("{endpoint.name}: now answers {reply.status} after {reply.delayMs} ms, failing every {reply.errorEvery}")
-          redirect("{at}/admin/e/{endpoint.id}")
+          web.redirect("{at}/admin/e/{endpoint.id}").withHeader("cache-control", "no-store")
         }
-        Err(error) => textResponse(507, "the settings could not be stored: {error.message}\n")
+        Err(error) => web.text(507, "the settings could not be stored: {error.message}\n").withHeaders(pageHeaders())
       }
-      Err(error) => textResponse(400, "the response settings were not changed: {error.message}\n")
+      Err(error) => web.text(400, "the response settings were not changed: {error.message}\n").withHeaders(pageHeaders())
     }
   }
   if action == "clear" && post {
     let deleted = clearEvents(endpoint.id)
     log.info("{endpoint.name}: history deleted ({deleted} requests)")
-    return redirect("{at}/admin/e/{endpoint.id}")
+    return web.redirect("{at}/admin/e/{endpoint.id}").withHeader("cache-control", "no-store")
   }
   if action == "delete" && post {
     let deleted = deleteEndpoint(endpoint.id)
     log.info("{endpoint.name}: endpoint deleted ({deleted} requests)")
-    return redirect("{at}/admin")
+    return web.redirect("{at}/admin").withHeader("cache-control", "no-store")
   }
   if action == "events" {
     let eventId = parts.get(5).unwrapOr("")
     let verb = parts.get(6).unwrapOr("")
     if verb == "delete" && post {
       deleteEvent(endpoint.id, eventId)
-      return redirect("{at}/admin/e/{endpoint.id}")
+      return web.redirect("{at}/admin/e/{endpoint.id}").withHeader("cache-control", "no-store")
     }
     if verb == "resend" && post {
       return match loadEvent(endpoint.id, eventId) {
         Some(event) => resendAction(request, endpoint, event)
-        None => textResponse(404, "no request `{eventId}` (deleted, or past the retention count)\n")
+        None => web.text(404, "no request `{eventId}` (deleted, or past the retention count)\n").withHeaders(pageHeaders())
       }
     }
     if verb == "" && get {
       return match loadEvent(endpoint.id, eventId) {
         Some(event) => showEvent(request, endpoint, event)
-        None => textResponse(404, "no request `{eventId}` (deleted, or past the retention count)\n")
+        None => web.text(404, "no request `{eventId}` (deleted, or past the retention count)\n").withHeaders(pageHeaders())
       }
     }
   }
-  textResponse(404, "no such page\n")
-}
-
-/// Whether a request that changes something came from the lab's own pages: a
-/// browser says where a form was submitted from, and a form on another site
-/// must not be able to use the browser's stored login. `Sec-Fetch-Site`
-/// decides alone when it is present — a browser sets it and a page cannot
-/// forge it, and it stays `same-origin` where `Origin` is serialized as
-/// `null` (a form posted from a page with `Referrer-Policy: no-referrer`).
-/// Only a browser without it falls back to `Origin`, and a `null` one is
-/// refused there. A client that says neither — curl — is not a browser, and
-/// holds the secret itself.
-fn sameOrigin(request: web.Request) -> Bool {
-  match request.headers.get("sec-fetch-site") {
-    Some(site) => site == "same-origin" || site == "none"
-    None => {
-      match request.headers.get("origin") {
-        Some(from) => from == origin(request)
-        None => true
-      }
-    }
-  }
+  web.text(404, "no such page\n").withHeaders(pageHeaders())
 }
 
 /// Makes an endpoint from the form (or a curl `-d name=...`).
 fn create(request: web.Request) -> web.Response {
-  let form = text.parseForm(request.body)
+  let form = request.form()
   let name = form.get("name").unwrapOr("").trim()
   let retention = clamp(Int.parse(form.get("retention").unwrapOr("100")).unwrapOr(100), 1, maxRetention())
   let maxBody = clamp(Int.parse(form.get("maxBody").unwrapOr("65536")).unwrapOr(65536), 0, maxBodyLimit())
@@ -265,25 +243,23 @@ fn create(request: web.Request) -> web.Response {
   )
   match saveEndpoint(endpoint) {
     Ok(_) => {}
-    Err(error) => return textResponse(507, "the endpoint could not be stored: {error.message}\n")
+    Err(error) => return web.text(507, "the endpoint could not be stored: {error.message}\n").withHeaders(pageHeaders())
   }
   log.info("{endpoint.name}: endpoint created ({endpoint.id})")
-  let url = receiveUrl(origin(request), base(request), endpoint.id)
+  let url = receiveUrl(origin(request), request.prefix(), endpoint.id)
   if request.headers.get("accept").unwrapOr("").contains("application/json") {
-    return jsonResponse(
+    return web.json(
       201,
-      json.render(
-        Json.Fields(
-          Map.of(
-            MapEntry(key: "id", value: Json.Text(endpoint.id)),
-            MapEntry(key: "name", value: Json.Text(endpoint.name)),
-            MapEntry(key: "url", value: Json.Text(url)),
-          ),
+      Json.Fields(
+        Map.of(
+          MapEntry(key: "id", value: Json.Text(endpoint.id)),
+          MapEntry(key: "name", value: Json.Text(endpoint.name)),
+          MapEntry(key: "url", value: Json.Text(url)),
         ),
       ),
-    )
+    ).withHeaders(pageHeaders())
   }
-  redirect("{base(request)}/admin/e/{endpoint.id}")
+  web.redirect("{request.prefix()}/admin/e/{endpoint.id}").withHeader("cache-control", "no-store")
 }
 
 fn clamp(value: Int, least: Int, most: Int) -> Int {
@@ -312,7 +288,7 @@ fn history(request: web.Request, endpoint: Endpoint) -> web.Response {
         Json.Fields(
           Map.of(
             MapEntry(key: "id", value: Json.Text(event.id)),
-            MapEntry(key: "receivedAt", value: Json.Text(text.isoTime(event.received))),
+            MapEntry(key: "receivedAt", value: Json.Text(datetime.formatIso(event.received))),
             MapEntry(key: "method", value: Json.Text(event.method)),
             MapEntry(key: "path", value: Json.Text(event.path)),
             MapEntry(key: "bytes", value: Json.Number(event.bytes.toFloat())),
@@ -322,23 +298,21 @@ fn history(request: web.Request, endpoint: Endpoint) -> web.Response {
         ),
       )
     }
-    return jsonResponse(
+    return prettyJson(
       200,
-      json.renderPretty(
-        Json.Fields(
-          Map.of(
-            MapEntry(key: "endpoint", value: endpointJson(endpoint)),
-            MapEntry(key: "reply", value: replyJson(loadReply(endpoint.id))),
-            MapEntry(key: "events", value: Json.Items(items.freeze())),
-          ),
+      Json.Fields(
+        Map.of(
+          MapEntry(key: "endpoint", value: endpointJson(endpoint)),
+          MapEntry(key: "reply", value: replyJson(loadReply(endpoint.id))),
+          MapEntry(key: "events", value: Json.Items(items.freeze())),
         ),
       ),
     )
   }
-  htmlResponse(
+  web.html(
     200,
-    endpointPage(base(request), origin(request), endpoint, loadReply(endpoint.id), events, pageSize()),
-  )
+    endpointPage(request.prefix(), origin(request), endpoint, loadReply(endpoint.id), events, pageSize()),
+  ).withHeaders(pageHeaders())
 }
 
 /// One request: the page, `?view=json`, or `?view=raw` (the body alone, as
@@ -346,10 +320,10 @@ fn history(request: web.Request, endpoint: Endpoint) -> web.Response {
 fn showEvent(request: web.Request, endpoint: Endpoint, event: Event) -> web.Response {
   let view = request.query.get("view").unwrapOr("")
   if view == "json" {
-    return jsonResponse(200, json.renderPretty(eventJson(event)))
+    return prettyJson(200, eventJson(event))
   }
   if view == "raw" {
-    return textResponse(200, event.body)
+    return web.text(200, event.body).withHeaders(pageHeaders())
   }
   let attempts = listResends(endpoint.id, event.id)
   if view == "resends" {
@@ -357,23 +331,23 @@ fn showEvent(request: web.Request, endpoint: Endpoint, event: Event) -> web.Resp
     for attempt in attempts {
       items.push(attemptJson(attempt))
     }
-    return jsonResponse(200, json.renderPretty(Json.Items(items.freeze())))
+    return prettyJson(200, Json.Items(items.freeze()))
   }
-  htmlResponse(200, eventPage(base(request), endpoint, event, attempts))
+  web.html(200, eventPage(request.prefix(), endpoint, event, attempts)).withHeaders(pageHeaders())
 }
 
 /// Resends a stored request to the form's `url`, and shows what came back:
 /// the request's page (or, with `Accept: application/json`, the attempt).
 fn resendAction(request: web.Request, endpoint: Endpoint, event: Event) -> web.Response {
-  let url = text.parseForm(request.body).get("url").unwrapOr("").trim()
+  let url = request.form().get("url").unwrapOr("").trim()
   if url == "" {
-    return textResponse(400, "a resend needs `url`\n")
+    return web.text(400, "a resend needs `url`\n").withHeaders(pageHeaders())
   }
   let attempt = resend(endpoint, event, url)
   let outcome = if attempt.ok { "{attempt.status}" } else { "failed: {attempt.error}" }
   log.info("{endpoint.name}: {event.id} resent to {url}: {outcome}")
   if request.headers.get("accept").unwrapOr("").contains("application/json") {
-    return jsonResponse(200, json.renderPretty(attemptJson(attempt)))
+    return prettyJson(200, attemptJson(attempt))
   }
-  redirect("{base(request)}/admin/e/{endpoint.id}/events/{event.id}#resends")
+  web.redirect("{request.prefix()}/admin/e/{endpoint.id}/events/{event.id}#resends").withHeader("cache-control", "no-store")
 }

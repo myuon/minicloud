@@ -455,8 +455,6 @@ impl Front {
                 std::iter::once(schema.capability)
                     .chain(schema.operations.iter().map(|op| op.capability))
             })
-            // `web` declares types only: nothing to grant.
-            .filter(|capability| *capability != "web")
             .map(str::to_string)
             .collect();
         capabilities.sort();

@@ -1,4 +1,4 @@
-use web
+use std.web
 
 fn ask(method: String, path: String, body: String) -> web.Response {
   handle(web.Request(method: method, path: path, query: Map.of(), headers: Map.of(), body: body))

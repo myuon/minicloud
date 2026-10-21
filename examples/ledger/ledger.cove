@@ -1,10 +1,9 @@
-use web
+use std.web
 use auth
 use log
 use std.json
 use std.json.Json
 use schema
-use text
 
 /// The bench ledger: benchmark runs posted as JSON, kept, and shown.
 ///
@@ -22,7 +21,7 @@ use text
 export fn handle(request: web.Request) -> web.Response {
   let parts = request.path.split("/")
   let first = parts.get(1).unwrapOr("")
-  let at = base(request)
+  let at = request.prefix()
   let get = request.method == "GET" || request.method == "HEAD"
   if first == "api" && parts.get(2).unwrapOr("") == "runs" {
     return api(request, parts.get(3).unwrapOr(""))
@@ -31,7 +30,7 @@ export fn handle(request: web.Request) -> web.Response {
     let before = request.query.get("before").unwrapOr("")
     let runs = listRuns(before, pageSize())
     if request.query.get("format").unwrapOr("") == "json" {
-      return jsonResponse(200, json.renderPretty(summariesJson(runs)))
+      return renderedJson(200, json.renderPretty(summariesJson(runs)))
     }
     let older = if runs.length() == pageSize() {
       match runs.get(pageSize() - 1) {
@@ -41,13 +40,13 @@ export fn handle(request: web.Request) -> web.Response {
     } else {
       ""
     }
-    return htmlResponse(200, runsPage(at, runs, older))
+    return web.html(200, runsPage(at, runs, older)).withHeaders(pageHeaders())
   }
   if first == "cases" && get {
     if parts.get(2).unwrapOr("") == "trend" {
       return trendPage(request)
     }
-    return htmlResponse(200, casesPage(at))
+    return web.html(200, casesPage(at)).withHeaders(pageHeaders())
   }
   if first == "compare" && get {
     return comparePage(request)
@@ -56,21 +55,16 @@ export fn handle(request: web.Request) -> web.Response {
     let id = parts.get(2).unwrapOr("")
     if request.query.get("format").unwrapOr("") == "json" {
       return match storedRun(id) {
-        Some(stored) => jsonResponse(200, stored)
-        None => textResponse(404, "no run `{id}`\n")
+        Some(stored) => renderedJson(200, stored)
+        None => web.text(404, "no run `{id}`\n").withHeaders(pageHeaders())
       }
     }
     return match loadRun(id) {
-      Some(run) => htmlResponse(200, runPage(at, run))
-      None => textResponse(404, "no run `{id}`\n")
+      Some(run) => web.html(200, runPage(at, run)).withHeaders(pageHeaders())
+      None => web.text(404, "no run `{id}`\n").withHeaders(pageHeaders())
     }
   }
-  textResponse(404, "no such page\n")
-}
-
-/// Where the host mounted the app: `/ledger` for `/ledger/...`.
-fn base(request: web.Request) -> String {
-  request.headers.get("x-forwarded-prefix").unwrapOr("")
+  web.text(404, "no such page\n").withHeaders(pageHeaders())
 }
 
 /// How many runs the list shows at once.
@@ -91,10 +85,10 @@ fn api(request: web.Request, id: String) -> web.Response {
   let get = request.method == "GET" || request.method == "HEAD"
   if get {
     if id == "" {
-      return jsonResponse(200, json.renderPretty(summariesJson(listRuns("", 1000))))
+      return renderedJson(200, json.renderPretty(summariesJson(listRuns("", 1000))))
     }
     return match storedRun(id) {
-      Some(stored) => jsonResponse(200, stored)
+      Some(stored) => renderedJson(200, stored)
       None => problem(404, "no run `{id}`")
     }
   }
@@ -108,7 +102,7 @@ fn api(request: web.Request, id: String) -> web.Response {
       body: "{json.render(problemJson("posting to the ledger needs its `post` secret: `Authorization: Bearer <secret>`"))}\n",
     )
   }
-  if !sameOrigin(request) {
+  if !request.sameOrigin() {
     return problem(403, "a cross-site request cannot change the ledger")
   }
   if request.method == "POST" && id == "" {
@@ -122,35 +116,11 @@ fn api(request: web.Request, id: String) -> web.Response {
   if request.method == "DELETE" && id != "" {
     if deleteRun(id) {
       log.info("run {id} deleted")
-      return jsonResponse(200, json.render(okJson(id)))
+      return web.json(200, okJson(id)).withHeaders(pageHeaders())
     }
     return problem(404, "no run `{id}`")
   }
   problem(405, "the API takes `POST /api/runs` and `DELETE /api/runs/<id>`")
-}
-
-/// Whether a request that changes something came from this site: a
-/// browser says where a form was submitted from, and a form on another site
-/// must not be able to use the browser's stored login. `Sec-Fetch-Site`
-/// decides alone when it is present — a browser sets it and a page cannot
-/// forge it, and it stays `same-origin` where `Origin` is serialized as
-/// `null` (a form posted from a page with `Referrer-Policy: no-referrer`).
-/// Only a browser without it falls back to `Origin`, and a `null` one is
-/// refused there. A client that says neither — curl — is not a browser, and
-/// holds the secret itself.
-fn sameOrigin(request: web.Request) -> Bool {
-  match request.headers.get("sec-fetch-site") {
-    Some(site) => site == "same-origin" || site == "none"
-    None => {
-      match request.headers.get("origin") {
-        Some(from) => {
-          let scheme = request.headers.get("x-forwarded-proto").unwrapOr("http")
-          from == "{scheme}://{request.headers.get("host").unwrapOr("")}"
-        }
-        None => true
-      }
-    }
-  }
 }
 
 /// `POST /api/runs`.
@@ -158,32 +128,28 @@ fn post(request: web.Request) -> web.Response {
   match postRun(request.body) {
     Posted.Stored(run) => {
       log.info("run {run.id} stored: {run.repository} {run.commit}, {run.results.length()} results")
-      jsonResponse(
+      web.json(
         201,
-        json.render(
-          withFields(
-            okJson(run.id),
-            Map.of(
-              MapEntry(key: "stored", value: Json.Bool(true)),
-              MapEntry(key: "results", value: Json.Number(run.results.length().toFloat())),
-              MapEntry(key: "url", value: Json.Text("{base(request)}/runs/{run.id}")),
-            ),
-          ),
-        ),
-      )
-    }
-    Posted.Duplicate(run) => jsonResponse(
-      200,
-      json.render(
         withFields(
           okJson(run.id),
           Map.of(
-            MapEntry(key: "stored", value: Json.Bool(false)),
-            MapEntry(key: "duplicate", value: Json.Bool(true)),
+            MapEntry(key: "stored", value: Json.Bool(true)),
+            MapEntry(key: "results", value: Json.Number(run.results.length().toFloat())),
+            MapEntry(key: "url", value: Json.Text("{request.prefix()}/runs/{run.id}")),
           ),
         ),
+      ).withHeaders(pageHeaders())
+    }
+    Posted.Duplicate(run) => web.json(
+      200,
+      withFields(
+        okJson(run.id),
+        Map.of(
+          MapEntry(key: "stored", value: Json.Bool(false)),
+          MapEntry(key: "duplicate", value: Json.Bool(true)),
+        ),
       ),
-    )
+    ).withHeaders(pageHeaders())
     Posted.Conflict(how) => problem(
       409,
       "another run is already stored under this ID: {how}. Post it under a new ID, or delete the stored one first",
@@ -200,7 +166,7 @@ fn post(request: web.Request) -> web.Response {
           ),
         )
       }
-      jsonResponse(
+      renderedJson(
         400,
         json.renderPretty(
           Json.Fields(
@@ -253,5 +219,5 @@ fn problemJson(message: String) -> Json {
 }
 
 fn problem(status: Int, message: String) -> web.Response {
-  jsonResponse(status, json.render(problemJson(message)))
+  web.json(status, problemJson(message)).withHeaders(pageHeaders())
 }

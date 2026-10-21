@@ -1,4 +1,4 @@
-use web
+use std.web
 use timer
 
 /// Keeps `?n=` numbers in a vector, waits `?ms=` milliseconds, and answers

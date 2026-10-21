@@ -1,4 +1,4 @@
-use web
+use std.web
 use timer
 use log
 
@@ -11,11 +11,7 @@ export fn handle(request: web.Request) -> web.Response {
   let ms = Int.parse(request.query.get("ms").unwrapOr("100")).unwrapOr(-1)
   let times = Int.parse(request.query.get("times").unwrapOr("1")).unwrapOr(-1)
   if ms < 0 || ms > 60000 || times < 1 || times > 16 {
-    return web.Response(
-      status: 400,
-      headers: Map.of(),
-      body: "?ms= must be 0 to 60000 and ?times= 1 to 16\n",
-    )
+    return web.text(400, "?ms= must be 0 to 60000 and ?times= 1 to 16\n")
   }
   var done = 0
   while done < times {
@@ -23,5 +19,5 @@ export fn handle(request: web.Request) -> web.Response {
     done += 1
   }
   log.info("{request.method} {request.path} waited {times} x {ms} ms")
-  web.Response(status: 200, headers: Map.of(), body: "waited {times} x {ms} ms\n")
+  web.text(200, "waited {times} x {ms} ms\n")
 }

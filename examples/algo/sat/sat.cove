@@ -523,17 +523,6 @@ export fn dimacs(formula: Formula, limit: Int) -> String {
 
 // ------------------------------------------------------------------ solve
 
-/// `count` copies of `value`.
-fn filled(count: Int, value: Int) -> Vector<Int> {
-  var out = Vector.of()
-  var at = 0
-  while at < count {
-    out.push(value)
-    at += 1
-  }
-  out
-}
-
 /// Decides `formula` by DPLL, giving up after `budget` decisions.
 export fn solve(formula: Formula, budget: Int) -> Outcome {
   let n = formula.variables
@@ -541,14 +530,14 @@ export fn solve(formula: Formula, budget: Int) -> Outcome {
   let start = formula.start
   let literals = formula.literals
   // `value[v]`: -1 unassigned, 0 false, 1 true.
-  var value = filled(n, -1)
+  var value = Vector.filled(n, -1)
   var trail: Vector<Int> = Vector.of()
   // Two watched literals per clause of two or more: `watched[2c + k]`, and
   // for each literal the clauses watching it as a linked list of watch
   // slots, `head[literal]` then `next[slot]`.
-  var watched = filled(2 * clauses, -1)
-  var head = filled(2 * n, -1)
-  var next = filled(2 * clauses, -1)
+  var watched = Vector.filled(2 * clauses, -1)
+  var head = Vector.filled(2 * n, -1)
+  var next = Vector.filled(2 * clauses, -1)
   var units: Vector<Int> = Vector.of()
   var decisions = 0
   var propagations = 0
@@ -556,7 +545,7 @@ export fn solve(formula: Formula, budget: Int) -> Outcome {
   var pure = 0
   var depth = 0
   // Occurrences, for the order and the pure literals.
-  var occurs = filled(2 * n, 0)
+  var occurs = Vector.filled(2 * n, 0)
   var c = 0
   while c < clauses {
     let first = start.get(c).unwrapOr(0)
@@ -777,7 +766,7 @@ fn byOccurrence(occurs: Vector<Int>, n: Int) -> Array<Int> {
     v += 1
   }
   // Counting sort, descending.
-  var counts = filled(most + 2, 0)
+  var counts = Vector.filled(most + 2, 0)
   v = 0
   while v < n {
     let key = most - (occurs.get(2 * v).unwrapOr(0) + occurs.get(2 * v + 1).unwrapOr(0))
@@ -789,7 +778,7 @@ fn byOccurrence(occurs: Vector<Int>, n: Int) -> Array<Int> {
     counts.set(k + 1, counts.get(k + 1).unwrapOr(0) + counts.get(k).unwrapOr(0))
     k += 1
   }
-  var order = filled(n, 0)
+  var order = Vector.filled(n, 0)
   v = 0
   while v < n {
     let key = most - (occurs.get(2 * v).unwrapOr(0) + occurs.get(2 * v + 1).unwrapOr(0))

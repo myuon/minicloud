@@ -1,4 +1,5 @@
-use web
+use std.web
+use std.datetime
 use sql
 use fetch
 use queue
@@ -9,7 +10,6 @@ use timer
 use time
 use log
 use auth
-use text
 use std.html
 use std.html.Html
 
@@ -96,7 +96,7 @@ fn refusal(request: web.Request) -> Option<web.Response> {
     Ok(_) => None
     Err(error) => {
       let status = if auth.usesAccess() { 403 } else { 401 }
-      Some(answer(status, "{error.message}\n"))
+      Some(web.text(status, "{error.message}\n"))
     }
   }
 }
@@ -186,11 +186,11 @@ fn told(target: Target, ok: Bool) {
 /// `POST /cron/check`: every target, every minute.
 fn checkDue(request: web.Request) -> web.Response {
   if !fromHost(request) {
-    return answer(403, "the clock asks for this\n")
+    return web.text(403, "the clock asks for this\n")
   }
   let watched = match targets() {
     Ok(watched) => watched
-    Err(error) => return answer(500, "{error.message}\n")
+    Err(error) => return web.text(500, "{error.message}\n")
   }
   var checked = 0
   for target in watched {
@@ -205,7 +205,7 @@ fn checkDue(request: web.Request) -> web.Response {
     Ok(_) => {}
     Err(_) => {}
   }
-  answer(200, "checked {checked}\n")
+  web.text(200, "checked {checked}\n")
 }
 
 /// `POST /prune`: yesterday's checks, dropped after the minute answered.
@@ -214,11 +214,11 @@ fn checkDue(request: web.Request) -> web.Response {
 /// end when it has checked, and tidying is not checking.
 fn pruned(request: web.Request) -> web.Response {
   if !fromHost(request) {
-    return answer(403, "the host asks for this\n")
+    return web.text(403, "the host asks for this\n")
   }
   match prune(time.nowMillis() - 7 * day()) {
-    Ok(gone) => answer(200, "dropped {gone}\n")
-    Err(error) => answer(500, "{error.message}\n")
+    Ok(gone) => web.text(200, "dropped {gone}\n")
+    Err(error) => web.text(500, "{error.message}\n")
   }
 }
 
@@ -228,18 +228,18 @@ fn pruned(request: web.Request) -> web.Response {
 /// with another delivery, and there is nothing to deliver to.
 fn rechecked(request: web.Request) -> web.Response {
   if !fromHost(request) {
-    return answer(403, "the queue asks for this\n")
+    return web.text(403, "the queue asks for this\n")
   }
   let id = request.body.trim()
   match target(id) {
     Ok(Some(found)) => {
       match check(found, false) {
-        Ok(ok) => answer(200, "{id} is {if ok { "up" } else { "down" }}\n")
-        Err(error) => answer(500, "{error.message}\n")
+        Ok(ok) => web.text(200, "{id} is {if ok { "up" } else { "down" }}\n")
+        Err(error) => web.text(500, "{error.message}\n")
       }
     }
-    Ok(None) => answer(200, "{id} is not watched any more\n")
-    Err(error) => answer(500, "{error.message}\n")
+    Ok(None) => web.text(200, "{id} is not watched any more\n")
+    Err(error) => web.text(500, "{error.message}\n")
   }
 }
 
@@ -249,12 +249,12 @@ fn checkOne(request: web.Request) -> web.Response {
   match target(id) {
     Ok(Some(found)) => {
       match check(found, false) {
-        Ok(ok) => answer(200, "{id} is {if ok { "up" } else { "down" }}\n")
-        Err(error) => answer(500, "{error.message}\n")
+        Ok(ok) => web.text(200, "{id} is {if ok { "up" } else { "down" }}\n")
+        Err(error) => web.text(500, "{error.message}\n")
       }
     }
-    Ok(None) => answer(404, "no target `{id}`\n")
-    Err(error) => answer(500, "{error.message}\n")
+    Ok(None) => web.text(404, "no target `{id}`\n")
+    Err(error) => web.text(500, "{error.message}\n")
   }
 }
 
@@ -264,29 +264,29 @@ fn checkOne(request: web.Request) -> web.Response {
 /// that cannot be told is 500 here and not a line in the log.
 fn notify(request: web.Request) -> web.Response {
   if !fromHost(request) {
-    return answer(403, "the queue asks for this\n")
+    return web.text(403, "the queue asks for this\n")
   }
   let parts = request.body.trim().split(" ")
   let id = parts.get(0).unwrapOr("")
   let what = parts.get(1).unwrapOr("")
   let found = match target(id) {
     Ok(Some(found)) => found
-    Ok(None) => return answer(200, "{id} is not watched any more\n")
-    Err(error) => return answer(500, "{error.message}\n")
+    Ok(None) => return web.text(200, "{id} is not watched any more\n")
+    Err(error) => return web.text(500, "{error.message}\n")
   }
   if found.notify == "" {
-    return answer(200, "{id} has nowhere to tell\n")
+    return web.text(200, "{id} has nowhere to tell\n")
   }
   // `\{` and `\}` are a literal brace: a bare one opens an interpolation.
   let body = "\{\"target\": \"{id}\", \"state\": \"{what}\", \"at\": {time.nowMillis()}\}"
   match fetch.request("POST", found.notify, Map.of(MapEntry(key: "content-type", value: "application/json")), body) {
     Ok(got) => {
       if got.status < 400 {
-        return answer(200, "told\n")
+        return web.text(200, "told\n")
       }
-      answer(500, "the notification answered {got.status}\n")
+      web.text(500, "the notification answered {got.status}\n")
     }
-    Err(error) => answer(500, "cannot tell: {error.message}\n")
+    Err(error) => web.text(500, "cannot tell: {error.message}\n")
   }
 }
 
@@ -294,19 +294,19 @@ fn notify(request: web.Request) -> web.Response {
 
 /// `POST /targets`: `id`, `url` and an optional `notify`, as a form.
 fn addTargetFrom(request: web.Request) -> web.Response {
-  let form = text.parseForm(request.body)
+  let form = request.form()
   let id = form.get("id").unwrapOr("").trim()
   let url = form.get("url").unwrapOr("").trim()
   let notify = form.get("notify").unwrapOr("").trim()
   if id == "" || url == "" {
-    return answer(400, "a target is an `id` and a `url`\n")
+    return web.text(400, "a target is an `id` and a `url`\n")
   }
   if !named(id) {
-    return answer(400, "an id is letters, digits, `-` and `_`\n")
+    return web.text(400, "an id is letters, digits, `-` and `_`\n")
   }
   match addTarget(id, url, notify) {
     Ok(_) => {}
-    Err(error) => return answer(500, "{error.message}\n")
+    Err(error) => return web.text(500, "{error.message}\n")
   }
   // Answer now; find out whether it is up in a moment. The client asked
   // to watch something, not to wait for it.
@@ -314,15 +314,15 @@ fn addTargetFrom(request: web.Request) -> web.Response {
     Ok(_) => {}
     Err(error) => log.warn("cannot check {id} yet: {error.message}")
   }
-  answer(201, "watching {id}\n")
+  web.text(201, "watching {id}\n")
 }
 
 /// `POST /targets/remove?target=`.
 fn removeTargetFrom(request: web.Request) -> web.Response {
   let id = request.query.get("target").unwrapOr("")
   match removeTarget(id) {
-    Ok(_) => answer(200, "dropped {id}\n")
-    Err(error) => answer(500, "{error.message}\n")
+    Ok(_) => web.text(200, "dropped {id}\n")
+    Err(error) => web.text(500, "{error.message}\n")
   }
 }
 
@@ -352,7 +352,7 @@ fn day() -> Int {
 /// `GET /`: every target, what it is doing, and how much of the day it was
 /// up.
 fn dashboard(request: web.Request) -> web.Response {
-  let base = request.headers.get("x-forwarded-prefix").unwrapOr("")
+  let base = request.prefix()
   let found = match statuses(time.nowMillis() - day()) {
     Ok(found) => found
     Err(error) => return page(500, "the store", html"<p>{error.message}</p>")
@@ -406,7 +406,7 @@ fn row(base: String, status: Status) -> Html {
   } else {
     if status.ok { "{status.status} in {status.ms} ms" } else { status.why }
   }
-  let when = if status.at == 0 { "—" } else { text.isoTime(status.at) }
+  let when = if status.at == 0 { "—" } else { datetime.formatIso(status.at) }
   html"""
     <tr>
       <td>
@@ -435,7 +435,7 @@ fn uptime(status: Status) -> String {
 
 /// `GET /history?target=`.
 fn historyPage(request: web.Request) -> web.Response {
-  let base = request.headers.get("x-forwarded-prefix").unwrapOr("")
+  let base = request.prefix()
   let id = request.query.get("target").unwrapOr("")
   let checks = match history(id, 100) {
     Ok(checks) => checks
@@ -446,7 +446,7 @@ fn historyPage(request: web.Request) -> web.Response {
     let state = if check.ok { "up" } else { "down" }
     html"""
       <tr>
-        <td>{text.isoTime(check.at)}</td>
+        <td>{datetime.formatIso(check.at)}</td>
         <td><span class="state {state}">{state}</span></td>
         <td>{said}</td>
         <td>{check.ms} ms</td>
@@ -484,7 +484,7 @@ fn events() -> web.Response {
     ),
   ) {
     Ok(_) => {}
-    Err(error) => return answer(500, "{error.message}\n")
+    Err(error) => return web.text(500, "{error.message}\n")
   }
   var sent = 0
   var open = true
@@ -497,7 +497,7 @@ fn events() -> web.Response {
       timer.sleep(2000)
     }
   }
-  answer(200, "")
+  web.text(200, "")
 }
 
 /// `GET /live`: the same over a WebSocket, which also takes commands.
@@ -508,11 +508,11 @@ fn events() -> web.Response {
 fn live() -> web.Response {
   match socket.accept() {
     Ok(_) => {}
-    Err(error) => return answer(400, "{error.message}\n")
+    Err(error) => return web.text(400, "{error.message}\n")
   }
   match socket.send(summary()) {
     Ok(_) => {}
-    Err(_) => return answer(200, "")
+    Err(_) => return web.text(200, "")
   }
   var open = true
   while open {
@@ -537,7 +537,7 @@ fn live() -> web.Response {
       Err(_) => { open = false }
     }
   }
-  answer(200, "")
+  web.text(200, "")
 }
 
 /// Checks one target for the console, by name.
@@ -578,14 +578,6 @@ fn summary() -> String {
 
 // ----------------------------------------------------------------- answers
 
-fn answer(status: Int, body: String) -> web.Response {
-  web.Response(
-    status: status,
-    headers: Map.of(MapEntry(key: "content-type", value: "text/plain; charset=utf-8")),
-    body: body,
-  )
-}
-
 /// One page, around `content`. The stylesheet and the icon are files the
 /// host answers from `assets/` before this app runs.
 ///
@@ -607,13 +599,10 @@ fn page(status: Int, title: String, content: Html) -> web.Response {
     </body>
     </html>
     """
-  web.Response(
-    status: status,
-    headers: Map.of(
-      MapEntry(key: "content-type", value: "text/html; charset=utf-8"),
+  web.html(status, body).withHeaders(
+    Map.of(
       MapEntry(key: "content-security-policy", value: "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'"),
       MapEntry(key: "x-content-type-options", value: "nosniff"),
     ),
-    body: body.render(),
   )
 }

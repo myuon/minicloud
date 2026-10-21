@@ -1,4 +1,4 @@
-use web
+use std.web
 use kv
 use std.json
 use std.json.Json
@@ -8,7 +8,7 @@ use chart.Series
 use chart.Tick
 use fields
 use stats
-use text
+use std.url
 use std.html
 use std.html.Html
 
@@ -155,7 +155,7 @@ fn allCases() -> Array<CaseName> {
 
 /// The link to a case's trend.
 fn trendHref(at: String, case: String, input: String) -> String {
-  "{at}/cases/trend?case={text.urlEncode(case)}&input={text.urlEncode(input)}"
+  "{at}/cases/trend?case={url.percentEncode(case)}&input={url.percentEncode(input)}"
 }
 
 fn casesPage(at: String) -> Html {
@@ -335,13 +335,13 @@ fn tableOf(axes: Axes, series: Array<Series>, unit: String) -> Html {
 }
 
 fn trendPage(request: web.Request) -> web.Response {
-  let at = base(request)
+  let at = request.prefix()
   let case = request.query.get("case").unwrapOr("")
   let input = request.query.get("input").unwrapOr("")
   let only = request.query.get("metric").unwrapOr("")
   let points = pointsOf(case, input)
   if points.length() == 0 {
-    return textResponse(404, "no measurement of case `{case}` at `{input}`\n")
+    return web.text(404, "no measurement of case `{case}` at `{input}`\n").withHeaders(pageHeaders())
   }
   let axes = axesOf(points)
   var metrics = trendMetrics(points)
@@ -349,7 +349,7 @@ fn trendPage(request: web.Request) -> web.Response {
     metrics = metrics.filter(fn(name) { name == only })
   }
   if request.query.get("format").unwrapOr("") == "json" {
-    return jsonResponse(200, json.renderPretty(trendJson(at, points, axes, metrics)))
+    return renderedJson(200, json.renderPretty(trendJson(at, points, axes, metrics)))
   }
   var charts = Vector.of()
   for metric in metrics {
@@ -372,7 +372,7 @@ fn trendPage(request: web.Request) -> web.Response {
     jump.push(html"""<a href="#m-{metric}">{metric}</a>""")
   }
   let label = if input == "" { html"{case}" } else { html"{case} <span class=muted>{input}</span>" }
-  htmlResponse(
+  web.html(
     200,
     layout(
       at,
@@ -383,7 +383,7 @@ fn trendPage(request: web.Request) -> web.Response {
         {charts.freeze()}
         """,
     ),
-  )
+  ).withHeaders(pageHeaders())
 }
 
 fn trendJson(at: String, points: Array<Stored>, axes: Axes, metrics: Array<String>) -> Json {

@@ -1,4 +1,4 @@
-use web
+use std.web
 
 /// Counts the primes up to `?n=` (default 20000) by trial division, and
 /// answers the count and the largest.
@@ -10,15 +10,11 @@ use web
 export fn handle(request: web.Request) -> web.Response {
   let asked = Int.parse(request.query.get("n").unwrapOr("20000")).unwrapOr(-1)
   if asked < 2 || asked > 200000 {
-    return text(400, "?n= must be a whole number from 2 to 200000\n")
+    return web.text(400, "?n= must be a whole number from 2 to 200000\n")
   }
   let count = primesUpTo(asked)
   let largest = largestPrimeUpTo(asked)
-  text(200, "{count} primes up to {asked}, the largest {largest}\n")
-}
-
-fn text(status: Int, body: String) -> web.Response {
-  web.Response(status: status, headers: Map.of(), body: body)
+  web.text(200, "{count} primes up to {asked}, the largest {largest}\n")
 }
 
 /// How many primes there are from 2 to `n`.

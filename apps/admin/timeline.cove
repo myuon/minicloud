@@ -1,4 +1,5 @@
-use web
+use std.web
+use std.url
 use host
 use text
 use std.html
@@ -281,7 +282,7 @@ fn timelineLink(base: String, app: String, over: String) -> String {
   if app == "" {
     return "{base}/timeline?over={over}"
   }
-  "{base}/timeline?app={text.urlEncode(app)}&over={over}"
+  "{base}/timeline?app={url.percentEncode(app)}&over={over}"
 }
 
 /// The Timeline page of `app` (`""` for every app) over `window`, live or
@@ -294,7 +295,7 @@ fn windowLink(base: String, app: String, window: TlWindow) -> String {
   if app == "" {
     return "{base}/timeline?{range}"
   }
-  "{base}/timeline?app={text.urlEncode(app)}&{range}"
+  "{base}/timeline?app={url.percentEncode(app)}&{range}"
 }
 
 /// `window` moved by half its length, earlier (`toward` -1) or later (1):
@@ -379,9 +380,8 @@ fn lengthSaid(ms: Int) -> String {
 /// A time on the clock, JST: `10:14:03`, and `10:14:03.120` where the
 /// window it is read in is shorter than 10 seconds (`spanUs`).
 fn clockLabel(unixMs: Int, spanUs: Int) -> String {
-  let stamp = jstStamp(unixMs)
-  let end = if spanUs < 10000000 { 23 } else { 19 }
-  stamp.sliceBytes(11, end).unwrapOr(stamp)
+  let at = jstTime(unixMs)
+  if spanUs < 10000000 { at.toIsoTime() } else { toSecond(at) }
 }
 
 /// A time on the clock to the millisecond, JST: what a hover says.
@@ -396,8 +396,7 @@ fn windowSaid(window: TlWindow) -> String {
     return timelineSpan(window.over)
   }
   let spanUs = (window.untilMs - window.fromMs) * 1000
-  let stamp = jstStamp(window.fromMs)
-  let day = stamp.sliceBytes(0, 10).unwrapOr(stamp)
+  let day = jstTime(window.fromMs).toIsoDate()
   "{day} {clockLabel(window.fromMs, spanUs)} – {clockLabel(window.untilMs, spanUs)} JST ({lengthSaid(window.untilMs - window.fromMs)})"
 }
 
@@ -1326,16 +1325,16 @@ fn requestAnswer(base: String, id: String) -> web.Response {
   let back = html"""<p class=actions><a href="{base}/timeline">← the timeline</a></p>"""
   let number = match Int.parse(id) {
     Ok(number) => number
-    Err(_) => return htmlResponse(
+    Err(_) => return web.html(
       404,
       layout(base, "timeline", "request", html"<h1>Request</h1>{notRead(html"", "`{id}` is not a request's id", back)}"),
-    )
+    ).withHeaders(pageHeaders())
   }
   match host.request(number) {
-    Ok(request) => htmlResponse(200, requestPage(base, request))
-    Err(error) => htmlResponse(
+    Ok(request) => web.html(200, requestPage(base, request)).withHeaders(pageHeaders())
+    Err(error) => web.html(
       404,
       layout(base, "timeline", "request {number}", html"<h1>Request {number}</h1>{notRead(html"", error.message, back)}"),
-    )
+    ).withHeaders(pageHeaders())
   }
 }

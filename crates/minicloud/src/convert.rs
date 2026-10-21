@@ -1,4 +1,4 @@
-//! Between HTTP and the `web.Request` / `web.Response` values an app sees.
+//! Between HTTP and the `std.web.Request` / `std.web.Response` values an app sees.
 
 use bytes::Bytes;
 use cove_runtime::value::MapKey;
@@ -76,10 +76,10 @@ fn string_map(pairs: &[(String, String)]) -> Value {
     )
 }
 
-/// The `web.Request` an app's `handle` is invoked with.
+/// The `std.web.Request` an app's `handle` is invoked with.
 pub fn request_value(request: &AppRequest) -> Value {
     Value::structure(
-        "web.Request",
+        "std.web.Request",
         vec![
             ("method", Value::string(request.method.as_str())),
             ("path", Value::string(request.path.as_str())),
@@ -93,7 +93,7 @@ pub fn request_value(request: &AppRequest) -> Value {
 /// Why an app's answer is not a response the host will send.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BadResponse {
-    /// Not a `web.Response`, a status outside 100–599, or a header HTTP
+    /// Not a `std.web.Response`, a status outside 100–599, or a header HTTP
     /// cannot carry.
     Invalid(String),
     /// A body larger than the app's `max_response_bytes`.
@@ -202,13 +202,13 @@ pub(crate) const FRAMING: [&str; 5] = [
     "upgrade",
 ];
 
-/// A `web.Response` value as the reply to send.
+/// A `std.web.Response` value as the reply to send.
 pub fn response_of(value: &Value, max_bytes: usize) -> Result<Reply, BadResponse> {
     let invalid = |why: String| BadResponse::Invalid(why);
     let field = |name: &str| {
         value.field(name).ok_or_else(|| {
             invalid(format!(
-                "the handler answered {value}, not a `web.Response`"
+                "the handler answered {value}, not a `std.web.Response`"
             ))
         })
     };

@@ -1,6 +1,7 @@
 use host
 use text
-use web
+use std.web
+use std.url
 use std.html
 
 fn capabilities() -> Array<String> {
@@ -13,7 +14,7 @@ fn limitsForm() -> String {
 
 test fn readsAConfigureForm() -> Result<Unit, Error> {
   let read = settingsFrom(
-    text.parseForm("cap.kv=on&cap.log=on&allow=https%3A%2F%2Fa.example%0D%0A%0D%0A++http%3A%2F%2Fb.example%3A8080+&{limitsForm()}"),
+    url.parseForm("cap.kv=on&cap.log=on&allow=https%3A%2F%2Fa.example%0D%0A%0D%0A++http%3A%2F%2Fb.example%3A8080+&{limitsForm()}"),
     capabilities(),
   )
   assertEqual(read.problems.length(), 0)?
@@ -27,7 +28,7 @@ test fn readsAConfigureForm() -> Result<Unit, Error> {
 
 test fn namesEveryProblemOfAForm() -> Result<Unit, Error> {
   let read = settingsFrom(
-    text.parseForm("cap.teleport=on&allow=ftp%3A%2F%2Fx&maxHostCalls=-1&deadlineMs=soon&maxHeapWords=0&maxInFlight=0&maxQueued=0&maxRequestBytes=1&maxResponseBytes=1"),
+    url.parseForm("cap.teleport=on&allow=ftp%3A%2F%2Fx&maxHostCalls=-1&deadlineMs=soon&maxHeapWords=0&maxInFlight=0&maxQueued=0&maxRequestBytes=1&maxResponseBytes=1"),
     capabilities(),
   )
   let said = "\n".join(read.problems)
@@ -41,7 +42,7 @@ test fn namesEveryProblemOfAForm() -> Result<Unit, Error> {
 }
 
 test fn refusesTheRemovedFuelLimitByName() -> Result<Unit, Error> {
-  let read = settingsFrom(text.parseForm("fuel=1000&{limitsForm()}"), capabilities())
+  let read = settingsFrom(url.parseForm("fuel=1000&{limitsForm()}"), capabilities())
   assertEqual(read.problems.length(), 1)?
   assert(read.problems.get(0).unwrapOr("").contains("removed (Cove ADR 0091)"))?
   Ok(())
@@ -1194,19 +1195,19 @@ fn withHost(extra: Array<MapEntry<String, String>>) -> web.Request {
 
 test fn sameOriginTrustsSecFetchSiteAlone() -> Result<Unit, Error> {
   // A form posted from a `no-referrer` page: the browser says `Origin: null`.
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "same-origin"), MapEntry(key: "origin", value: "null")])), true)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "none")])), true)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "same-origin"), MapEntry(key: "origin", value: "null")]).sameOrigin(), true)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "none")]).sameOrigin(), true)?
   // A matching Origin does not rescue a cross-site request.
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "cross-site"), MapEntry(key: "origin", value: "http://app.example")])), false)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "same-site")])), false)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "cross-site"), MapEntry(key: "origin", value: "http://app.example")]).sameOrigin(), false)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "same-site")]).sameOrigin(), false)?
   Ok(())
 }
 
 test fn sameOriginFallsBackToOrigin() -> Result<Unit, Error> {
-  assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "null")])), false)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "http://app.example")])), true)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "http://evil.example")])), false)?
-  assertEqual(sameOrigin(withHost([])), true)?
+  assertEqual(withHost([MapEntry(key: "origin", value: "null")]).sameOrigin(), false)?
+  assertEqual(withHost([MapEntry(key: "origin", value: "http://app.example")]).sameOrigin(), true)?
+  assertEqual(withHost([MapEntry(key: "origin", value: "http://evil.example")]).sameOrigin(), false)?
+  assertEqual(withHost([]).sameOrigin(), true)?
   Ok(())
 }
 
@@ -1769,7 +1770,7 @@ test fn saysHowALoadRunSends() -> Result<Unit, Error> {
 }
 
 test fn readsTheLoadFormsFigures() -> Result<Unit, Error> {
-  let form = text.parseForm("rate=+20+&connections=x&seconds=")
+  let form = url.parseForm("rate=+20+&connections=x&seconds=")
   assertEqual(loadNumber(form, "rate").unwrapOr(-1), 20)?
   assert(loadNumber(form, "connections").isError())?
   assert(loadNumber(form, "missing").isError())?
@@ -1784,7 +1785,7 @@ test fn readsTheLoadFormsFigures() -> Result<Unit, Error> {
 /// Under `minicloud test` there is no host: nothing has run, and a start is
 /// refused with the form as it was posted.
 test fn theLoadPageWithNoHost() -> Result<Unit, Error> {
-  let page = loadPage("", host.loadStatus(), html"", Map.of()).render()
+  let page = loadPage("", host.loadStatus(), html"", url.parseForm("")).render()
   assert(!page.contains("class=reload"))?
   assert(page.contains("<h1>Load</h1>"))?
   assert(page.contains("<a href=\"/load\" aria-current=page>load</a>"))?
@@ -1796,25 +1797,25 @@ test fn theLoadPageWithNoHost() -> Result<Unit, Error> {
   assert(page.contains("<a href=\"/timeline?over=1m\">"))?
   assert(page.contains("<form method=post action=\"/load/start\">"))?
   assert(!page.contains("/load/stop"))?
-  let wrong = changeLoad("", "start", text.parseForm("mix=cpu&rate=fast&connections=2&seconds=5"))
+  let wrong = changeLoad("", "start", url.parseForm("mix=cpu&rate=fast&connections=2&seconds=5"))
   assertEqual(wrong.status, 422)?
   assert(wrong.body.contains("rate is a whole number, not “fast”"))?
   assert(wrong.body.contains("<option value=\"cpu\" selected>cpu</option>"))?
-  let refused = changeLoad("", "start", text.parseForm("mix=cpu&rate=0&connections=2&seconds=5"))
+  let refused = changeLoad("", "start", url.parseForm("mix=cpu&rate=0&connections=2&seconds=5"))
   assertEqual(refused.status, 422)?
   assert(refused.body.contains("there is no host to put load on"))?
-  let stop = changeLoad("", "stop", Map.of())
+  let stop = changeLoad("", "stop", url.parseForm(""))
   assertEqual(stop.status, 422)?
-  assertEqual(changeLoad("", "bogus", Map.of()).status, 404)?
+  assertEqual(changeLoad("", "bogus", url.parseForm("")).status, 404)?
   Ok(())
 }
 
 test fn showsTheRunGoingOnWithTheWayToStopIt() -> Result<Unit, Error> {
   let running = aLoadStatus(Some(aLoadRun(notDeployed: Vector.of("slow").freeze())), Some(aLoadRun(state: "finished")))
-  let page = loadPage("/admin", running, html"", Map.of()).render()
+  let page = loadPage("/admin", running, html"", url.parseForm("")).render()
   assert(page.contains("<meta http-equiv=refresh content=\"2; url=/admin/load\">"))?
   assert(page.contains("<a href=\"/admin/load?refresh=off\">pause</a>"))?
-  let still = loadPage("/admin", running, html"", Map.of(), true).render()
+  let still = loadPage("/admin", running, html"", url.parseForm(""), true).render()
   assert(!still.contains("http-equiv"))?
   assert(still.contains("paused · <a href=\"/admin/load\">resume</a>"))?
   assert(page.contains("<h2>Running</h2>"))?
@@ -1833,7 +1834,7 @@ test fn showsTheRunGoingOnWithTheWayToStopIt() -> Result<Unit, Error> {
 
 test fn showsTheLastRunWhenNoneIsGoingOn() -> Result<Unit, Error> {
   let done = aLoadStatus(None, Some(aLoadRun(state: "stopped", rate: 50, p50Us: None)))
-  let page = loadPage("", done, html"", Map.of()).render()
+  let page = loadPage("", done, html"", url.parseForm("")).render()
   assert(!page.contains("http-equiv"))?
   assert(page.contains("<h2>Last run</h2>"))?
   assert(page.contains("<span class=\"state stopped\">stopped</span> — took 2.3 s"))?

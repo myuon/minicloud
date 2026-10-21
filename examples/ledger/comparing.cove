@@ -1,4 +1,4 @@
-use web
+use std.web
 use std.json
 use std.json.Json
 use schema.Run
@@ -8,7 +8,7 @@ use compare.MetricRow
 use compare.Change
 use stats
 use stats.Spread
-use text
+use std.url
 use std.html
 use std.html.Html
 
@@ -49,7 +49,7 @@ fn largestCount() -> Int {
 }
 
 fn comparePage(request: web.Request) -> web.Response {
-  let at = base(request)
+  let at = request.prefix()
   let aSpec = request.query.get("a").unwrapOr("").trim()
   let bSpec = request.query.get("b").unwrapOr("").trim()
   let metric = request.query.get("metric").unwrapOr("").trim()
@@ -60,7 +60,7 @@ fn comparePage(request: web.Request) -> web.Response {
     if wantsJson {
       return problem(400, "a comparison needs `a` and `b`: run IDs, or `commit:<sha>`")
     }
-    return htmlResponse(200, compareLayout(at, summaries, aSpec, bSpec, metric, all, html"", sideNote(at, summaries, aSpec)))
+    return web.html(200, compareLayout(at, summaries, aSpec, bSpec, metric, all, html"", sideNote(at, summaries, aSpec))).withHeaders(pageHeaders())
   }
   let a = match resolveSide(aSpec) {
     Ok(side) => side
@@ -73,12 +73,12 @@ fn comparePage(request: web.Request) -> web.Response {
   let rows = compare.rows(compare.entries(a.runs), compare.entries(b.runs))
   let largest = compare.largest(filtered(rows, metric), largestCount())
   if wantsJson {
-    return jsonResponse(200, json.renderPretty(comparisonJson(a, b, rows, largest)))
+    return renderedJson(200, json.renderPretty(comparisonJson(a, b, rows, largest)))
   }
-  htmlResponse(
+  web.html(
     200,
     compareLayout(at, summaries, aSpec, bSpec, metric, all, comparison(at, a, b, rows, largest, metric, all), sideNote(at, summaries, aSpec)),
-  )
+  ).withHeaders(pageHeaders())
 }
 
 fn compareRefused(
@@ -93,11 +93,11 @@ fn compareRefused(
   if request.query.get("format").unwrapOr("") == "json" {
     return problem(404, why)
   }
-  let at = base(request)
-  htmlResponse(
+  let at = request.prefix()
+  web.html(
     404,
     compareLayout(at, summaries, aSpec, bSpec, metric, all, html"<p class=bad>{why}</p>", html""),
-  )
+  ).withHeaders(pageHeaders())
 }
 
 /// `rows` with only the metric `metric` (all of them for `""`).
@@ -202,7 +202,7 @@ fn sideNote(at: String, summaries: Array<Summary>, aSpec: String) -> Html {
       if summary.environment == a.environment && summary.conditions == a.conditions {
         let warn = html.only(summary.toolchain != a.toolchain, html""" <span class=muted title="another toolchain">(toolchain differs)</span>""")
         same.push(
-          html"""<li><a href="{at}/compare?a={text.urlEncode(a.id)}&amp;b={text.urlEncode(summary.id)}">{summary.id}</a> <code>{summary.commit}</code> {when(summary.measuredAt)}{warn}</li>""",
+          html"""<li><a href="{at}/compare?a={url.percentEncode(a.id)}&amp;b={url.percentEncode(summary.id)}">{summary.id}</a> <code>{summary.commit}</code> {when(summary.measuredAt)}{warn}</li>""",
         )
       } else {
         other += 1
@@ -314,7 +314,7 @@ fn comparison(
   } else if all {
     html" (shown, marked)"
   } else {
-    html""" (hidden: <a href="{at}/compare?a={text.urlEncode(a.spec)}&amp;b={text.urlEncode(b.spec)}&amp;metric={text.urlEncode(metric)}&amp;all=1">show them</a>)"""
+    html""" (hidden: <a href="{at}/compare?a={url.percentEncode(a.spec)}&amp;b={url.percentEncode(b.spec)}&amp;metric={url.percentEncode(metric)}&amp;all=1">show them</a>)"""
   }
   let counts = html"""
     <p><b>A</b> {sideLink(at, a)} · <b>B</b> {sideLink(at, b)}</p>

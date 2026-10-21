@@ -1,5 +1,4 @@
-use web
-use text
+use std.web
 use std.html
 use std.html.Html
 
@@ -16,9 +15,8 @@ use std.html.Html
 /// The response headers every page carries: the page's own script and
 /// stylesheet — files from `assets/`, so nothing inline — and nothing else,
 /// no framing, no sniffing, no referrer.
-fn pageHeaders(contentType: String) -> Map<String, String> {
+fn pageHeaders() -> Map<String, String> {
   Map.of(
-    MapEntry(key: "content-type", value: contentType),
     MapEntry(
       key: "content-security-policy",
       value: "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -30,22 +28,12 @@ fn pageHeaders(contentType: String) -> Map<String, String> {
   )
 }
 
-/// A page as the answer: the one place a page stops being `Html` and becomes
-/// the text of a body.
-fn htmlResponse(status: Int, page: Html) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: page.render())
-}
-
-fn textResponse(status: Int, body: String) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("text/plain; charset=utf-8"), body: body)
-}
-
 /// A request's fields: the query, with a form body's fields laid over it.
 fn fieldsOf(request: web.Request) -> Map<String, String> {
   var fields = request.query
   if request.method == "POST" {
-    for entry in text.parseForm(request.body) {
-      fields = fields.inserted(entry.key, entry.value)
+    for pair in request.form().pairs {
+      fields = fields.inserted(pair.name, pair.value)
     }
   }
   fields
