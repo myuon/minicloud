@@ -1,7 +1,7 @@
 //! `minicloud check` and `minicloud test`: the toolchain an app's author
 //! runs, with the host's schemas and the host's modules.
 //!
-//! `cove check` cannot see `web`, `log` or `timer`: they are this crate's,
+//! `cove check` cannot see `log`, `timer` or `kv`: they are this crate's,
 //! and cove#151 was closed by decision — the embedder ships its own checker.
 //! `check` runs the compile, the admission and the lowering `serve` runs at
 //! load ([`apps::compile`], [`apps::admit`], [`apps::lower`]), so it cannot
