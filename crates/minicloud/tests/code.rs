@@ -191,7 +191,7 @@ fn the_listing_is_the_app_toml_the_cove_files_and_the_assets() {
     for name in [
         "algo.cove",
         "pages.cove",
-        "text/text.cove",
+        "rng/rng.cove",
         "sat/sat_test.cove",
     ] {
         assert!(
@@ -450,8 +450,8 @@ fn the_listing_is_a_tree_the_host_computed_the_depth_of() {
         "0 sat/",
         "1 sat.cove",
         "1 sat_test.cove",
-        "0 text/",
-        "1 text.cove",
+        "0 rng/",
+        "1 rng.cove",
     ] {
         assert!(algo.contains(&row.to_string()), "{row} in {algo:?}");
     }
@@ -731,7 +731,7 @@ fn the_page_shows_what_the_version_it_is_running_is_made_of() {
         "{}",
         text.body
     );
-    assert!(text.body.contains("urlEncode"), "{}", text.body);
+    assert!(text.body.contains("truncateBytes"), "{}", text.body);
 
     // An asset that is not text: where the host answers it, not a page
     // pretending to render it. `notes` is reached by path, so the path
