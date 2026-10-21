@@ -297,7 +297,7 @@ fn the_operations_page_escapes_what_apps_say() {
     let dir = apps.root.join("versioned");
     std::fs::write(
         dir.join("versioned.cove"),
-        "use web\nuse log\n\n/// Logs markup, then spins past its deadline.\nexport fn handle(request: web.Request) -> web.Response {\n  \
+        "use std.web\nuse log\n\n/// Logs markup, then spins past its deadline.\nexport fn handle(request: web.Request) -> web.Response {\n  \
          log.info(\"<script>alert(1)</script>\")\n  var turns = 0\n  while turns >= 0 {\n    \
          turns += 1\n  }\n  web.Response(status: 200, headers: Map.of(), body: \"{turns}\")\n}\n",
     )

@@ -1,6 +1,6 @@
 use host
 use text
-use web
+use std.web
 use std.html
 
 fn capabilities() -> Array<String> {

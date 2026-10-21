@@ -1,4 +1,4 @@
-use web
+use std.web
 use work
 
 /// Doubles a number through `work`, which spawns a task to do it.

@@ -1,4 +1,4 @@
-use web
+use std.web
 
 /// The playground generator's shape (`examples/algo/matching`, before its
 /// workaround): draw cells, copy them into a vector, merge-sort and
