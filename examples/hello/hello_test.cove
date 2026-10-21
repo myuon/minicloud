@@ -1,4 +1,4 @@
-use web
+use std.web
 
 /// A `GET` of `path` with the query `pairs` and no body.
 fn get(path: String, pairs: Map<String, String>) -> web.Request {

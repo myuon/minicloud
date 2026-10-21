@@ -1,4 +1,4 @@
-use web
+use std.web
 
 fn req(headers: Map<String, String>) -> web.Request {
   web.Request(method: "POST", path: "/", query: Map.of(), headers: headers, body: "")
@@ -14,18 +14,18 @@ fn withHost(extra: Array<MapEntry<String, String>>) -> web.Request {
 
 test fn sameOriginTrustsSecFetchSiteAlone() -> Result<Unit, Error> {
   // A form posted from a `no-referrer` page: the browser says `Origin: null`.
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "same-origin"), MapEntry(key: "origin", value: "null")])), true)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "none")])), true)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "same-origin"), MapEntry(key: "origin", value: "null")]).sameOrigin(), true)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "none")]).sameOrigin(), true)?
   // A matching Origin does not rescue a cross-site request.
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "cross-site"), MapEntry(key: "origin", value: "http://app.example")])), false)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "sec-fetch-site", value: "same-site")])), false)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "cross-site"), MapEntry(key: "origin", value: "http://app.example")]).sameOrigin(), false)?
+  assertEqual(withHost([MapEntry(key: "sec-fetch-site", value: "same-site")]).sameOrigin(), false)?
   Ok(())
 }
 
 test fn sameOriginFallsBackToOrigin() -> Result<Unit, Error> {
-  assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "null")])), false)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "http://app.example")])), true)?
-  assertEqual(sameOrigin(withHost([MapEntry(key: "origin", value: "http://evil.example")])), false)?
-  assertEqual(sameOrigin(withHost([])), true)?
+  assertEqual(withHost([MapEntry(key: "origin", value: "null")]).sameOrigin(), false)?
+  assertEqual(withHost([MapEntry(key: "origin", value: "http://app.example")]).sameOrigin(), true)?
+  assertEqual(withHost([MapEntry(key: "origin", value: "http://evil.example")]).sameOrigin(), false)?
+  assertEqual(withHost([]).sameOrigin(), true)?
   Ok(())
 }

@@ -1,5 +1,7 @@
-use web
+use std.web
 use std.json
+use std.json.Json
+use std.datetime
 use text
 use std.html
 use std.html.Html
@@ -14,9 +16,8 @@ use std.html.Html
 /// The response headers every admin page carries: no script and no style but
 /// the page's own files — `assets/app.js` and `assets/style.css`, nothing
 /// inline — no framing, no sniffing, no caching, no referrer to another site.
-fn pageHeaders(contentType: String) -> Map<String, String> {
+fn pageHeaders() -> Map<String, String> {
   Map.of(
-    MapEntry(key: "content-type", value: contentType),
     MapEntry(
       key: "content-security-policy",
       value: "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -28,32 +29,9 @@ fn pageHeaders(contentType: String) -> Map<String, String> {
   )
 }
 
-/// An HTML page. This is the one place a page stops being `Html` and becomes
-/// the text of a body.
-fn htmlResponse(status: Int, page: Html) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("text/html; charset=utf-8"), body: page.render())
-}
-
-/// A JSON document.
-fn jsonResponse(status: Int, body: String) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("application/json"), body: "{body}\n")
-}
-
-/// Plain text, which a browser shows as text whatever it holds.
-fn textResponse(status: Int, body: String) -> web.Response {
-  web.Response(status: status, headers: pageHeaders("text/plain; charset=utf-8"), body: body)
-}
-
-/// A `303 See Other` to `location`.
-fn redirect(location: String) -> web.Response {
-  web.Response(
-    status: 303,
-    headers: Map.of(
-      MapEntry(key: "location", value: location),
-      MapEntry(key: "cache-control", value: "no-store"),
-    ),
-    body: "",
-  )
+/// A JSON document already rendered (pretty), with the page headers.
+fn prettyJson(status: Int, value: Json) -> web.Response {
+  web.text(status, "{json.renderPretty(value)}\n").withHeaders(pageHeaders()).withHeader("content-type", "application/json")
 }
 
 /// The page around `content`. Its stylesheet and its script are files in
@@ -94,7 +72,7 @@ fn endpointsPage(base: String, origin: String, endpoints: Array<Endpoint>) -> Ht
   for endpoint in endpoints {
     let newest = listEvents(endpoint.id, "", 1)
     let last = match newest.get(0) {
-      Some(event) => text.isoTime(event.received)
+      Some(event) => datetime.formatIso(event.received)
       None => "–"
     }
     rows.push(
@@ -150,7 +128,7 @@ fn endpointPage(
     rows.push(
       html"""
         <tr>
-          <td><a href="{at}/events/{event.id}">{text.isoTime(event.received)}</a></td>
+          <td><a href="{at}/events/{event.id}">{datetime.formatIso(event.received)}</a></td>
           <td>{event.method}</td>
           <td><code>{event.path}</code></td>
           <td>{event.contentType}</td>
@@ -177,7 +155,7 @@ fn endpointPage(
   let settings = html"""
     <p>Receive URL: <code id=url>{url}</code> <button data-copy=url>Copy</button></p>
     <p class=muted>Keeps the last {endpoint.retention} requests · stores at most {text.bytes(endpoint.maxBody)} of a body ·
-    {if endpoint.mask { "masks secret headers" } else { "stores every header as sent" }} · created {text.isoTime(endpoint.created)}</p>
+    {if endpoint.mask { "masks secret headers" } else { "stores every header as sent" }} · created {datetime.formatIso(endpoint.created)}</p>
     """
   let actions = html"""
     <p>
@@ -219,7 +197,7 @@ fn eventPage(base: String, endpoint: Endpoint, event: Event, attempts: Array<Att
   )
   let summary = html"""
     <table>
-      <tr><th>received</th><td>{text.isoTime(event.received)}</td></tr>
+      <tr><th>received</th><td>{datetime.formatIso(event.received)}</td></tr>
       <tr><th>method</th><td>{event.method}</td></tr>
       <tr><th>path</th><td><code>{event.path}</code></td></tr>
       <tr><th>body</th><td>{size}</td></tr>
@@ -368,7 +346,7 @@ fn resends(at: String, event: Event, attempts: Array<Attempt>) -> Html {
     rows.push(
       html"""
         <tr>
-          <td>{text.isoTime(attempt.at)}</td>
+          <td>{datetime.formatIso(attempt.at)}</td>
           <td><code>{attempt.url}</code></td>
           <td>{result}</td>
           <td>{attempt.millis} ms</td>

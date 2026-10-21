@@ -279,7 +279,7 @@ export fn build(left: Array<String>, right: Array<String>, froms: Array<Int>, to
   let n = left.length()
   let m = right.length()
   // Counting sort by left end, keeping the given order within each list.
-  var counts = filled(n + 1, 0)
+  var counts = Vector.filled(n + 1, 0)
   for from in froms {
     counts.set(from + 1, counts.get(from + 1).unwrapOr(0) + 1)
   }
@@ -289,7 +289,7 @@ export fn build(left: Array<String>, right: Array<String>, froms: Array<Int>, to
     u += 1
   }
   var next = counts.snapshot()
-  var placed = filled(froms.length(), 0)
+  var placed = Vector.filled(froms.length(), 0)
   var at = 0
   while at < froms.length() {
     let from = froms.get(at).unwrapOr(0)
@@ -299,7 +299,7 @@ export fn build(left: Array<String>, right: Array<String>, froms: Array<Int>, to
     at += 1
   }
   // Repeated edges out: a right vertex seen in this list already.
-  var seen = filled(m, -1)
+  var seen = Vector.filled(m, -1)
   var start = Vector.of(0)
   var adjacent = Vector.of()
   u = 0
@@ -388,17 +388,6 @@ fn distinctSorted(values: Array<Int>) -> Array<Int> {
   out.freeze()
 }
 
-/// `count` copies of `value`.
-fn filled(count: Int, value: Int) -> Vector<Int> {
-  var out = Vector.of()
-  var at = 0
-  while at < count {
-    out.push(value)
-    at += 1
-  }
-  out
-}
-
 // ------------------------------------------------------------- algorithms
 
 /// A maximum matching, by Hopcroft and Karp.
@@ -408,13 +397,13 @@ export fn hopcroftKarp(graph: Graph) -> Matching {
   let start = graph.start
   let adjacent = graph.adjacent
   let unreached = n + m + 1
-  var partnerOfLeft = filled(n, -1)
-  var partnerOfRight = filled(m, -1)
-  var layer = filled(n, 0)
-  var queue = filled(n, 0)
-  var cursor = filled(n, 0)
-  var stack = filled(n, 0)
-  var via = filled(n, 0)
+  var partnerOfLeft = Vector.filled(n, -1)
+  var partnerOfRight = Vector.filled(m, -1)
+  var layer = Vector.filled(n, 0)
+  var queue = Vector.filled(n, 0)
+  var cursor = Vector.filled(n, 0)
+  var stack = Vector.filled(n, 0)
+  var via = Vector.filled(n, 0)
   var size = 0
   var scans = 0
   var rounds = 0
@@ -532,13 +521,13 @@ export fn augmenting(graph: Graph) -> Matching {
   let m = graph.right.length()
   let start = graph.start
   let adjacent = graph.adjacent
-  var partnerOfLeft = filled(n, -1)
-  var partnerOfRight = filled(m, -1)
+  var partnerOfLeft = Vector.filled(n, -1)
+  var partnerOfRight = Vector.filled(m, -1)
   // `visited[v] == root` marks `v` as seen by the search from `root`.
-  var visited = filled(m, -1)
-  var cursor = filled(n, 0)
-  var stack = filled(n, 0)
-  var via = filled(n, 0)
+  var visited = Vector.filled(m, -1)
+  var cursor = Vector.filled(n, 0)
+  var stack = Vector.filled(n, 0)
+  var via = Vector.filled(n, 0)
   var size = 0
   var scans = 0
   var rounds = 0
@@ -637,8 +626,8 @@ export fn certify(graph: Graph, matching: Matching) -> Certificate {
     problems.push("the matching says {matching.size} pairs and holds {pairs}")
   }
   // Alternating reach from the free left vertices.
-  var reachedLeft = filled(n, 0)
-  var reachedRight = filled(m, 0)
+  var reachedLeft = Vector.filled(n, 0)
+  var reachedRight = Vector.filled(m, 0)
   var queue = Vector.of()
   u = 0
   while u < n {

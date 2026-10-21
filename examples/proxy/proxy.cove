@@ -1,4 +1,4 @@
-use web
+use std.web
 use fetch
 use log
 
@@ -10,7 +10,7 @@ use log
 export fn handle(request: web.Request) -> web.Response {
   let url = request.query.get("url").unwrapOr("")
   if url == "" {
-    return web.Response(status: 400, headers: Map.of(), body: "?url= is required\n")
+    return web.text(400, "?url= is required\n")
   }
   var forwarded: Map<String, String> = Map.of()
   for name in request.headers.keys() {
@@ -28,6 +28,6 @@ export fn handle(request: web.Request) -> web.Response {
         body: answer.body,
       )
     }
-    Err(error) => web.Response(status: 502, headers: Map.of(), body: "{error.message}\n")
+    Err(error) => web.text(502, "{error.message}\n")
   }
 }

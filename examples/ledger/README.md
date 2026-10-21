@@ -309,7 +309,7 @@ the host answers at `/ledger/style.css` before the app runs).
 | `stats/` | medians and spreads; numbers written for people |
 | `compare/` | matching two sides' measurements, the comparability verdict, differences, the largest ones |
 | `chart/` | the trend chart as SVG: scale, ticks, series, gaps, whiskers, legend |
-| `fields/`, `text/` | reading a named field of a stored object with a fallback, over `std.json`'s accessors; the webhook lab's text helpers less HTML escaping, plus reading ISO 8601 times |
+| `fields/`, `text/` | reading a named field of a stored object with a fallback, over `std.json`'s accessors; zero-padding, byte counts and store-key escaping, which std does not have (forms, percent-encoding and ISO 8601 times are `std.url` and `std.datetime`) |
 | `importer/ledger_import.py` | converts the existing results, and posts runs |
 | `samples/` | the converted runs |
 

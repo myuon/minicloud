@@ -1,4 +1,4 @@
-use web
+use std.web
 
 /// Greets whoever `?name=` names, and reaches nothing outside the run.
 ///
@@ -10,23 +10,14 @@ export fn handle(request: web.Request) -> web.Response {
     return spin()
   }
   if request.path == "/echo" {
-    return text(200, request.body)
+    return web.text(200, request.body)
   }
   if request.path == "/big" {
     let bytes = Int.parse(request.query.get("bytes").unwrapOr("1024")).unwrapOr(0)
-    return text(200, filler(bytes))
+    return web.text(200, filler(bytes))
   }
   let name = request.query.get("name").unwrapOr("world")
-  text(200, "Hello, {name}! ({request.method} {request.path})\n")
-}
-
-/// A plain-text response.
-fn text(status: Int, body: String) -> web.Response {
-  web.Response(
-    status: status,
-    headers: Map.of(MapEntry(key: "content-type", value: "text/plain; charset=utf-8")),
-    body: body,
-  )
+  web.text(200, "Hello, {name}! ({request.method} {request.path})\n")
 }
 
 /// `bytes` bytes of `x`.
@@ -46,5 +37,5 @@ fn spin() -> web.Response {
   while turns >= 0 {
     turns += 1
   }
-  text(200, "{turns}\n")
+  web.text(200, "{turns}\n")
 }

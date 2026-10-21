@@ -10,7 +10,10 @@ use rng
 //   on one problem differ only by their parameters and their seed, and
 //   records the tour length — current and best — at evenly spaced
 //   iterations, for the chart.
-// - `exp` is here because the standard library has none.
+// - `exp`, `ln`, `sine` and `cosine` are the app's own series, kept on purpose:
+//   the standard library's `Float.exp/ln/sin/cos` are more accurate but not
+//   bit-identical (they differ in the last digit for most arguments), and a
+//   run's accepted moves, and so its pictures, depend on those bits.
 
 /// A problem: `n` points, `xs[i]`, `ys[i]` in [0, 1).
 export struct Problem {

@@ -3,7 +3,7 @@ use timer
 use std.json
 use std.json.Json
 use fields
-use text
+use std.url
 
 // What an endpoint answers the sender: a status, headers and a body of the
 // admin's choosing, after a delay, failing every `errorEvery`-th request.
@@ -115,7 +115,7 @@ fn delay(reply: Reply) {
 }
 
 /// A settings form as a reply, or what is wrong with it.
-fn replyFromForm(form: Map<String, String>) -> Result<Reply, Error> {
+fn replyFromForm(form: url.Form) -> Result<Reply, Error> {
   var problems = Vector.of()
   let status = whole(form, "status", 200, 100, 599, "status", var problems)
   let delayMs = whole(form, "delayMs", 0, 0, maxDelayMs(), "delay", var problems)
@@ -141,7 +141,7 @@ fn replyFromForm(form: Map<String, String>) -> Result<Reply, Error> {
 /// The form field `name` as a whole number from `least` to `most`, or
 /// `fallback` when it is empty; a problem noted otherwise.
 fn whole(
-  form: Map<String, String>,
+  form: url.Form,
   name: String,
   fallback: Int,
   least: Int,

@@ -1,4 +1,4 @@
-use web
+use std.web
 use kv
 use log
 
@@ -19,20 +19,20 @@ export fn handle(request: web.Request) -> web.Response {
     return match kv.put("note:{name}", request.body) {
       Ok(_) => {
         log.info("stored {name} ({request.body.byteLength()} bytes)")
-        text(201, "stored {name}\n")
+        web.text(201, "stored {name}\n")
       }
-      Err(error) => text(413, "{error.message}\n")
+      Err(error) => web.text(413, "{error.message}\n")
     }
   }
   if request.method == "DELETE" {
     if kv.delete("note:{name}") {
-      return text(200, "deleted {name}\n")
+      return web.text(200, "deleted {name}\n")
     }
-    return text(404, "no note named {name}\n")
+    return web.text(404, "no note named {name}\n")
   }
   match kv.get("note:{name}") {
-    Some(body) => text(200, body)
-    None => text(404, "no note named {name}\n")
+    Some(body) => web.text(200, body)
+    None => web.text(404, "no note named {name}\n")
   }
 }
 
@@ -43,7 +43,7 @@ fn list(request: web.Request) -> web.Response {
   let from = if after == "" { "" } else { "note:{after}" }
   let limit = Int.parse(request.query.get("limit").unwrapOr("20")).unwrapOr(20)
   if limit < 1 || limit > 1000 {
-    return text(400, "?limit= must be 1 to 1000\n")
+    return web.text(400, "?limit= must be 1 to 1000\n")
   }
   let entries = if request.query.get("order").unwrapOr("") == "desc" {
     kv.listDesc(prefix, from, limit)
@@ -54,9 +54,5 @@ fn list(request: web.Request) -> web.Response {
   for entry in entries {
     lines.push("{entry.key.slice(5, entry.key.length())}\n")
   }
-  text(200, "".join(lines.freeze()))
-}
-
-fn text(status: Int, body: String) -> web.Response {
-  web.Response(status: status, headers: Map.of(), body: body)
+  web.text(200, "".join(lines.freeze()))
 }

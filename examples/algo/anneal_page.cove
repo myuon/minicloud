@@ -1,4 +1,4 @@
-use web
+use std.web
 use anneal
 use anneal.Problem
 use anneal.Settings
@@ -114,12 +114,12 @@ fn annealPage(base: String, given: Map<String, String>, post: Bool) -> web.Respo
   if post || part {
     let result = annealResult(fields)
     if part {
-      return htmlResponse(200, result)
+      return web.html(200, result).withHeaders(pageHeaders())
     }
-    return htmlResponse(200, page(base, "anneal", title, annealForm(base, fields), resultSection(result)))
+    return web.html(200, page(base, "anneal", title, annealForm(base, fields), resultSection(result))).withHeaders(pageHeaders())
   }
   let result = if chosen { pendingSection() } else { resultSection(html"<p class=muted>Pick an example, or set two runs and compare them.</p>") }
-  htmlResponse(200, page(base, "anneal", title, annealForm(base, fields), result))
+  web.html(200, page(base, "anneal", title, annealForm(base, fields), result)).withHeaders(pageHeaders())
 }
 
 fn value(fields: Map<String, String>, key: String) -> String {

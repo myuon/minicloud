@@ -1,7 +1,7 @@
 use std.json
 use std.json.Json
 use fields
-use text
+use std.datetime
 use units
 
 // A posted run, read and checked. `validate` takes the body of a `POST
@@ -120,14 +120,14 @@ export fn validate(body: String) -> Result<Run, Array<Problem>> {
   let measuredText = requiredText(fields, "measuredAt", "", 40, var problems)
   var measuredAt = 0
   if measuredText != "" {
-    match text.parseIso(measuredText) {
-      Some(millis) => {
+    match datetime.parseIso(measuredText) {
+      Ok(millis) => {
         if millis < 0 {
           problems.push(Problem(path: "measuredAt", message: "a time before 1970 is not a measurement this ledger holds"))
         }
         measuredAt = millis
       }
-      None => problems.push(
+      Err(_) => problems.push(
         Problem(
           path: "measuredAt",
           message: "`{measuredText}` is not an ISO 8601 time with a zone, like `2026-10-05T03:13:54Z` or `2026-10-05T12:13:54+09:00`",
@@ -531,7 +531,7 @@ export fn runJson(run: Run) -> Json {
       MapEntry(key: "id", value: Json.Text(run.id)),
       MapEntry(key: "repository", value: Json.Text(run.repository)),
       MapEntry(key: "commit", value: Json.Text(run.commit)),
-      MapEntry(key: "measuredAt", value: Json.Text(text.isoTime(run.measuredAt))),
+      MapEntry(key: "measuredAt", value: Json.Text(datetime.formatIso(run.measuredAt))),
       MapEntry(key: "measuredAtMs", value: Json.Number(run.measuredAt.toFloat())),
       MapEntry(key: "source", value: Json.Text(run.source)),
       MapEntry(key: "note", value: Json.Text(run.note)),
@@ -682,7 +682,7 @@ export fn difference(stored: Run, posted: Run) -> String {
     return "`commit` is `{stored.commit}`, not `{posted.commit}`"
   }
   if stored.measuredAt != posted.measuredAt {
-    return "`measuredAt` is {text.isoTime(stored.measuredAt)}, not {text.isoTime(posted.measuredAt)}"
+    return "`measuredAt` is {datetime.formatIso(stored.measuredAt)}, not {datetime.formatIso(posted.measuredAt)}"
   }
   if stored.environment != posted.environment {
     return "`environment` differs"

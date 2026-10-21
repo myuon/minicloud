@@ -4,6 +4,7 @@ use time
 use std.json
 use std.json.Json
 use fields
+use std.datetime
 use text
 
 // Resending a stored request to another URL — one the app's `[fetch] allow`
@@ -167,7 +168,7 @@ fn attemptJson(attempt: Attempt) -> Json {
     Map.of(
       entry("id", Json.Text(attempt.id)),
       entry("at", number(attempt.at)),
-      entry("atIso", Json.Text(text.isoTime(attempt.at))),
+      entry("atIso", Json.Text(datetime.formatIso(attempt.at))),
       entry("url", Json.Text(attempt.url)),
       entry("method", Json.Text(attempt.method)),
       entry("ok", Json.Bool(attempt.ok)),
