@@ -34,7 +34,7 @@ fn pageHeaders() -> Map<String, String> {
 /// JSON the app already wrote — `json.renderPretty(…)`, or a run as it was
 /// stored — as the answer, with a newline after it as `web.json` writes one.
 fn renderedJson(status: Int, body: String) -> web.Response {
-  web.text(status, "{body}\n").withHeaders(pageHeaders()).withHeader("content-type", "application/json")
+  web.respond(status, "application/json", "{body}\n").withHeaders(pageHeaders())
 }
 
 /// The page around `content`. Its stylesheet is `assets/style.css`, which the

@@ -51,7 +51,7 @@ struct Summary {
 }
 
 fn time16(millis: Int) -> String {
-  text.padded(millis, 16)
+  millis.toDecimal(16)
 }
 
 fn caseKey(case: String, input: String) -> String {

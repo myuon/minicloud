@@ -1,16 +1,7 @@
 // Pure text helpers the ledger needs and the standard library does not have.
 // Form decoding, percent-encoding and ISO 8601 times are `std.url` and
-// `std.datetime`; what is left is a zero-padded number, a byte count, a cut at
+// `std.datetime`; what is left is a byte count, a cut at
 // a byte limit, and the escaping of one part of a store key.
-
-/// `value` written in decimal with at least `width` digits, zero-padded.
-export fn padded(value: Int, width: Int) -> String {
-  var text = "{value}"
-  while text.length() < width {
-    text = "0{text}"
-  }
-  text
-}
 
 /// A byte count as people read one: `512 B`, `1.5 KiB`, `2.0 MiB`.
 export fn bytes(count: Int) -> String {

@@ -2701,7 +2701,7 @@ fn jstClock(millis: Int) -> String {
 /// The date in JST, without the year: `10-20`.
 fn jstDate(millis: Int) -> String {
   let at = jstTime(millis)
-  "{text.padded(at.month, 2)}-{text.padded(at.day, 2)}"
+  "{at.month.toDecimal(2)}-{at.day.toDecimal(2)}"
 }
 
 /// The spacing of the time axis for a span of `span` seconds with at most
@@ -3270,7 +3270,7 @@ fn cpuPercent(usec: Int, spanSecs: Int, millicores: Int) -> Int {
 /// CPUs.
 fn thousandths(milli: Int) -> String {
   let hundredths = (milli + 5) / 10
-  "{hundredths / 100}.{text.padded(hundredths % 100, 2)}"
+  "{hundredths / 100}.{(hundredths % 100).toDecimal(2)}"
 }
 
 /// One figure of the band.
