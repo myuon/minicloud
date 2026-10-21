@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use cove_diag::{render, Diagnostic, Severity, SourceMap};
 use cove_ir::Inst;
 use cove_runtime::{HostRegistry, OwnedVm, PreparedProgram, Runtime};
-use cove_sema::package::{self, Module, Package, Unit};
+use cove_sema::package::{self, Package};
 use cove_sema::resolve::{FnEntry, Program};
 use cove_sema::{Compiler, HostSchemas};
 
@@ -847,13 +847,16 @@ fn note_fallback(why: &str) {
 
 /// The app's modules and the standard library, as a package of their own.
 ///
-/// The `.cove` files directly in the app's directory are the module named
-/// after the app, loaded with the standard library by Cove's own
-/// [`package::load_module`]; each subdirectory holding `.cove` files is a
-/// module named after the subdirectory, which the app's files may `use`.
-/// Nothing outside the directory is read, and every file is named relative to
-/// the app's parent directory, so that an error points at
-/// `hello/hello.cove:3`.
+/// Read once, by Cove's own [`package::load_module`]: the `.cove` files
+/// directly in the app's directory are the module named after the app, and
+/// its walk makes each directory below holding `.cove` files a module named
+/// by its path below the apps directory, `admin/text` as `admin.text`. A
+/// directory directly in the app's is then renamed after itself, `text`,
+/// which is what the app's files `use`; one nested deeper keeps the walk's
+/// name (`admin.text.sub`), as it did when the subdirectories were read a
+/// second time here. Nothing outside the directory is read, and every file
+/// is named relative to the app's parent directory, so that an error points
+/// at `hello/hello.cove:3`.
 pub fn load_package(dir: &Path, name: &str) -> Result<(SourceMap, Package), String> {
     let mut sources = SourceMap::new();
     if dir.file_name().and_then(|n| n.to_str()) != Some(name) {
@@ -866,40 +869,33 @@ pub fn load_package(dir: &Path, name: &str) -> Result<(SourceMap, Package), Stri
     let mut package = package::load_module(root, name, &mut sources)
         .map_err(|items| unloaded(&sources, &items))?;
     package.root = dir.to_path_buf();
-    let mut subdirs = Vec::new();
-    for entry in
-        std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?
-    {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.is_dir() {
-            subdirs.push(path);
-        }
-    }
-    subdirs.sort();
-    for module_dir in subdirs {
-        let Some(module) = module_dir.file_name().and_then(|n| n.to_str()) else {
+    // The walk named `<app>/text` `<app>.text`; the app's files `use text`.
+    // Only a first-level directory is renamed: one nested deeper keeps the
+    // walk's name, as it always has.
+    let prefix = format!("{name}.");
+    let first_level: Vec<String> = package
+        .modules
+        .keys()
+        .filter(|key| {
+            key.strip_prefix(&prefix)
+                .is_some_and(|rest| !rest.contains('.'))
+        })
+        .cloned()
+        .collect();
+    for key in first_level {
+        let Some(mut module) = package.modules.remove(&key) else {
             continue;
         };
-        let module = module.to_string();
-        let units = read_units(&module_dir, root, &mut sources)?;
-        if units.is_empty() {
-            continue;
-        }
-        if package.modules.contains_key(&module) {
+        let short = key[prefix.len()..].to_string();
+        if package.modules.contains_key(&short) {
             return Err(format!(
-                "`{}` is a module named `{module}`, which is already the app's or the \
+                "`{}` is a module named `{short}`, which is already the app's or the \
                  standard library's",
-                module_dir.display()
+                module.dir.display()
             ));
         }
-        package.modules.insert(
-            module.clone(),
-            Module {
-                name: module,
-                dir: module_dir,
-                units,
-            },
-        );
+        module.name = short.clone();
+        package.modules.insert(short, module);
     }
     Ok((sources, package))
 }
@@ -916,28 +912,6 @@ fn unloaded(sources: &SourceMap, items: &[Diagnostic]) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     }
-}
-
-/// The `.cove` files directly in `dir`, parsed, named relative to `root`.
-fn read_units(dir: &Path, root: &Path, sources: &mut SourceMap) -> Result<Vec<Unit>, String> {
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("cove"))
-        .collect();
-    paths.sort();
-    let mut units = Vec::new();
-    for path in paths {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-        let shown = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        let file = sources.add(shown, &text);
-        let ast = cove_syntax::parse_file(sources, file)
-            .map_err(|items| format!("does not parse:\n{}", report(sources, &items)))?;
-        units.push(Unit { file, path, ast });
-    }
-    Ok(units)
 }
 
 /// Diagnostics, rendered the way `cove check` renders them.
@@ -994,5 +968,157 @@ mod tests {
             panic!("a directory that is not there loads");
         };
         assert!(missing.contains("cannot read"), "{missing}");
+    }
+
+    /// Every `.cove` file below `dir`, however deep.
+    fn cove_files(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .map(|path| {
+                if path.is_dir() {
+                    cove_files(&path)
+                } else {
+                    usize::from(path.extension().and_then(|e| e.to_str()) == Some("cove"))
+                }
+            })
+            .sum()
+    }
+
+    /// Each of an app's files is in its source map once, module
+    /// directories' included: Cove's walk reads them, and nothing reads them
+    /// again. The module the app `use`s is the directory's name, and the
+    /// walk's dotted name for it is not a second module.
+    #[test]
+    fn every_file_of_an_app_is_loaded_once() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut dirs = vec![repo.join("apps/admin")];
+        for entry in std::fs::read_dir(repo.join("examples")).unwrap() {
+            let dir = entry.unwrap().path();
+            if dir.join("app.toml").is_file() {
+                dirs.push(dir);
+            }
+        }
+        dirs.sort();
+        for dir in dirs {
+            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+            let (sources, package) = load_package(&dir, &name).unwrap();
+            let files: Vec<&Path> = sources
+                .files()
+                .filter(|file| !sources.is_library(file.id))
+                .map(|file| file.path.as_path())
+                .collect();
+            let unique: BTreeSet<&Path> = files.iter().copied().collect();
+            assert_eq!(unique.len(), files.len(), "{name}: {files:?}");
+            assert_eq!(files.len(), cove_files(&dir), "{name}: {files:?}");
+            let prefix = format!("{name}.");
+            assert!(
+                !package.modules.keys().any(|key| key.starts_with(&prefix)),
+                "{name}: {:?}",
+                package.modules.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The admin UI's code listing names each of an app's files once.
+    #[test]
+    fn a_code_listing_names_each_file_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let options = LoadOptions {
+            backend: Backend::Vm,
+            quiet: true,
+            modules: HostModules::standard(),
+            data: None,
+            io: runtime.handle().clone(),
+            control: None,
+            defer_to: None,
+            removed_keys: RemovedKeys::Ignore,
+        };
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/algo");
+        let app = load("algo", &dir, &options);
+        assert!(matches!(app.state, AppState::Ready(_)), "algo is refused");
+        let listing = crate::code::listing(&app, crate::code::CODE_FILES);
+        let names: Vec<&str> = listing.iter().map(|file| file.name.as_str()).collect();
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(unique.len(), names.len(), "{names:?}");
+        assert!(names.contains(&"sat/sat.cove"), "{names:?}");
+    }
+
+    /// `dir/<app>` laid out as `files` says, under a directory of its own.
+    fn scratch(test: &str, app: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("minicloud-{test}-{}", std::process::id()))
+            .join(app);
+        let _ = std::fs::remove_dir_all(&dir);
+        for (path, text) in files {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        dir
+    }
+
+    /// A module directory two deep keeps the name Cove's walk gives it,
+    /// `nest.inner.deep`, as it did when the first-level directories were
+    /// read a second time: that is the path an app `use`s it by, and
+    /// `inner.deep` is not one.
+    #[test]
+    fn a_module_two_deep_keeps_its_dotted_name() {
+        let app = |test: &str, head: &str, call: &str| {
+            let main = format!("{head}\n\nexport fn h() -> Int {{\n  {call}\n}}\n");
+            scratch(
+                test,
+                "nest",
+                &[
+                    ("inner/inner.cove", "export fn f() -> Int {\n  1\n}\n"),
+                    ("inner/deep/deep.cove", "export fn g() -> Int {\n  2\n}\n"),
+                    ("nest.cove", &main),
+                ],
+            )
+        };
+        let dir = app(
+            "nested",
+            "use inner\nuse nest.inner.deep",
+            "deep.g() + inner.f()",
+        );
+        let (_, package) = load_package(&dir, "nest").unwrap();
+        let ours: Vec<&str> = package
+            .modules
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !key.starts_with("std."))
+            .collect();
+        assert_eq!(ours, ["inner", "nest", "nest.inner.deep"]);
+        assert_eq!(package.modules["inner"].name, "inner");
+        compile(&dir, "nest", &HostModules::standard()).unwrap();
+
+        let dir = app("nested-short", "use inner.deep", "deep.g()");
+        let Err(why) = compile(&dir, "nest", &HostModules::standard()) else {
+            panic!("`use inner.deep` reaches a module two deep");
+        };
+        assert!(why.contains("unknown_use"), "{why}");
+    }
+
+    /// A module directory named after the app is refused, as it was.
+    #[test]
+    fn a_module_directory_named_after_the_app_is_refused() {
+        let dir = scratch(
+            "clash",
+            "clash",
+            &[
+                ("clash.cove", "export fn f() -> Int {\n  1\n}\n"),
+                ("clash/clash.cove", "export fn g() -> Int {\n  2\n}\n"),
+            ],
+        );
+        let Err(why) = load_package(&dir, "clash") else {
+            panic!("a module directory named after its app loads");
+        };
+        assert!(
+            why.contains("is a module named `clash`, which is already the app's"),
+            "{why}"
+        );
     }
 }
