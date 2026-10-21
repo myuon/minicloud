@@ -77,7 +77,7 @@ fn resentHeaders(event: Event) -> Map<String, String> {
 fn resend(endpoint: Endpoint, event: Event, url: String) -> Attempt {
   let started = time.nowMillis()
   let micros = time.nowMicros()
-  let id = text.padded(micros, 16)
+  let id = micros.toDecimal(16)
   let answer = fetch.request(event.method, url, resentHeaders(event), event.body)
   let millis = time.nowMillis() - started
   let attempt = match answer {

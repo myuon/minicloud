@@ -352,7 +352,7 @@ fn eventFor(
   let kept = storedHeaders(headers, endpoint.mask)
   let stored = text.truncateBytes(body, endpoint.maxBody)
   Event(
-    id: "{text.padded(micros, 16)}-{random.hex(4)}",
+    id: "{micros.toDecimal(16)}-{random.hex(4)}",
     endpoint: endpoint.id,
     received: micros / 1000,
     method: method,

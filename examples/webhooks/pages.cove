@@ -31,7 +31,7 @@ fn pageHeaders() -> Map<String, String> {
 
 /// A JSON document already rendered (pretty), with the page headers.
 fn prettyJson(status: Int, value: Json) -> web.Response {
-  web.text(status, "{json.renderPretty(value)}\n").withHeaders(pageHeaders()).withHeader("content-type", "application/json")
+  web.respond(status, "application/json", "{json.renderPretty(value)}\n").withHeaders(pageHeaders())
 }
 
 /// The page around `content`. Its stylesheet and its script are files in
