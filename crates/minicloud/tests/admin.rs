@@ -1398,7 +1398,7 @@ fn the_timeline_pages_show_where_each_request_was() {
     // The live window reloads, has nothing later, and zooms out to 5 min.
     for expected in [
         "<meta http-equiv=refresh content=\"5; url=/timeline?over=10s\">",
-        "<a href=\"/timeline?over=1m\">zoom out</a>",
+        "<a href=\"/timeline?over=1m\">Zoom out</a>",
         // A tenth of the axis zooms in; 23:19:50–23:20:00 is the window.
         "<a href=\"/timeline?from=1790000390000&amp;until=1790000392000\"><title>zoom in to \
          23:19:50.000 – 23:19:52.000</title>",
@@ -1410,7 +1410,7 @@ fn the_timeline_pages_show_where_each_request_was() {
             picture.body
         );
     }
-    assert!(!picture.body.contains("later →"));
+    assert!(!picture.body.contains(">Later<"));
 
     // A window of the past: two seconds of it, still; 102 ran in it and 110
     // arrived after it.
@@ -1423,12 +1423,11 @@ fn the_timeline_pages_show_where_each_request_was() {
     );
     assert_eq!(past.status, 200, "{}", past.body);
     for expected in [
-        "over 2026-09-21 23:19:52.000 – 23:19:54.000 JST (2 s).",
-        "<p class=reload>viewing a past window · <a href=\"/timeline?over=10s\">back to now</a></p>",
-        "<a href=\"/timeline?from=1790000391000&amp;until=1790000393000\">← earlier</a>",
-        "<a href=\"/timeline?from=1790000393000&amp;until=1790000395000\">later →</a>",
-        "<a href=\"/timeline?from=1790000388000&amp;until=1790000398000\">zoom out</a>",
-        "<a href=\"/timeline?over=10s\">now</a>",
+        "<p class=reload>2026-09-21 23:19:52.000 – 23:19:54.000 JST (2 s) · <a href=\"/timeline?over=10s\">Back to now</a></p>",
+        "<a href=\"/timeline?from=1790000391000&amp;until=1790000393000\">Earlier</a>",
+        "<a href=\"/timeline?from=1790000393000&amp;until=1790000395000\">Later</a>",
+        "<a href=\"/timeline?from=1790000388000&amp;until=1790000398000\">Zoom out</a>",
+        "<a href=\"/timeline?over=10s\">Now</a>",
         ">23:19:53.000<",
         "/requests/102\"",
         // The chips keep the window.
@@ -1458,7 +1457,7 @@ fn the_timeline_pages_show_where_each_request_was() {
         "resumed on #1 (moved), ran 30.0 ms",
         "<a href=\"/timeline?app=slow&amp;over=1m\">timeline of slow</a>",
         // Arrived at 392.3 s, ended at 393.38: half of that either side.
-        "<a href=\"/timeline?from=1790000391760&amp;until=1790000393921\">show on the timeline</a>",
+        "<a href=\"/timeline?from=1790000391760&amp;until=1790000393921\">Show on timeline</a>",
     ] {
         assert!(
             moved.body.contains(expected),

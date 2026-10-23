@@ -1482,21 +1482,21 @@ test fn movesTheWindowWithLinks() -> Result<Unit, Error> {
   let now = fixedNow()
   let live = TlWindow(live: true, over: "1m", fromMs: e + 340000, untilMs: now)
   let moves = timelineMoves("", "", live, now, e).render()
-  assert(moves.contains("<a href=\"/timeline?from=1790000310000&amp;until=1790000370000\">← earlier</a>"))?
-  assert(moves.contains("<a href=\"/timeline?over=5m\">zoom out</a>"))?
+  assert(moves.contains("<a href=\"/timeline?from=1790000310000&amp;until=1790000370000\">Earlier</a>"))?
+  assert(moves.contains("<a href=\"/timeline?over=5m\">Zoom out</a>"))?
   // At the live edge there is no later, and no now to go back to.
-  assert(!moves.contains("later"))?
-  assert(!moves.contains(">now<"))?
+  assert(!moves.contains("Later"))?
+  assert(!moves.contains(">Now<"))?
   let past = timelineMoves("", "hello", pastWindow(e + 100000, e + 110000), now, e).render()
-  assert(past.contains("from=1790000095000&amp;until=1790000105000\">← earlier</a>"))?
-  assert(past.contains("from=1790000105000&amp;until=1790000115000\">later →</a>"))?
-  assert(past.contains("from=1790000080000&amp;until=1790000130000\">zoom out</a>"))?
-  assert(past.contains("<a href=\"/timeline?app=hello&amp;over=10s\">now</a>"))?
+  assert(past.contains("from=1790000095000&amp;until=1790000105000\">Earlier</a>"))?
+  assert(past.contains("from=1790000105000&amp;until=1790000115000\">Later</a>"))?
+  assert(past.contains("from=1790000080000&amp;until=1790000130000\">Zoom out</a>"))?
+  assert(past.contains("<a href=\"/timeline?app=hello&amp;over=10s\">Now</a>"))?
   // Nothing earlier than what is kept.
-  assert(!timelineMoves("", "", pastWindow(e, e + 10000), now, e).render().contains("earlier"))?
-  let still = pastReload("/timeline?from=1&until=20", "/timeline?over=1m")
+  assert(!timelineMoves("", "", pastWindow(e, e + 10000), now, e).render().contains("Earlier"))?
+  let still = pastReload("/timeline?from=1&until=20", "the past", "/timeline?over=1m")
   assertEqual(still.seconds, 0)?
-  assertEqual(still.control.render(), "<p class=reload>viewing a past window · <a href=\"/timeline?over=1m\">back to now</a></p>")?
+  assertEqual(still.control.render(), "<p class=reload>the past · <a href=\"/timeline?over=1m\">Back to now</a></p>")?
   Ok(())
 }
 
@@ -1551,7 +1551,7 @@ test fn drawsMergedRunsAsWhatTheyAre() -> Result<Unit, Error> {
   let mixed = aRun(5, [host.WorkerRunApp(app: "hello", runs: 3), host.WorkerRunApp(app: "crunch", runs: 2)])
   assertEqual(
     segmentTitle(mixed, e),
-    "5 runs merged (hello 3, crunch 2), busy 500.0 ms of 2000.0 ms on worker #1 from 23:13:21.000 — zoom in to tell them apart",
+    "5 runs merged (hello 3, crunch 2), busy 500.0 ms of 2000.0 ms on worker #1 from 23:13:21.000",
   )?
   let bar = segmentBar("", "", mixed, 0, 10000000, e, 45, 14, order).render()
   // A faint band over the stretch, and hatching a quarter as high, at its foot.
@@ -1606,10 +1606,6 @@ test fn writesEachPhaseInWords() -> Result<Unit, Error> {
   assertEqual(phaseWords(aPhase("park", 0, 30000, op: "fetch", by: "deadline")), "parked on fetch 30.0 ms (the deadline)")?
   assertEqual(phaseWords(aPhase("park", 0, 500, op: "fetch", by: "cancel")), "parked on fetch 0.5 ms (cancelled)")?
   assertEqual(phaseWords(aPhase("park", 0, 2000, op: "fetch", open: true)), "parked on fetch 2.0 ms so far (still parked)")?
-  let sentence = phaseSentence(phases)
-  assert(sentence.startsWith("waited for a worker 1.0 ms → ran 1.0 ms on worker #0 → parked on timer.sleep"))?
-  assert(sentence.endsWith("→ continued on #1, ran 1.0 ms"))?
-  assertEqual(phaseSentence([]), "")?
   Ok(())
 }
 
@@ -1677,13 +1673,13 @@ test fn theTimelinePagesSayWhatTheyHaveNot() -> Result<Unit, Error> {
   assert(live.contains("<a href=\"/live\" aria-current=page>live</a>"))?
   assert(live.contains("<meta http-equiv=refresh content=\"2; url=/live\">"))?
   assert(live.contains("refreshing every 2 s · <a href=\"/live?refresh=off\">pause</a>"))?
-  assert(live.contains("Nothing is in flight."))?
+  assert(live.contains("<h2>In flight</h2><p class=muted>None</p>"))?
   assert(live.contains("<td class=title data-label=worker>#0</td>"))?
   assert(live.contains("<span class=\"state idle\">idle</span>"))?
   let page = timelinePage("", asking(Map.of(MapEntry(key: "over", value: "10s")))).render()
   assert(page.contains("<h1>Timeline</h1>"))?
   assert(page.contains("<a href=\"/timeline\" aria-current=page>timeline</a>"))?
-  assert(page.contains("No request in the last 10 seconds"))?
+  assert(page.contains("No requests in the last 10 seconds"))?
   assert(page.contains("<b>the last 10 seconds</b>"))?
   assert(!page.contains("<svg class=timeline"))?
   assert(page.contains("<meta http-equiv=refresh content=\"5; url=/timeline?over=10s\">"))?
@@ -1705,10 +1701,10 @@ test fn showsARequestsPhasesAndWhatItCameTo() -> Result<Unit, Error> {
   assert(page.contains("<span class=\"ph ph-park\">park</span> <span class=\"nums muted\">+3.0 ms</span> parked on timer.sleep 10.0 ms (answered)"))?
   assert(page.contains("<td class=nums>1234</td>"))?
   assert(page.contains("<tr><th>collections</th><td class=nums>2</td></tr>"))?
-  assert(page.contains("<tr><th>allocated</th><td class=nums>1.0 MiB <span class=muted>(131072 words, reuse counted each time)</span></td></tr>"))?
+  assert(page.contains("<tr><th>allocated</th><td class=nums>1.0 MiB <span class=muted>(131072 words)</span></td></tr>"))?
   assert(page.contains("<svg class=timeline"))?
   let turned = requestPage("", aRequest(9, [], outcome: "rejected", status: Some(429), reason: "queue_full")).render()
-  assert(turned.contains("No phases"))?
+  assert(turned.contains("<h2>Phases</h2><p class=muted>None</p>"))?
   Ok(())
 }
 

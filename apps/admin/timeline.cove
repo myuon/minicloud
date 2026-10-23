@@ -60,7 +60,7 @@ fn requestLink(base: String, id: Int) -> Html {
 /// The requests in flight, oldest first.
 fn liveTable(base: String, live: host.Live) -> Html {
   if live.requests.length() == 0 {
-    return html"<p class=muted>Nothing is in flight.</p>"
+    return html"<p class=muted>None</p>"
   }
   var rows = Vector.of()
   for row in live.requests {
@@ -132,36 +132,22 @@ fn livePage(base: String, request: web.Request) -> Html {
   let listed = live.requests.length()
   let more = html.only(
     live.total > listed,
-    html"<p class=muted>{live.total} requests are in flight; the oldest {listed} are listed.</p>",
+    html"<p class=muted>Oldest {listed} of {live.total} listed</p>",
   )
-  let summary = html"What is in flight now, and what each worker runs. It reloads every 2 seconds."
-  let said = html"""
-    A request is <b>waiting</b> for a worker, <b>running</b> on one, <b>parked</b> at a host
-    call that answered pending (a sleep, a fetch, a change of the admin's) — holding no worker
-    — or answered or yielded and waiting for a worker to take it up again. Elapsed is from its
-    arrival. An id is the way to its phases. The host keeps this in memory, the last
-    {timelineKeep()}, and a path without its query string.
-    """
   layout(
     base,
     "live",
     "live",
     html"""
       <h1>Live</h1>
-      {about(summary, said)}
       {reload.control}
       <h2>In flight</h2>{liveTable(base, live)}{more}
       <h2>Workers</h2>{workersTable(base, live)}
-      <p class=actions><a href="{base}/timeline">the timeline →</a></p>
+      <p class=actions><a href="{base}/timeline">Open timeline</a></p>
       """,
     reload.seconds,
     reload.link,
   )
-}
-
-/// What the timeline keeps (`crate::timeline::KEEP` and `KEEP_REQUESTS`).
-fn timelineKeep() -> String {
-  "hour, at most 100,000 requests"
 }
 
 // ------------------------------------------------------------ timeline
@@ -412,7 +398,7 @@ fn timelineSteps(base: String, app: String, shown: TlWindow) -> Html {
       steps.push(html"""<a href="{timelineLink(base, app, name)}">{label}</a>""")
     }
   }
-  html"<p class=actions><span class=muted>window:</span> {html.join(steps.freeze(), html" ")}</p>"
+  html"<p class=actions>{html.join(steps.freeze(), html" ")}</p>"
 }
 
 /// Moving the window, each a link: half a window earlier and later, five
@@ -421,29 +407,30 @@ fn timelineSteps(base: String, app: String, shown: TlWindow) -> Html {
 fn timelineMoves(base: String, app: String, shown: TlWindow, nowMs: Int, earliestMs: Int) -> Html {
   var moves = Vector.of()
   if shown.fromMs > earliestMs {
-    moves.push(html"""<a href="{windowLink(base, app, panned(shown, -1, nowMs, earliestMs))}">← earlier</a>""")
+    moves.push(html"""<a href="{windowLink(base, app, panned(shown, -1, nowMs, earliestMs))}">Earlier</a>""")
   }
   if !shown.live {
-    moves.push(html"""<a href="{windowLink(base, app, panned(shown, 1, nowMs, earliestMs))}">later →</a>""")
+    moves.push(html"""<a href="{windowLink(base, app, panned(shown, 1, nowMs, earliestMs))}">Later</a>""")
   }
   match zoomedOut(shown, nowMs, earliestMs) {
-    Some(wider) => moves.push(html"""<a href="{windowLink(base, app, wider)}">zoom out</a>""")
+    Some(wider) => moves.push(html"""<a href="{windowLink(base, app, wider)}">Zoom out</a>""")
     None => {}
   }
   if !shown.live {
     let now = liveWindow(liveOver(shown.untilMs - shown.fromMs))
-    moves.push(html"""<a href="{windowLink(base, app, now)}">now</a>""")
+    moves.push(html"""<a href="{windowLink(base, app, now)}">Now</a>""")
   }
-  html"<p class=actions><span class=muted>move:</span> {html.join(moves.freeze(), html" ")}</p>"
+  html"<p class=actions>{html.join(moves.freeze(), html" ")}</p>"
 }
 
 /// A window of the past does not reload — it would not change — and its
-/// control says so, and is the way back to the live window `live`.
-fn pastReload(link: String, live: String) -> Reload {
+/// control says when it is (`said`), and is the way back to the live window
+/// `live`.
+fn pastReload(link: String, said: String, live: String) -> Reload {
   Reload(
     seconds: 0,
     link: link,
-    control: html"""<p class=reload>viewing a past window · <a href="{live}">back to now</a></p>""",
+    control: html"""<p class=reload>{said} · <a href="{live}">Back to now</a></p>""",
   )
 }
 
@@ -857,7 +844,7 @@ fn segmentTitle(segment: host.WorkerRun, startedMs: Int) -> String {
   let at = clockMillis(startedMs + segment.fromUs / 1000)
   let length = millis(segment.toUs - segment.fromUs)
   if segment.runs > 1 {
-    return "{segment.runs} runs merged ({runsByApp(segment)}), busy {millis(segment.busyUs)} ms of {length} ms on worker #{segment.worker} from {at} — zoom in to tell them apart"
+    return "{segment.runs} runs merged ({runsByApp(segment)}), busy {millis(segment.busyUs)} ms of {length} ms on worker #{segment.worker} from {at}"
   }
   "{segment.app} #{segment.id}, {length} ms on worker #{segment.worker} from {at}"
 }
@@ -935,7 +922,7 @@ fn timelinePicture(base: String, app: String, timeline: host.Timeline, order: Ar
   )
   y = y + 18 + runningHeight + 8
   let parked = strip(
-    "Runs parked on a host call, holding no worker",
+    "Runs parked on a host call",
     timeline.parked,
     wholeAbove(largestOf(timeline.parked)),
     y,
@@ -966,11 +953,11 @@ fn timelinePicture(base: String, app: String, timeline: host.Timeline, order: Ar
     <svg class=timeline viewBox="0 0 {tlWidth()} {height}" role=img aria-label="the workers and the requests over the window">
       {mixPattern()}
       {clockAxis(since, until, startedMs, 16, height - 4, labelYs)}
-      <text class=tl-head x="{tlLeft()}" y="{workersTop - 8}">Workers: a bar wherever one runs a request, in its app's colour</text>
+      <text class=tl-head x="{tlLeft()}" y="{workersTop - 8}">Workers</text>
       {workers.freeze()}
       {running}{parked}{waiting}
       {zoomBands(base, app, shown, nowMs, stripsTop, y - 8, labelYs)}
-      <text class=tl-head x="{tlLeft()}" y="{requestsTop - 8}">Requests, in arrival order: bar = running, thin line = parked, grey = waiting for a worker</text>
+      <text class=tl-head x="{tlLeft()}" y="{requestsTop - 8}">Requests, in arrival order</text>
       <text x="{tlLeft() - 6}" y="{requestsTop + row}" text-anchor=end>first</text>
       <text x="{tlLeft() - 6}" y="{requestsTop + count * row}" text-anchor=end>last</text>
       {lanes.freeze()}
@@ -1006,7 +993,7 @@ fn timelineLegend(order: Array<String>) -> Html {
   }
   keys.push(markKey(
     html"""<rect class=tl-span width=16 height=12 /><rect class=tl-mix fill="url(#tl-mix)" y=5 width=16 height=7 />""",
-    "runs merged, as high as the worker was busy; hatched for several apps",
+    "runs merged; hatched for several apps",
   ))
   keys.push(markKey(html"<line class=tl-wait x1=0 y1=6 x2=16 y2=6 />", "waiting for a worker"))
   keys.push(markKey(html"<line class=\"tl-park tl-lx\" x1=0 y1=6 x2=16 y2=6 />", "parked (its app's colour)"))
@@ -1022,7 +1009,7 @@ fn timelineLegend(order: Array<String>) -> Html {
 /// were errors or turned away, and how long the answered took.
 fn timelineApps(base: String, timeline: host.Timeline, order: Array<String>, shown: TlWindow) -> Html {
   if timeline.apps.length() == 0 {
-    return html"<p class=muted>No request ended in this window yet.</p>"
+    return html"<p class=muted>None ended yet</p>"
   }
   var rows = Vector.of()
   for app in timeline.apps {
@@ -1102,25 +1089,14 @@ fn timelinePage(base: String, request: web.Request) -> Html {
     untilMs: startedMs + all.untilUs / 1000,
   )
   let link = windowLink(base, app, shown)
+  let span = windowSaid(shown)
   let reload = if shown.live {
     reloading(link, 5, paused(request))
   } else {
-    pastReload(link, windowLink(base, app, liveWindow(liveOver(shown.untilMs - shown.fromMs))))
+    pastReload(link, span, windowLink(base, app, liveWindow(liveOver(shown.untilMs - shown.fromMs))))
   }
-  let span = windowSaid(shown)
-  let summary = html"Where each request waited, ran, parked and resumed, over {span}."
-  let said = html"""
-    The host records every request in memory — the last {timelineKeep()}, its path without
-    the query string — and a restart empties it. Above, the workers, a bar wherever one runs a
-    request; under them how many workers ran, how many runs were parked at a host call (a
-    sleep, a fetch) holding no worker, and how many requests waited for a worker; then the
-    newest requests, one lane each in arrival order. Hover a bar or a lane for what it is; a
-    lane is the way to its request's phases. Times are JST. Move back and forth with the links
-    over the picture, and zoom in by clicking a tenth of the time axis or of the strips.
-    """
   let head = html"""
     <h1>Timeline</h1>
-    {about(summary, said)}
     {reload.control}
     {timelineChips(base, order, app, shown)}
     {timelineSteps(base, app, shown)}
@@ -1134,8 +1110,7 @@ fn timelinePage(base: String, request: web.Request) -> Html {
       "timeline",
       html"""
         {head}
-        <p class=muted>No request{whose} in {span}: nothing arrived, ran or ended in it that the
-        host still keeps.</p>
+        <p class=muted>No requests{whose} in {span}</p>
         """,
       reload.seconds,
       reload.link,
@@ -1144,7 +1119,7 @@ fn timelinePage(base: String, request: web.Request) -> Html {
   let shownLanes = timeline.lanes.length()
   let newest = html.only(
     timeline.requests > shownLanes,
-    html"<p class=muted>Showing the last {shownLanes} of {timeline.requests} requests in this window — zoom in to see the rest.</p>",
+    html"<p class=muted>Newest {shownLanes} of {timeline.requests} shown</p>",
   )
   layout(
     base,
@@ -1155,7 +1130,7 @@ fn timelinePage(base: String, request: web.Request) -> Html {
       {timelineFigures(timeline)}
       {timelineLegend(order)}
       {timelinePicture(base, app, timeline, order, shown, nowMs)}
-      <p class=muted>Click a tenth of the time axis or of the strips — it lights up under the pointer — to zoom in on it, and a merged bar to zoom in on its stretch.</p>
+      <p class=muted>Click the time axis or a strip to zoom in</p>
       {newest}
       <h2>Apps</h2>{timelineApps(base, timeline, order, shown)}
       """,
@@ -1215,15 +1190,6 @@ fn phaseWords(phase: host.Phase) -> String {
   }
 }
 
-/// A request's phases as one sentence, each step an arrow from the last.
-fn phaseSentence(phases: Array<host.Phase>) -> String {
-  var words = Vector.of()
-  for phase in phases {
-    words.push(phaseWords(phase))
-  }
-  " → ".join(words.freeze())
-}
-
 /// The kind of a phase, as the badge in front of its words.
 fn phaseBadge(kind: String) -> Html {
   html"""<span class="ph ph-{kind}">{kind}</span>"""
@@ -1232,7 +1198,7 @@ fn phaseBadge(kind: String) -> Html {
 /// A request's phases, in order, each from its start after the arrival.
 fn phaseList(request: host.TimelineRequest) -> Html {
   if request.phases.length() == 0 {
-    return html"<p class=muted>No phases: it was turned away before it waited for a worker.</p>"
+    return html"<p class=muted>None</p>"
   }
   var items = Vector.of()
   for phase in request.phases {
@@ -1295,10 +1261,10 @@ fn requestPage(base: String, request: host.TimelineRequest) -> Html {
         <tr><th>instructions</th><td class=nums>{knownCount(request.instructions)}</td></tr>
         <tr><th>heap words</th><td class=nums>{knownCount(request.heapWords)}</td></tr>
         <tr><th>collections</th><td class=nums>{knownCount(request.gcCollections)}</td></tr>
-        <tr><th>allocated</th><td class=nums>{knownAllocated(request.allocatedWords)} <span class=muted>({knownCount(request.allocatedWords)} words, reuse counted each time)</span></td></tr>
+        <tr><th>allocated</th><td class=nums>{knownAllocated(request.allocatedWords)} <span class=muted>({knownCount(request.allocatedWords)} words)</span></td></tr>
         <tr><th>yields</th><td class=nums>{request.yields}</td></tr>
         <tr><th>parks</th><td class=nums>{request.parks}</td></tr>
-        <tr><th>moves</th><td class=nums>{request.moves} <span class=muted>(a run on another worker than the one before)</span></td></tr>
+        <tr><th>moves</th><td class=nums>{request.moves}</td></tr>
       </table>
     </div>
     """
@@ -1310,9 +1276,8 @@ fn requestPage(base: String, request: host.TimelineRequest) -> Html {
       <p class=crumb><a href="{timelineLink(base, request.app, "1m")}">timeline of {request.app}</a> / request</p>
       <h1>Request {request.id}</h1>
       <p class=sub><code>{request.method} {request.path}</code> · {requestStatus(request)} · {requestLatency(request)}</p>
-      <p class=lead>{phaseSentence(request.phases)}</p>
       {requestPicture(request, paletteSlot(colourOrder(deployedApps(), [request.app]), request.app))}
-      <p class=actions><a href="{windowLink(base, "", requestWindow(request))}">show on the timeline</a></p>
+      <p class=actions><a href="{windowLink(base, "", requestWindow(request))}">Show on timeline</a></p>
       <h2>Phases</h2>{phaseList(request)}
       <h2>What it came to</h2>{facts}
       """,
@@ -1322,7 +1287,7 @@ fn requestPage(base: String, request: host.TimelineRequest) -> Html {
 /// `GET /requests/<id>`: the request's page, or a 404 that says why — an
 /// id the timeline no longer keeps, or not a number at all.
 fn requestAnswer(base: String, id: String) -> web.Response {
-  let back = html"""<p class=actions><a href="{base}/timeline">← the timeline</a></p>"""
+  let back = html"""<p class=actions><a href="{base}/timeline">Back to timeline</a></p>"""
   let number = match Int.parse(id) {
     Ok(number) => number
     Err(_) => return web.html(
