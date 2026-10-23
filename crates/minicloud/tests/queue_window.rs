@@ -442,7 +442,7 @@ fn the_page_shows_each_queue_what_is_waiting_and_the_dead_letters() {
     assert!(said.contains("<code>buried body</code>"), "{said}");
     assert!(said.contains("500 gave up"), "{said}");
     // The page says what it will not do, and where reviving is done.
-    assert!(said.contains("Reading only"), "{said}");
+    assert!(said.contains("Revive a dead letter"), "{said}");
     assert!(
         said.contains("minicloud queues post --revive &lt;id&gt;"),
         "{said}"
@@ -465,7 +465,7 @@ fn the_page_shows_each_queue_what_is_waiting_and_the_dead_letters() {
     let notes = page(&host, "/apps/notes").body;
     assert!(!notes.contains("/apps/notes/queues"), "{notes}");
     let none = page(&host, "/apps/notes/queues").body;
-    assert!(none.contains("is not granted"), "{none}");
+    assert!(none.contains("Not granted <code>queue</code>."), "{none}");
     assert!(!none.contains("<th>queue</th>"), "{none}");
 }
 
@@ -540,7 +540,7 @@ fn the_page_opens_one_message_whole_from_its_id() {
     let gone = page(&host, "/apps/post/queues?message=9999").body;
     assert!(gone.contains("Not read."), "{gone}");
     assert!(gone.contains("may have been delivered since"), "{gone}");
-    assert!(gone.contains("every queue"), "{gone}");
+    assert!(gone.contains("Back to queues"), "{gone}");
 }
 
 /// A body longer than the column is cut where the store's page cuts a

@@ -332,7 +332,7 @@ fn the_page_lands_on_the_tables_and_answers_a_statement() {
     );
     assert!(landing.body.contains(">3</td>"), "{}", landing.body);
     // The page says what it will not do, and what it is bounded by.
-    assert!(landing.body.contains("only reads"), "{}", landing.body);
+    assert!(landing.body.contains("A statement that writes is refused."), "{}", landing.body);
     assert!(landing.body.contains("200 rows"), "{}", landing.body);
     // Each table carries the statement for its first rows.
     assert!(
@@ -388,7 +388,7 @@ fn the_page_lands_on_the_tables_and_answers_a_statement() {
     // An app that is not granted `sql` says so instead of showing a box.
     let none = page(&host, "/apps/notes/sql");
     assert_eq!(none.status, 200, "{}", none.body);
-    assert!(none.body.contains("is not granted"), "{}", none.body);
+    assert!(none.body.contains("Not granted <code>sql</code>."), "{}", none.body);
     assert!(!none.body.contains("name=q"), "{}", none.body);
 
     // The page reads, whatever is posted to it.

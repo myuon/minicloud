@@ -367,8 +367,7 @@ test fn keepsTheTabsInOneOrder() -> Result<Unit, Error> {
 /// says must be true of both, and it must not draw a frame round nothing.
 test fn saysSoWhenThereIsNothingToDrawAMetricFrom() -> Result<Unit, Error> {
   let page = metricsPage("", anApp("hello"), asking(Map.of())).render()
-  assert(page.contains("Nothing to show for the last hour"))?
-  assert(page.contains("cannot tell which"))?
+  assert(page.contains("No samples in the last hour."))?
   assert(!page.contains("<svg class=chart"))?
   assert(!page.contains("is not recording"))?
   // and the tab is the one marked
@@ -462,7 +461,7 @@ test fn thePlatformPageSaysWhatItCannotRead() -> Result<Unit, Error> {
   let page = platformPage("", asking(Map.of(MapEntry(key: "over", value: "day")))).render()
   assert(page.contains("<h1>Platform</h1>"))?
   assert(page.contains("<a href=\"/platform\" aria-current=page>platform</a>"))?
-  assert(page.contains("Nothing to chart for the last day"))?
+  assert(page.contains("No samples in the last day."))?
   assert(page.contains("the host cannot read its cgroup"))?
   assert(page.contains("no minute sampled yet"))?
   assert(page.contains("<span class=big>0 / 0</span>"))?
@@ -1016,7 +1015,7 @@ test fn listsTheTablesWithAStatementForEach() -> Result<Unit, Error> {
   assert(said.contains("not counted"))?
   assert(said.contains("/apps/notes/sql?q=SELECT%20%2A%20FROM%20%22books%22%20LIMIT%2050"))?
   // A store with no tables is said in words.
-  assert(sqlTablesTable("/apps/notes", Vector.of().freeze()).render().contains("no tables"))?
+  assert(sqlTablesTable("/apps/notes", Vector.of().freeze()).render().contains("No tables."))?
   Ok(())
 }
 
