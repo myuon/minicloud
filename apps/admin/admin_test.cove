@@ -367,8 +367,7 @@ test fn keepsTheTabsInOneOrder() -> Result<Unit, Error> {
 /// says must be true of both, and it must not draw a frame round nothing.
 test fn saysSoWhenThereIsNothingToDrawAMetricFrom() -> Result<Unit, Error> {
   let page = metricsPage("", anApp("hello"), asking(Map.of())).render()
-  assert(page.contains("Nothing to show for the last hour"))?
-  assert(page.contains("cannot tell which"))?
+  assert(page.contains("No samples in the last hour."))?
   assert(!page.contains("<svg class=chart"))?
   assert(!page.contains("is not recording"))?
   // and the tab is the one marked
@@ -462,7 +461,7 @@ test fn thePlatformPageSaysWhatItCannotRead() -> Result<Unit, Error> {
   let page = platformPage("", asking(Map.of(MapEntry(key: "over", value: "day")))).render()
   assert(page.contains("<h1>Platform</h1>"))?
   assert(page.contains("<a href=\"/platform\" aria-current=page>platform</a>"))?
-  assert(page.contains("Nothing to chart for the last day"))?
+  assert(page.contains("No samples in the last day."))?
   assert(page.contains("the host cannot read its cgroup"))?
   assert(page.contains("no minute sampled yet"))?
   assert(page.contains("<span class=big>0 / 0</span>"))?
@@ -690,8 +689,8 @@ test fn hoversARowOrAGroupOfRows() -> Result<Unit, Error> {
 test fn saysSoWhenNothingIsWorthALook() -> Result<Unit, Error> {
   let said = worthALook("", anApp("hello"), noQueues(), aDisk()).render()
   assert(said.contains("class=\"is-ok\""))?
-  assert(said.contains("Nothing: no request failed"))?
-  assert(said.contains("every file of the deploy is the same as the one in the app's directory"))?
+  assert(said.contains("No request failed. No request was turned away."))?
+  assert(said.contains("Every file of the deploy is the same as the one in the app's directory"))?
   assertEqual(said.contains("is-bad"), false)?
   assertEqual(said.contains("is-warn"), false)?
   Ok(())
@@ -707,19 +706,19 @@ test fn saysWhatIsOnTheQueuesWorstFirst() -> Result<Unit, Error> {
   assert(said.contains("/apps/jobs/queues"))?
   // The dead letters are above what is held, and both above the green line.
   assert(said.indexOf("dead letters wait").unwrapOr(0) < said.indexOf("3 held").unwrapOr(0))?
-  assert(said.indexOf("3 held").unwrapOr(0) < said.indexOf("Nothing else").unwrapOr(0))?
+  assert(said.indexOf("3 held").unwrapOr(0) < said.indexOf("No request failed").unwrapOr(0))?
   // And the green line no longer claims the queues are clear.
-  assertEqual(said.contains("no dead letter waits"), false)?
+  assertEqual(said.contains("No dead letter waits"), false)?
   Ok(())
 }
 
 /// A store near what it may hold, before the write that is refused.
 test fn saysWhenAStoreIsNearItsLimit() -> Result<Unit, Error> {
   let full = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 900, kvMaxKeys: 1000, kvMaxBytes: 1000)
-  assert(worthALook("", full, noQueues(), aDisk()).render().contains("holds 900 B of the 1000 B it may"))?
+  assert(worthALook("", full, noQueues(), aDisk()).render().contains("holds 900 B of its 1000 B"))?
   // Eighty hundredths is where it starts, so 799 of 1000 is not it.
   let room = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 799, kvMaxKeys: 1000, kvMaxBytes: 1000)
-  assert(worthALook("", room, noQueues(), aDisk()).render().contains("no store is near its limit"))?
+  assert(worthALook("", room, noQueues(), aDisk()).render().contains("No store is near its limit"))?
   // A store the host has not opened, and a limit of 0, are not "near".
   assertEqual(nearLimit(-1, 100), false)?
   assertEqual(nearLimit(100, 0), false)?
@@ -734,9 +733,9 @@ test fn saysWhenAStoreIsNearItsLimit() -> Result<Unit, Error> {
 /// that would matter.
 test fn saysWhenItDidNotCompareTheDeployWithTheDirectory() -> Result<Unit, Error> {
   let said = worthALook("", anApp("big"), noQueues(), aDisk(looked: false)).render()
-  assert(said.contains("The deploy was not compared with the app's directory here"))?
-  assert(said.contains("The Code tab reads every file of it."))?
-  assertEqual(said.contains("every file of the deploy is the same"), false)?
+  assert(said.contains("Deploy not compared with the app's directory."))?
+  assert(said.contains("Compare files"))?
+  assertEqual(said.contains("Every file of the deploy is the same"), false)?
   let differs = worthALook("", anApp("big"), noQueues(), aDisk(differing: 2)).render()
   assert(differs.contains("2 files in the app's directory are not the ones that are running"))?
   Ok(())
@@ -777,24 +776,12 @@ test fn putsWhatAnAppHasToSayAtTheEndOfItsCard() -> Result<Unit, Error> {
   let flags = appFlags("", loud, noQueues())
   let card = appCard("", loud, flags).render()
   assert(card.contains("<li class=\"app is-bad\">"))?
-  assert(card.contains("href=\"/apps/notes/settings\">refused →</a>"))?
-  assert(card.contains("href=\"/apps/notes\">2 failed →</a>"))?
-  assert(card.contains("Access off →"))?
+  assert(card.contains("href=\"/apps/notes/settings\">refused</a>"))?
+  assert(card.contains("href=\"/apps/notes\">2 failed</a>"))?
+  assert(card.contains("Access off</a>"))?
   // The refusal's reason is the one thing a list cannot send somebody away
   // to read, so the card holds it — escaped, like everything else.
   assert(card.contains("requires `kv`"))?
-  Ok(())
-}
-
-/// The sentence the green line is made of.
-test fn writesAListAsASentence() -> Result<Unit, Error> {
-  assertEqual(sentence(Vector.of().freeze()).render(), "")?
-  assertEqual(sentence(Vector.of(html"a").freeze()).render(), "a")?
-  assertEqual(sentence(Vector.of(html"a", html"b").freeze()).render(), "a and b")?
-  assertEqual(sentence(Vector.of(html"a", html"b", html"c").freeze()).render(), "a, b and c")?
-  // The words are the page's own, so an apostrophe in one is written as it
-  // is: the green line says "the app's directory".
-  assertEqual(sentence(Vector.of(html"x", html"the app's").freeze()).render(), "x and the app's")?
   Ok(())
 }
 
@@ -917,15 +904,15 @@ test fn escapesEveryPieceOfAColouredFile() -> Result<Unit, Error> {
 test fn saysWhyAFileIsShownWithNoColour() -> Result<Unit, Error> {
   let none = Vector.of().freeze()
   let cut = codeBody(aColouredFile("big.cove", "x", none, "cut")).render()
-  assert(cut.contains("stops at what the host carries"))?
+  assert(cut.contains("No colouring for a cut file."))?
   assert(cut.contains("<pre class=code>x</pre>"))?
   let dense = codeBody(aColouredFile("dense.cove", "x", none, "dense")).render()
-  assert(dense.contains("more pieces than one page carries (20000)"))?
+  assert(dense.contains("No colouring past 20000 pieces."))?
   let unknown = codeBody(aColouredFile("notes.txt", "x", none, "unknown")).render()
-  assert(unknown.contains("no reader for this kind of file"))?
+  assert(unknown.contains("No colouring for this kind of file."))?
   // And a word the host grows later still says something.
   let later = codeBody(aColouredFile("a.rs", "x", none, "elsewhere")).render()
-  assert(later.contains("no reader for this kind of file"))?
+  assert(later.contains("No colouring for this kind of file."))?
   // Coloured, there is nothing to explain.
   let shown = codeBody(aColouredFile("a.cove", "x", Vector.of(host.CodePiece(kind: "plain", text: "x")).freeze(), "")).render()
   assertEqual(shown, "<pre class=code>x</pre>")?
@@ -1016,7 +1003,7 @@ test fn listsTheTablesWithAStatementForEach() -> Result<Unit, Error> {
   assert(said.contains("not counted"))?
   assert(said.contains("/apps/notes/sql?q=SELECT%20%2A%20FROM%20%22books%22%20LIMIT%2050"))?
   // A store with no tables is said in words.
-  assert(sqlTablesTable("/apps/notes", Vector.of().freeze()).render().contains("no tables"))?
+  assert(sqlTablesTable("/apps/notes", Vector.of().freeze()).render().contains("No tables."))?
   Ok(())
 }
 
@@ -1482,21 +1469,21 @@ test fn movesTheWindowWithLinks() -> Result<Unit, Error> {
   let now = fixedNow()
   let live = TlWindow(live: true, over: "1m", fromMs: e + 340000, untilMs: now)
   let moves = timelineMoves("", "", live, now, e).render()
-  assert(moves.contains("<a href=\"/timeline?from=1790000310000&amp;until=1790000370000\">← earlier</a>"))?
-  assert(moves.contains("<a href=\"/timeline?over=5m\">zoom out</a>"))?
+  assert(moves.contains("<a href=\"/timeline?from=1790000310000&amp;until=1790000370000\">Earlier</a>"))?
+  assert(moves.contains("<a href=\"/timeline?over=5m\">Zoom out</a>"))?
   // At the live edge there is no later, and no now to go back to.
-  assert(!moves.contains("later"))?
-  assert(!moves.contains(">now<"))?
+  assert(!moves.contains("Later"))?
+  assert(!moves.contains(">Now<"))?
   let past = timelineMoves("", "hello", pastWindow(e + 100000, e + 110000), now, e).render()
-  assert(past.contains("from=1790000095000&amp;until=1790000105000\">← earlier</a>"))?
-  assert(past.contains("from=1790000105000&amp;until=1790000115000\">later →</a>"))?
-  assert(past.contains("from=1790000080000&amp;until=1790000130000\">zoom out</a>"))?
-  assert(past.contains("<a href=\"/timeline?app=hello&amp;over=10s\">now</a>"))?
+  assert(past.contains("from=1790000095000&amp;until=1790000105000\">Earlier</a>"))?
+  assert(past.contains("from=1790000105000&amp;until=1790000115000\">Later</a>"))?
+  assert(past.contains("from=1790000080000&amp;until=1790000130000\">Zoom out</a>"))?
+  assert(past.contains("<a href=\"/timeline?app=hello&amp;over=10s\">Now</a>"))?
   // Nothing earlier than what is kept.
-  assert(!timelineMoves("", "", pastWindow(e, e + 10000), now, e).render().contains("earlier"))?
-  let still = pastReload("/timeline?from=1&until=20", "/timeline?over=1m")
+  assert(!timelineMoves("", "", pastWindow(e, e + 10000), now, e).render().contains("Earlier"))?
+  let still = pastReload("/timeline?from=1&until=20", "the past", "/timeline?over=1m")
   assertEqual(still.seconds, 0)?
-  assertEqual(still.control.render(), "<p class=reload>viewing a past window · <a href=\"/timeline?over=1m\">back to now</a></p>")?
+  assertEqual(still.control.render(), "<p class=reload>the past · <a href=\"/timeline?over=1m\">Back to now</a></p>")?
   Ok(())
 }
 
@@ -1551,7 +1538,7 @@ test fn drawsMergedRunsAsWhatTheyAre() -> Result<Unit, Error> {
   let mixed = aRun(5, [host.WorkerRunApp(app: "hello", runs: 3), host.WorkerRunApp(app: "crunch", runs: 2)])
   assertEqual(
     segmentTitle(mixed, e),
-    "5 runs merged (hello 3, crunch 2), busy 500.0 ms of 2000.0 ms on worker #1 from 23:13:21.000 — zoom in to tell them apart",
+    "5 runs merged (hello 3, crunch 2), busy 500.0 ms of 2000.0 ms on worker #1 from 23:13:21.000",
   )?
   let bar = segmentBar("", "", mixed, 0, 10000000, e, 45, 14, order).render()
   // A faint band over the stretch, and hatching a quarter as high, at its foot.
@@ -1606,10 +1593,6 @@ test fn writesEachPhaseInWords() -> Result<Unit, Error> {
   assertEqual(phaseWords(aPhase("park", 0, 30000, op: "fetch", by: "deadline")), "parked on fetch 30.0 ms (the deadline)")?
   assertEqual(phaseWords(aPhase("park", 0, 500, op: "fetch", by: "cancel")), "parked on fetch 0.5 ms (cancelled)")?
   assertEqual(phaseWords(aPhase("park", 0, 2000, op: "fetch", open: true)), "parked on fetch 2.0 ms so far (still parked)")?
-  let sentence = phaseSentence(phases)
-  assert(sentence.startsWith("waited for a worker 1.0 ms → ran 1.0 ms on worker #0 → parked on timer.sleep"))?
-  assert(sentence.endsWith("→ continued on #1, ran 1.0 ms"))?
-  assertEqual(phaseSentence([]), "")?
   Ok(())
 }
 
@@ -1677,13 +1660,13 @@ test fn theTimelinePagesSayWhatTheyHaveNot() -> Result<Unit, Error> {
   assert(live.contains("<a href=\"/live\" aria-current=page>live</a>"))?
   assert(live.contains("<meta http-equiv=refresh content=\"2; url=/live\">"))?
   assert(live.contains("refreshing every 2 s · <a href=\"/live?refresh=off\">pause</a>"))?
-  assert(live.contains("Nothing is in flight."))?
+  assert(live.contains("<h2>In flight</h2><p class=muted>None</p>"))?
   assert(live.contains("<td class=title data-label=worker>#0</td>"))?
   assert(live.contains("<span class=\"state idle\">idle</span>"))?
   let page = timelinePage("", asking(Map.of(MapEntry(key: "over", value: "10s")))).render()
   assert(page.contains("<h1>Timeline</h1>"))?
   assert(page.contains("<a href=\"/timeline\" aria-current=page>timeline</a>"))?
-  assert(page.contains("No request in the last 10 seconds"))?
+  assert(page.contains("No requests in the last 10 seconds"))?
   assert(page.contains("<b>the last 10 seconds</b>"))?
   assert(!page.contains("<svg class=timeline"))?
   assert(page.contains("<meta http-equiv=refresh content=\"5; url=/timeline?over=10s\">"))?
@@ -1705,10 +1688,10 @@ test fn showsARequestsPhasesAndWhatItCameTo() -> Result<Unit, Error> {
   assert(page.contains("<span class=\"ph ph-park\">park</span> <span class=\"nums muted\">+3.0 ms</span> parked on timer.sleep 10.0 ms (answered)"))?
   assert(page.contains("<td class=nums>1234</td>"))?
   assert(page.contains("<tr><th>collections</th><td class=nums>2</td></tr>"))?
-  assert(page.contains("<tr><th>allocated</th><td class=nums>1.0 MiB <span class=muted>(131072 words, reuse counted each time)</span></td></tr>"))?
+  assert(page.contains("<tr><th>allocated</th><td class=nums>1.0 MiB <span class=muted>(131072 words)</span></td></tr>"))?
   assert(page.contains("<svg class=timeline"))?
   let turned = requestPage("", aRequest(9, [], outcome: "rejected", status: Some(429), reason: "queue_full")).render()
-  assert(turned.contains("No phases"))?
+  assert(turned.contains("<h2>Phases</h2><p class=muted>None</p>"))?
   Ok(())
 }
 

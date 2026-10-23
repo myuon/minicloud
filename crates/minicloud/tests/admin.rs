@@ -844,7 +844,7 @@ fn the_pages_enable_disable_configure_and_reset() {
     // above the quiet ones and its pill is the way to the page that fixes
     // it.
     assert!(
-        overview.contains("href=\"/apps/notes/settings\">refused →</a>"),
+        overview.contains("href=\"/apps/notes/settings\">refused</a>"),
         "{overview}"
     );
     assert!(
@@ -853,10 +853,7 @@ fn the_pages_enable_disable_configure_and_reset() {
     );
     // And its Overview says why before anybody asks.
     let its_own = ui(&host, "GET", "/apps/notes", &authed(), "").body;
-    assert!(
-        its_own.contains("Refused, so nothing reaches it"),
-        "{its_own}"
-    );
+    assert!(its_own.contains("Refused. "), "{its_own}");
     // Reset brings it back.
     assert_eq!(
         ui(&host, "POST", "/apps/notes/reset", &same_site(), "").status,
@@ -1008,17 +1005,17 @@ fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
     let quiet = ui(&host, "GET", "/apps/hello", &authed(), "").body;
     assert!(quiet.contains("<h2>Worth a look</h2>"), "{quiet}");
     assert!(quiet.contains("class=\"is-ok\""), "{quiet}");
-    assert!(quiet.contains("Nothing: no request failed"), "{quiet}");
+    assert!(quiet.contains("No request failed. "), "{quiet}");
     // The green line names what was looked at, the comparison with the
     // app's directory included — which this deploy is small enough for.
     assert!(
-        quiet.contains("every file of the deploy is the same as the one in the app's directory"),
+        quiet.contains("Every file of the deploy is the same as the one in the app's directory"),
         "{quiet}"
     );
     // The numbers are above it, and the way to Settings below.
     assert!(quiet.contains("<h2>Now</h2>"), "{quiet}");
     assert!(
-        quiet.contains("/apps/hello/settings\">Settings</a>:"),
+        quiet.contains("/apps/hello/settings\">Change grant, allowlist and limits</a>"),
         "{quiet}"
     );
     // `/spin` runs past the deadline: one failed request, and the Overview
@@ -1027,7 +1024,7 @@ fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
     let loud = ui(&host, "GET", "/apps/hello", &authed(), "").body;
     assert!(loud.contains("A request failed"), "{loud}");
     assert!(loud.contains("class=\"is-bad\""), "{loud}");
-    assert!(loud.contains("Nothing else: "), "{loud}");
+    assert!(loud.contains("No request was turned away"), "{loud}");
     assert!(
         loud.find("is-bad").unwrap() < loud.find("is-ok").unwrap(),
         "the bad news is first:\n{loud}"
@@ -1040,11 +1037,8 @@ fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
     // and the list says so.
     assert!(list.contains("2 want a look."), "{list}");
     assert!(list.contains("1 error."), "{list}");
-    assert!(
-        list.contains("href=\"/apps/hello\">1 failed →</a>"),
-        "{list}"
-    );
-    assert!(list.contains(">Access off →</a>"), "{list}");
+    assert!(list.contains("href=\"/apps/hello\">1 failed</a>"), "{list}");
+    assert!(list.contains(">Access off</a>"), "{list}");
     assert!(
         list.find(">hello</a>").unwrap() < list.find(">notes</a>").unwrap(),
         "the app with something to say is first:\n{list}"
@@ -1288,20 +1282,14 @@ fn the_platform_page_shows_the_host_against_its_limits() {
         "<span class=big>1 / 2</span>",
         "3 in flight, 2 queued",
         "<span class=big>1.25</span>",
-        "2 rows, one for each minute",
+        "2 rows · ",
         "<svg class=chart",
         "class=\"ln ln-limit\"",
     ] {
         assert!(body.contains(expected), "no `{expected}` in:\n{body}");
     }
-    // The apps' heaps, summed, with how to read them beside the memory.
-    for expected in [
-        "<h2>Garbage collection</h2>",
-        "allocation churning while memory stays flat",
-        "at eight bytes a word",
-    ] {
-        assert!(body.contains(expected), "no `{expected}` in:\n{body}");
-    }
+    // The apps' heaps, summed.
+    assert!(body.contains("<h2>Garbage collection</h2>"), "{body}");
     // And an app's own: its share of runs that collected, and the runs
     // its heap limit failed.
     let metrics = ui(&host, "GET", "/apps/hello/metrics", &authed(), "").body;
@@ -1315,10 +1303,7 @@ fn the_platform_page_shows_the_host_against_its_limits() {
     }
     // The other windows: the month has no hours rolled up yet.
     let month = ui(&host, "GET", "/platform?over=month", &authed(), "").body;
-    assert!(
-        month.contains("Nothing to chart for the last 30 days"),
-        "{month}"
-    );
+    assert!(month.contains("No samples in the last 30 days."), "{month}");
     assert!(
         month.contains("<span class=big>5%</span>"),
         "the figures are now"
@@ -1398,7 +1383,7 @@ fn the_timeline_pages_show_where_each_request_was() {
     // The live window reloads, has nothing later, and zooms out to 5 min.
     for expected in [
         "<meta http-equiv=refresh content=\"5; url=/timeline?over=10s\">",
-        "<a href=\"/timeline?over=1m\">zoom out</a>",
+        "<a href=\"/timeline?over=1m\">Zoom out</a>",
         // A tenth of the axis zooms in; 23:19:50–23:20:00 is the window.
         "<a href=\"/timeline?from=1790000390000&amp;until=1790000392000\"><title>zoom in to \
          23:19:50.000 – 23:19:52.000</title>",
@@ -1410,7 +1395,7 @@ fn the_timeline_pages_show_where_each_request_was() {
             picture.body
         );
     }
-    assert!(!picture.body.contains("later →"));
+    assert!(!picture.body.contains(">Later<"));
 
     // A window of the past: two seconds of it, still; 102 ran in it and 110
     // arrived after it.
@@ -1423,12 +1408,11 @@ fn the_timeline_pages_show_where_each_request_was() {
     );
     assert_eq!(past.status, 200, "{}", past.body);
     for expected in [
-        "over 2026-09-21 23:19:52.000 – 23:19:54.000 JST (2 s).",
-        "<p class=reload>viewing a past window · <a href=\"/timeline?over=10s\">back to now</a></p>",
-        "<a href=\"/timeline?from=1790000391000&amp;until=1790000393000\">← earlier</a>",
-        "<a href=\"/timeline?from=1790000393000&amp;until=1790000395000\">later →</a>",
-        "<a href=\"/timeline?from=1790000388000&amp;until=1790000398000\">zoom out</a>",
-        "<a href=\"/timeline?over=10s\">now</a>",
+        "<p class=reload>2026-09-21 23:19:52.000 – 23:19:54.000 JST (2 s) · <a href=\"/timeline?over=10s\">Back to now</a></p>",
+        "<a href=\"/timeline?from=1790000391000&amp;until=1790000393000\">Earlier</a>",
+        "<a href=\"/timeline?from=1790000393000&amp;until=1790000395000\">Later</a>",
+        "<a href=\"/timeline?from=1790000388000&amp;until=1790000398000\">Zoom out</a>",
+        "<a href=\"/timeline?over=10s\">Now</a>",
         ">23:19:53.000<",
         "/requests/102\"",
         // The chips keep the window.
@@ -1458,7 +1442,7 @@ fn the_timeline_pages_show_where_each_request_was() {
         "resumed on #1 (moved), ran 30.0 ms",
         "<a href=\"/timeline?app=slow&amp;over=1m\">timeline of slow</a>",
         // Arrived at 392.3 s, ended at 393.38: half of that either side.
-        "<a href=\"/timeline?from=1790000391760&amp;until=1790000393921\">show on the timeline</a>",
+        "<a href=\"/timeline?from=1790000391760&amp;until=1790000393921\">Show on timeline</a>",
     ] {
         assert!(
             moved.body.contains(expected),
