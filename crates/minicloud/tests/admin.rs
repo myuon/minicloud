@@ -853,10 +853,7 @@ fn the_pages_enable_disable_configure_and_reset() {
     );
     // And its Overview says why before anybody asks.
     let its_own = ui(&host, "GET", "/apps/notes", &authed(), "").body;
-    assert!(
-        its_own.contains("Refused. "),
-        "{its_own}"
-    );
+    assert!(its_own.contains("Refused. "), "{its_own}");
     // Reset brings it back.
     assert_eq!(
         ui(&host, "POST", "/apps/notes/reset", &same_site(), "").status,
@@ -1040,10 +1037,7 @@ fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
     // and the list says so.
     assert!(list.contains("2 want a look."), "{list}");
     assert!(list.contains("1 error."), "{list}");
-    assert!(
-        list.contains("href=\"/apps/hello\">1 failed</a>"),
-        "{list}"
-    );
+    assert!(list.contains("href=\"/apps/hello\">1 failed</a>"), "{list}");
     assert!(list.contains(">Access off</a>"), "{list}");
     assert!(
         list.find(">hello</a>").unwrap() < list.find(">notes</a>").unwrap(),
@@ -1309,10 +1303,7 @@ fn the_platform_page_shows_the_host_against_its_limits() {
     }
     // The other windows: the month has no hours rolled up yet.
     let month = ui(&host, "GET", "/platform?over=month", &authed(), "").body;
-    assert!(
-        month.contains("No samples in the last 30 days."),
-        "{month}"
-    );
+    assert!(month.contains("No samples in the last 30 days."), "{month}");
     assert!(
         month.contains("<span class=big>5%</span>"),
         "the figures are now"

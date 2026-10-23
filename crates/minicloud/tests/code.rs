@@ -945,7 +945,10 @@ fn the_page_says_when_the_directory_is_not_what_is_running() {
         loud.contains("One file in the app's directory is not the one that is running."),
         "{loud}"
     );
-    assert!(loud.contains("/apps/notes/code\">Compare files</a>"), "{loud}");
+    assert!(
+        loud.contains("/apps/notes/code\">Compare files</a>"),
+        "{loud}"
+    );
     // And the file answered is still the one that is running.
     let one = page(&host, "/apps/notes/code?file=notes.cove");
     assert!(
