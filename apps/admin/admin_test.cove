@@ -689,8 +689,8 @@ test fn hoversARowOrAGroupOfRows() -> Result<Unit, Error> {
 test fn saysSoWhenNothingIsWorthALook() -> Result<Unit, Error> {
   let said = worthALook("", anApp("hello"), noQueues(), aDisk()).render()
   assert(said.contains("class=\"is-ok\""))?
-  assert(said.contains("Nothing: no request failed"))?
-  assert(said.contains("every file of the deploy is the same as the one in the app's directory"))?
+  assert(said.contains("No request failed. No request was turned away."))?
+  assert(said.contains("Every file of the deploy is the same as the one in the app's directory"))?
   assertEqual(said.contains("is-bad"), false)?
   assertEqual(said.contains("is-warn"), false)?
   Ok(())
@@ -706,19 +706,19 @@ test fn saysWhatIsOnTheQueuesWorstFirst() -> Result<Unit, Error> {
   assert(said.contains("/apps/jobs/queues"))?
   // The dead letters are above what is held, and both above the green line.
   assert(said.indexOf("dead letters wait").unwrapOr(0) < said.indexOf("3 held").unwrapOr(0))?
-  assert(said.indexOf("3 held").unwrapOr(0) < said.indexOf("Nothing else").unwrapOr(0))?
+  assert(said.indexOf("3 held").unwrapOr(0) < said.indexOf("No request failed").unwrapOr(0))?
   // And the green line no longer claims the queues are clear.
-  assertEqual(said.contains("no dead letter waits"), false)?
+  assertEqual(said.contains("No dead letter waits"), false)?
   Ok(())
 }
 
 /// A store near what it may hold, before the write that is refused.
 test fn saysWhenAStoreIsNearItsLimit() -> Result<Unit, Error> {
   let full = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 900, kvMaxKeys: 1000, kvMaxBytes: 1000)
-  assert(worthALook("", full, noQueues(), aDisk()).render().contains("holds 900 B of the 1000 B it may"))?
+  assert(worthALook("", full, noQueues(), aDisk()).render().contains("holds 900 B of its 1000 B"))?
   // Eighty hundredths is where it starts, so 799 of 1000 is not it.
   let room = anApp("notes", granted: Vector.of("kv").freeze(), kvKeys: 10, kvBytes: 799, kvMaxKeys: 1000, kvMaxBytes: 1000)
-  assert(worthALook("", room, noQueues(), aDisk()).render().contains("no store is near its limit"))?
+  assert(worthALook("", room, noQueues(), aDisk()).render().contains("No store is near its limit"))?
   // A store the host has not opened, and a limit of 0, are not "near".
   assertEqual(nearLimit(-1, 100), false)?
   assertEqual(nearLimit(100, 0), false)?
@@ -733,9 +733,9 @@ test fn saysWhenAStoreIsNearItsLimit() -> Result<Unit, Error> {
 /// that would matter.
 test fn saysWhenItDidNotCompareTheDeployWithTheDirectory() -> Result<Unit, Error> {
   let said = worthALook("", anApp("big"), noQueues(), aDisk(looked: false)).render()
-  assert(said.contains("The deploy was not compared with the app's directory here"))?
-  assert(said.contains("The Code tab reads every file of it."))?
-  assertEqual(said.contains("every file of the deploy is the same"), false)?
+  assert(said.contains("Deploy not compared with the app's directory."))?
+  assert(said.contains("Compare files"))?
+  assertEqual(said.contains("Every file of the deploy is the same"), false)?
   let differs = worthALook("", anApp("big"), noQueues(), aDisk(differing: 2)).render()
   assert(differs.contains("2 files in the app's directory are not the ones that are running"))?
   Ok(())
@@ -776,24 +776,12 @@ test fn putsWhatAnAppHasToSayAtTheEndOfItsCard() -> Result<Unit, Error> {
   let flags = appFlags("", loud, noQueues())
   let card = appCard("", loud, flags).render()
   assert(card.contains("<li class=\"app is-bad\">"))?
-  assert(card.contains("href=\"/apps/notes/settings\">refused →</a>"))?
-  assert(card.contains("href=\"/apps/notes\">2 failed →</a>"))?
-  assert(card.contains("Access off →"))?
+  assert(card.contains("href=\"/apps/notes/settings\">refused</a>"))?
+  assert(card.contains("href=\"/apps/notes\">2 failed</a>"))?
+  assert(card.contains("Access off</a>"))?
   // The refusal's reason is the one thing a list cannot send somebody away
   // to read, so the card holds it — escaped, like everything else.
   assert(card.contains("requires `kv`"))?
-  Ok(())
-}
-
-/// The sentence the green line is made of.
-test fn writesAListAsASentence() -> Result<Unit, Error> {
-  assertEqual(sentence(Vector.of().freeze()).render(), "")?
-  assertEqual(sentence(Vector.of(html"a").freeze()).render(), "a")?
-  assertEqual(sentence(Vector.of(html"a", html"b").freeze()).render(), "a and b")?
-  assertEqual(sentence(Vector.of(html"a", html"b", html"c").freeze()).render(), "a, b and c")?
-  // The words are the page's own, so an apostrophe in one is written as it
-  // is: the green line says "the app's directory".
-  assertEqual(sentence(Vector.of(html"x", html"the app's").freeze()).render(), "x and the app's")?
   Ok(())
 }
 
@@ -916,15 +904,15 @@ test fn escapesEveryPieceOfAColouredFile() -> Result<Unit, Error> {
 test fn saysWhyAFileIsShownWithNoColour() -> Result<Unit, Error> {
   let none = Vector.of().freeze()
   let cut = codeBody(aColouredFile("big.cove", "x", none, "cut")).render()
-  assert(cut.contains("stops at what the host carries"))?
+  assert(cut.contains("No colouring for a cut file."))?
   assert(cut.contains("<pre class=code>x</pre>"))?
   let dense = codeBody(aColouredFile("dense.cove", "x", none, "dense")).render()
-  assert(dense.contains("more pieces than one page carries (20000)"))?
+  assert(dense.contains("No colouring past 20000 pieces."))?
   let unknown = codeBody(aColouredFile("notes.txt", "x", none, "unknown")).render()
-  assert(unknown.contains("no reader for this kind of file"))?
+  assert(unknown.contains("No colouring for this kind of file."))?
   // And a word the host grows later still says something.
   let later = codeBody(aColouredFile("a.rs", "x", none, "elsewhere")).render()
-  assert(later.contains("no reader for this kind of file"))?
+  assert(later.contains("No colouring for this kind of file."))?
   // Coloured, there is nothing to explain.
   let shown = codeBody(aColouredFile("a.cove", "x", Vector.of(host.CodePiece(kind: "plain", text: "x")).freeze(), "")).render()
   assertEqual(shown, "<pre class=code>x</pre>")?

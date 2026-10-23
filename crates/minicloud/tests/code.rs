@@ -918,7 +918,7 @@ fn the_page_says_when_the_directory_is_not_what_is_running() {
     // And the Overview says they agree, which is the thing it was asked.
     let quiet = page(&host, "/apps/notes").body;
     assert!(
-        quiet.contains("every file of the deploy is the same as the one in the app's directory"),
+        quiet.contains("Every file of the deploy is the same as the one in the app's directory"),
         "{quiet}"
     );
 
@@ -942,10 +942,10 @@ fn the_page_says_when_the_directory_is_not_what_is_running() {
     // deploy is under its budget.
     let loud = page(&host, "/apps/notes").body;
     assert!(
-        loud.contains("One file in the app's directory is not the one that is running:"),
+        loud.contains("One file in the app's directory is not the one that is running."),
         "{loud}"
     );
-    assert!(loud.contains("/apps/notes/code\">code</a>"), "{loud}");
+    assert!(loud.contains("/apps/notes/code\">Compare files</a>"), "{loud}");
     // And the file answered is still the one that is running.
     let one = page(&host, "/apps/notes/code?file=notes.cove");
     assert!(
