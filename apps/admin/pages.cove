@@ -221,21 +221,6 @@ fn about(summary: Html, body: Html) -> Html {
   html"<details class=about><summary>{summary}</summary><p>{body}</p></details>"
 }
 
-/// What a change to an app comes to, which is what every page that can make
-/// one says.
-///
-/// Markup and not a `String`, though it holds no tag: it is the page's own
-/// prose, and the host's `'` in it is written as it is, which a hole would
-/// have escaped.
-fn recheck() -> Html {
-  html"""
-    A change to an app is a re-check: the host loads the app again with it and serves the new
-    version only if it loads. Taking away a capability the code needs leaves that app refused
-    — and no other. Changes are kept in the host's data directory and survive restarts and
-    releases.
-    """
-}
-
 /// One tab of an app's row: what it says, and where it leads.
 struct Tab {
   label: String
@@ -348,26 +333,6 @@ fn nearLimit(held: Int, limit: Int) -> Bool {
   held * 100 >= limit * storeNearly()
 }
 
-/// `items` as a sentence: `a`, `a and b`, `a, b and c`.
-///
-/// The items are markup because they are the page's own words — "the app's
-/// directory" among them — and a word of the page's is written as it is.
-fn sentence(items: Array<Html>) -> Html {
-  if items.length() <= 1 {
-    return html"{items}"
-  }
-  var first = Vector.of()
-  var at = 0
-  for item in items {
-    if at < items.length() - 1 {
-      first.push(item)
-    }
-    at = at + 1
-  }
-  let last = items.get(items.length() - 1)
-  html"{html.join(first.freeze(), html", ")} and {last}"
-}
-
 /// A link to `path` that says `label`: the way to where a line of
 /// [`worthALook`] shows.
 fn lookAt(path: String, label: String) -> Html {
@@ -393,7 +358,7 @@ fn lookList(items: Array<Look>) -> Html {
 /// the disk comparison is the one expensive read on this page.
 fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host.CodeDisk) -> Html {
   let at = appAt(base, app)
-  let toLog = lookAt("{at}/logs", "log")
+  let toLog = lookAt("{at}/logs", "Show log")
   var bad = Vector.of()
   var warn = Vector.of()
   var clean = Vector.of()
@@ -402,20 +367,20 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
     bad.push(
       Look(
         level: "bad",
-        what: html"Refused, so nothing reaches it: {firstLine(app.reason)}",
-        seen: Some(lookAt("{at}/settings", "settings")),
+        what: html"Refused. {firstLine(app.reason)}",
+        seen: Some(lookAt("{at}/settings", "Open settings")),
       ),
     )
   } else if app.state == "disabled" {
     warn.push(
       Look(
         level: "warn",
-        what: html"Disabled: requests are answered 503 and its data is kept.",
-        seen: Some(lookAt("{at}/settings", "settings")),
+        what: html"Disabled. Requests are answered 503.",
+        seen: Some(lookAt("{at}/settings", "Open settings")),
       ),
     )
   } else if app.state == "removed" {
-    warn.push(Look(level: "warn", what: html"Removed: the host has no version of it left.", seen: None))
+    warn.push(Look(level: "warn", what: html"Removed.", seen: None))
   }
   // The failures the host kept, newest first, and then how many more there
   // have been than it keeps.
@@ -441,21 +406,21 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
     bad.push(Look(level: "bad", what: html"{counted} since the load.", seen: Some(toLog)))
   }
   if app.errors == 0 {
-    clean.push(html"no request failed")
+    clean.push(html"No request failed")
   }
   if app.rejected > 0 {
     warn.push(
       Look(
         level: "warn",
         what: html"""
-          {app.rejected} requests were turned away: the app was at <code>max_in_flight</code>
-          or <code>max_queued</code>.
+          {app.rejected} requests turned away at <code>max_in_flight</code> or
+          <code>max_queued</code>.
           """,
-        seen: Some(lookAt("{at}/settings", "limits")),
+        seen: Some(lookAt("{at}/settings", "Change limits")),
       ),
     )
   } else {
-    clean.push(html"no request was turned away")
+    clean.push(html"No request was turned away")
   }
   // What is on the queues. A dead letter is the bad news — nothing delivers
   // it again until somebody puts it back — and what is held is a delivery
@@ -469,11 +434,8 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       bad.push(
         Look(
           level: "bad",
-          what: html"""
-            {counted} on <code>{queue.name}</code>: nothing delivers one again until somebody
-            puts it back.
-            """,
-          seen: Some(lookAt("{at}/queues", "queues")),
+          what: html"{counted} on <code>{queue.name}</code>.",
+          seen: Some(lookAt("{at}/queues", "Show queues")),
         ),
       )
     }
@@ -481,11 +443,8 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       warn.push(
         Look(
           level: "warn",
-          what: html"""
-            {queue.held} held on <code>{queue.name}</code>: a delivery on lease, or a failed
-            one waiting for its retry.
-            """,
-          seen: Some(lookAt("{at}/queues", "queues")),
+          what: html"{queue.held} held on <code>{queue.name}</code>.",
+          seen: Some(lookAt("{at}/queues", "Show queues")),
         ),
       )
     }
@@ -494,16 +453,16 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
         Look(
           level: "warn",
           what: html"""
-            <code>{queue.name}</code> holds messages and the app's <code>[[queues]]</code> no
-            longer declares it: nothing will ever deliver them.
+            <code>{queue.name}</code> is no longer in <code>[[queues]]</code>. Its messages will
+            never be delivered.
             """,
-          seen: Some(lookAt("{at}/queues", "queues")),
+          seen: Some(lookAt("{at}/queues", "Show queues")),
         ),
       )
     }
   }
   if queues.length() > 0 && !deadAnywhere {
-    clean.push(html"no dead letter waits")
+    clean.push(html"No dead letter waits")
   }
   // A store near what it may hold. The write that reaches the limit is the
   // app's `Err`, and this is the page that could have said so first.
@@ -514,10 +473,10 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"""
-          The <code>kv</code> store holds {text.bytes(app.kvBytes)} of the
-          {text.bytes(app.kvMaxBytes)} it may: a write past that is refused.
+          <code>kv</code> holds {text.bytes(app.kvBytes)} of its {text.bytes(app.kvMaxBytes)}
+          limit.
           """,
-        seen: Some(lookAt("{at}/kv", "data")),
+        seen: Some(lookAt("{at}/kv", "Browse keys")),
       ),
     )
   }
@@ -527,10 +486,9 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"""
-          The <code>kv</code> store holds {app.kvKeys} of the {app.kvMaxKeys} keys it may:
-          a write past that is refused.
+          <code>kv</code> holds {app.kvKeys} of its {app.kvMaxKeys} key limit.
           """,
-        seen: Some(lookAt("{at}/kv", "data")),
+        seen: Some(lookAt("{at}/kv", "Browse keys")),
       ),
     )
   }
@@ -540,15 +498,15 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "warn",
         what: html"""
-          The <code>sql</code> store is {text.bytes(app.sqlBytes)} of the
-          {text.bytes(app.sqlMaxBytes)} it may be: a statement that writes past that is refused.
+          <code>sql</code> is at {text.bytes(app.sqlBytes)} of its {text.bytes(app.sqlMaxBytes)}
+          limit.
           """,
-        seen: Some(lookAt("{at}/sql", "sql")),
+        seen: Some(lookAt("{at}/sql", "Open SQL")),
       ),
     )
   }
   if !tight && (app.granted.contains("kv") || app.granted.contains("sql")) {
-    clean.push(html"no store is near its limit")
+    clean.push(html"No store is near its limit")
   }
   // The deploy against the app's directory. `looked` is the host saying
   // whether it read the files at all; a page that said "the same" without
@@ -558,11 +516,10 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
       Look(
         level: "",
         what: html"""
-          The deploy was not compared with the app's directory here: it comes to
-          {text.bytes(disk.bytes)}, past the {text.bytes(disk.budget)} this page reads.
-          The Code tab reads every file of it.
+          Deploy not compared with the app's directory. It is {text.bytes(disk.bytes)}, over
+          {text.bytes(disk.budget)}.
           """,
-        seen: Some(lookAt("{at}/code", "code")),
+        seen: Some(lookAt("{at}/code", "Compare files")),
       ),
     )
   } else if disk.differing > 0 {
@@ -574,12 +531,12 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
     warn.push(
       Look(
         level: "warn",
-        what: html"{counted}: a deploy staged and not switched to, or an edit made on the machine.",
-        seen: Some(lookAt("{at}/code", "code")),
+        what: html"{counted}.",
+        seen: Some(lookAt("{at}/code", "Compare files")),
       ),
     )
   } else {
-    clean.push(html"every file of the deploy is the same as the one in the app's directory")
+    clean.push(html"Every file of the deploy is the same as the one in the app's directory")
   }
   // An app that asked for Access and did not get it is serving to whoever
   // reaches it. An app that asked for none says nothing here: it is not
@@ -601,14 +558,10 @@ fn worthALook(base: String, app: host.App, queues: Array<host.Queue>, disk: host
     items.push(item)
   }
   if clean.length() > 0 {
-    let lead = if items.length() == 0 { "Nothing" } else { "Nothing else" }
-    items.push(Look(level: "ok", what: html"{lead}: {sentence(clean.freeze())}.", seen: None))
+    items.push(Look(level: "ok", what: html"{html.join(clean.freeze(), html". ")}.", seen: None))
   }
   if items.length() == 0 {
-    return html"""
-      <p class=allwell>Nothing the host can see, and nothing it could look at: this app is
-      loaded with no store, no queue and no deploy to compare.</p>
-      """
+    return html"<p class=allwell>Nothing to look at.</p>"
   }
   lookList(items.freeze())
 }
@@ -659,11 +612,11 @@ fn storePair(label: String, value: String, level: String) -> Html {
 }
 
 /// A store, as a card that is the way into it. Every card has a foot: what
-/// the store holds at most, its first few names, or that it has none yet.
+/// the store holds at most, or its first few names.
 fn storeCard(link: String, name: String, go: String, pairs: Html, foot: Html) -> Html {
   html"""
     <a class=store href="{link}">
-      <span class=top><span class=name>{name}</span><span class=go>{go} →</span></span>
+      <span class=top><span class=name>{name}</span><span class=go>{go}</span></span>
       <span class=pairs>{pairs}</span>
       <span class=foot>{foot}</span>
     </a>
@@ -683,12 +636,12 @@ fn storeCards(base: String, app: host.App, queues: Array<host.Queue>) -> Html {
     let sizeLevel = if nearLimit(app.kvBytes, app.kvMaxBytes) { "is-warn" } else { "" }
     let pairs = html"{storePair("keys", keys, keysLevel)}{storePair("size", size, sizeLevel)}"
     let note = if app.kvKeys < 0 {
-      "The host has not opened this store since it started."
+      "Not opened since the host started."
     } else {
       "At most {app.kvMaxKeys} keys and {text.bytes(app.kvMaxBytes)}."
     }
     let foot = html"{note}"
-    cards.push(storeCard("{at}/kv", "kv", "browse", pairs, foot))
+    cards.push(storeCard("{at}/kv", "kv", "Browse keys", pairs, foot))
   }
   if app.granted.contains("sql") {
     let tables = host.sqlTables(app.name)
@@ -707,12 +660,8 @@ fn storeCards(base: String, app: host.App, queues: Array<host.Queue>) -> Html {
     }
     let total = if counted { "{rows}" } else { "{rows}+" }
     let pairs = html"{storePair("tables", "{tables.length()}", "")}{storePair("rows", total, "")}"
-    let foot = if named.length() == 0 {
-      html"No tables yet."
-    } else {
-      html.join(named.freeze(), html" · ")
-    }
-    cards.push(storeCard("{at}/sql", "sql", "run a statement", pairs, foot))
+    let foot = html.join(named.freeze(), html" · ")
+    cards.push(storeCard("{at}/sql", "sql", "Run a statement", pairs, foot))
   }
   if queues.length() > 0 {
     var due = 0
@@ -732,30 +681,13 @@ fn storeCards(base: String, app: host.App, queues: Array<host.Queue>) -> Html {
       {storePair("held", "{held}", if held > 0 { "is-warn" } else { "" })}
       {storePair("dead", "{dead}", if dead > 0 { "is-bad" } else { "" })}
       """
-    let listed = html.join(named.freeze(), html" · ")
-    let foot = if due + held + dead == 0 { html"Nothing waits on {listed}." } else { listed }
-    cards.push(storeCard("{at}/queues", "queues", "see what waits", pairs, foot))
+    let foot = html.join(named.freeze(), html" · ")
+    cards.push(storeCard("{at}/queues", "queues", "Show queues", pairs, foot))
   }
   if cards.length() == 0 {
     return html""
   }
   html"<h2>Stores</h2><div class=stores>{cards.freeze()}</div>"
-}
-
-/// What the Overview's folded line says, which depends on what the app is
-/// doing: there is no point summarising a re-check to somebody looking at
-/// an app that is refused.
-fn overviewSummary(app: host.App) -> Html {
-  if app.state == "refused" {
-    return html"Refused: it is not served again until the reason below is gone."
-  }
-  if app.state == "disabled" {
-    return html"Disabled: requests are answered 503, and its data is kept."
-  }
-  if app.state == "removed" {
-    return html"Removed: the host has no version of it left."
-  }
-  html"Serving the version it was last loaded with; a change is a re-check."
 }
 
 /// One app's Overview: what is happening, and the way to everything else
@@ -777,7 +709,7 @@ fn appOverviewPage(base: String, app: host.App) -> Html {
   let required = if app.requiredOpen {
     html"""
       {names(app.required)} \
-      <span class=muted>(at least: it makes a call the checker cannot follow)</span>
+      <span class=muted>(at least)</span>
       """
   } else {
     names(app.required)
@@ -788,17 +720,15 @@ fn appOverviewPage(base: String, app: host.App) -> Html {
     app.name,
     html"""
       {appHead(base, app, "Overview")}
-      {about(overviewSummary(app), recheck())}
       {reason}
       <h2>Now</h2>{nowStrip(app)}
       <h2>Worth a look</h2>{worthALook(base, app, queues, disk)}
       {storeCards(base, app, queues)}
       <h2>Last lines</h2>{logTable(lines)}
-      <p class=more><a href="{at}/logs">the last 200 lines →</a></p>
+      <p class=more><a href="{at}/logs">Show last 200 lines</a></p>
       <h2>How it is set up</h2>
-      <p class=more>The grant, the fetch allowlist, the limits and the forms that change them
-      are on <a href="{at}/settings">Settings</a>: it is granted {grantList(app)}, and its
-      code requires {required}.</p>
+      <p class=more>granted {grantList(app)} · code requires {required}</p>
+      <p class=more><a href="{at}/settings">Change grant, allowlist and limits</a></p>
       """,
   )
 }
@@ -824,7 +754,7 @@ fn settingsPage(
   let required = if app.requiredOpen {
     html"""
       {names(app.required)} \
-      <span class=muted>(at least: it makes a call the checker cannot follow)</span>
+      <span class=muted>(at least)</span>
       """
   } else {
     names(app.required)
@@ -837,14 +767,7 @@ fn settingsPage(
         <tr><th>granted now</th><td>{grantList(app)}</td></tr>
       </table>
     </div>
-    <p class=more>The host read this out of the deploy; it changes when the code does. What
-    is happening — the numbers, the stores, the log — is on <a href="{at}">Overview</a>.</p>
     """
-  let summary = html"""
-    This is where <code>{app.name}</code> is changed — every change is a re-check, and one
-    that does not load is not kept.
-    """
-  let told = html"""{recheck()} Each one is a line in the <a href="{base}/history">history</a>."""
   layout(
     base,
     "apps",
@@ -852,7 +775,6 @@ fn settingsPage(
     html"""
       {appHead(base, app, "Settings")}
       {notice}
-      {about(summary, told)}
       {reason}
       {facts}
       {configureForm(at, app, capabilities, posted)}
@@ -958,7 +880,7 @@ fn appCard(base: String, app: host.App, flags: Array<Flag>) -> Html {
   let why = html.only(app.reason != "", html"<div class=muted>{firstLine(app.reason)}</div>")
   var pills = Vector.of()
   for flag in flags {
-    pills.push(html"""<a class="flag {flag.level}" href="{flag.path}">{flag.text} →</a>""")
+    pills.push(html"""<a class="flag {flag.level}" href="{flag.path}">{flag.text}</a>""")
   }
   let said = if pills.length() == 0 {
     html"<span class=quiet>quiet</span>"
@@ -1028,7 +950,6 @@ fn appsPage(base: String, apps: Array<host.App>) -> Html {
     html" <b>{wanting} want a look.</b>"
   }
   let counted = if errors == 1 { "1 error" } else { "{errors} errors" }
-  let summary = html"A change to an app is a re-check: it is served again only if it loads."
   layout(
     base,
     "apps",
@@ -1036,12 +957,7 @@ fn appsPage(base: String, apps: Array<host.App>) -> Html {
     html"""
       <h1>Apps</h1>
       <p class=sub>{apps.length()} apps — {rest} — {served} requests served, {counted}.{wants}</p>
-      {about(summary, recheck())}
       <ul class=apps>{bad.freeze()}{warn.freeze()}{quiet.freeze()}</ul>
-      <p class=more>The ones with something to say are first, and the worst of those above the
-      rest; the others are quiet, and a quiet app has no failed request, no refusal, no dead
-      letter and no store near its limit. What each app may do, and what its code asks for, is
-      on that app's Settings.</p>
       """,
   )
 }
@@ -1070,8 +986,7 @@ fn enableForm(at: String, app: host.App) -> Html {
   if app.isAdmin {
     return html"""
       <h2>Routing</h2>
-      <div class=panel><p class=muted>The admin app cannot disable itself. On the machine,
-      <code>minicloud disable admin</code> can.</p></div>
+      <div class=panel><p class=muted>The admin app cannot disable itself.</p></div>
       """
   }
   if app.state == "removed" {
@@ -1082,7 +997,6 @@ fn enableForm(at: String, app: host.App) -> Html {
       <h2>Routing</h2>
       <div class=panel>
         <form method=post action="{at}/enable">
-          <p>Disabled: requests are answered 503, and its data is kept.</p>
           <div class=actions><button class=primary>Enable</button></div>
         </form>
       </div>
@@ -1092,8 +1006,7 @@ fn enableForm(at: String, app: host.App) -> Html {
     <h2>Routing</h2>
     <div class=panel>
       <form method=post action="{at}/disable">
-        <p>Disabling stops routing to it — requests are answered 503 — and keeps its data;
-        requests in flight finish.</p>
+        <p>Requests are answered 503.</p>
         <div class=actions><button class=danger>Disable</button></div>
       </form>
     </div>
@@ -1168,14 +1081,13 @@ fn configureForm(
       <form method=post action="{at}/configure">
         <fieldset>
           <legend>Grant</legend>
-          <p class=more>A capability the code needs and does not have leaves this app refused,
-          and no other.</p>
+          <p class=more>Removing a capability the code uses gets this app refused.</p>
           <div class=caps>{boxes.freeze()}</div>
         </fieldset>
         <fieldset>
           <legend>Fetch allowlist</legend>
-          <p class=muted>One per line: <code>https://host</code>, <code>http://host:port</code>
-          or <code>http://host:*</code>.</p>
+          <p class=muted>One per line, as <code>https://host</code>, <code>http://host:port</code>
+          or <code>http://host:*</code></p>
           <textarea name=allow rows=5>{allow}</textarea>
         </fieldset>
         <fieldset>
@@ -1184,8 +1096,7 @@ fn configureForm(
         </fieldset>
         <div class=actions>
           <button class=primary>Check and apply</button>
-          <span class=muted>The host reloads the app with these settings; a change that does
-          not work is not kept.</span>
+          <span class=muted>Not kept if the app fails to load.</span>
         </div>
       </form>
     </div>
@@ -1199,8 +1110,7 @@ fn resetForm(at: String) -> Html {
       <form method=post action="{at}/reset">
         <div class=actions>
           <button>Reset to app.toml</button>
-          <span class=muted>Drops every change made here to the grant, the allowlist and the
-          limits.</span>
+          <span class=muted>Drops every change made here.</span>
         </div>
       </form>
     </div>
@@ -1248,8 +1158,7 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
       "{app.name} store",
       html"""
         {appHead(base, app, "Data")}
-        <p class=lead><code>{app.name}</code> is not granted <code>kv</code>: it has no store,
-        and the host keeps no file for it.</p>
+        <p class=lead><code>{app.name}</code> is not granted <code>kv</code>.</p>
         """,
     )
   }
@@ -1280,9 +1189,9 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
   let more = at_ > size
   let table = if rows.length() == 0 {
     let why = if prefix == "" && after == "" {
-      "This store has no keys yet."
+      "No keys."
     } else {
-      "No key here."
+      "No keys match."
     }
     html"<p class=muted>{why}</p>"
   } else {
@@ -1299,7 +1208,7 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
     <form class=inline method=get action="{at}/kv">
       <label for=prefix>keys starting with</label>
       <input id=prefix name=prefix value="{prefix}" placeholder="(any)">
-      <button>Show</button>
+      <button>Filter</button>
     </form>
     """
   // The `&` between two parameters is written `&amp;`, as an `&` in an
@@ -1308,27 +1217,22 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
   let first = url.percentEncode(prefix)
   var steps = Vector.of()
   if after != "" {
-    steps.push(html"""<a href="{at}/kv?prefix={first}">← the first {size}</a>""")
+    steps.push(html"""<a href="{at}/kv?prefix={first}">Show first {size}</a>""")
   }
   if more {
-    steps.push(html"""<a href="{at}/kv?prefix={first}&amp;after={url.percentEncode(last)}">the next {size} →</a>""")
+    steps.push(html"""<a href="{at}/kv?prefix={first}&amp;after={url.percentEncode(last)}">Show next {size}</a>""")
   }
   let paging = html.only(steps.length() > 0, html"<p class=actions>{html.join(steps.freeze(), html" ")}</p>")
   let held = if app.kvKeys < 0 {
-    "The host has not opened this store since it started."
+    "Not opened since the host started."
   } else {
     "{app.kvKeys} keys, {text.bytes(app.kvBytes)} in all."
   }
-  let summary = html"Reading only — the admin app cannot write to another app's store."
-  let told = html"""
-    {held} A value longer than the column is cut; the key opens it whole. Nothing here writes:
-    the admin app reads another app's store and cannot change it.
-    """
   layout(
     base,
     "apps",
     "{app.name} store",
-    html"{appHead(base, app, "Data")}{about(summary, told)}{filter}{table}{paging}",
+    html"{appHead(base, app, "Data")}<p class=muted>{held}</p>{filter}{table}{paging}",
   )
 }
 
@@ -1336,10 +1240,10 @@ fn storePage(base: String, app: host.App, request: web.Request) -> Html {
 /// carries, which the page says).
 fn storeKeyPage(base: String, app: host.App, key: String) -> Html {
   let at = appAt(base, app)
-  let back = html"""<p class=actions><a href="{at}/kv">← every key</a></p>"""
+  let back = html"""<p class=actions><a href="{at}/kv">Back to keys</a></p>"""
   match host.kvValue(app.name, key) {
     Ok(entry) => {
-      let cut = html.only(entry.cut, html" <span class=muted>(cut: the whole value is {text.bytes(entry.bytes)})</span>")
+      let cut = html.only(entry.cut, html" <span class=muted>(cut, {text.bytes(entry.bytes)} in full)</span>")
       let facts = html"""
         <div class="scroll narrow">
           <table class=facts>
@@ -1605,47 +1509,24 @@ fn codePage(base: String, app: host.App, request: web.Request) -> Html {
       }
     }
   }
-  let tree = if shown.length() == 0 {
-    html"""
-      <p class=muted>The host has no version of this app loaded, so there is nothing it is
-      running.</p>
-      """
-  } else {
-    html"""<div class="panel tree">{codeTree(at, shown.freeze())}</div>"""
-  }
+  let tree = html.only(shown.length() != 0, html"""<div class="panel tree">{codeTree(at, shown.freeze())}</div>""")
   let differs = html.only(differing != 0, differingFiles(differing))
   let more = html.only(
     files > size,
     html"""
-      <p class=muted>The first {size} files; this deploy has more, which this page does not
-      show.</p>
+      <p class=muted>Only the first {size} files are shown.</p>
       """,
   )
-  let summary = html"""
-    What is running, not what is in the app's directory — and each file says how the two
-    compare.
-    """
-  let told = html"""
-    What <code>{app.version}</code> is made of: its <code>app.toml</code>, its
-    <code>.cove</code> files and its <code>assets/</code>, which is the whole of what a deploy
-    carries. The code and the assets are the ones the host is running, held since the app was
-    loaded; <code>app.toml</code> is read from the app's directory, because the load keeps
-    only the settings it parsed to — which is why the app's own page can show a grant or a
-    limit this file does not. Beside each name is what the file is, what it comes to, and how
-    the file of the same name in the app's directory compares. The directories are the app's
-    own, nested as it has them. Reading only.
-    """
   layout(
     base,
     "apps",
     "{app.name} code",
-    html"{appHead(base, app, "Code")}{about(summary, told)}{differs}{tree}{more}",
+    html"{appHead(base, app, "Code")}{differs}{tree}{more}",
   )
 }
 
 /// The problem the code page states when `differing` of the files it shows
-/// are not the ones in the app's directory: how many, and the two ways that
-/// comes about.
+/// are not the ones in the app's directory: how many.
 fn differingFiles(differing: Int) -> Html {
   // Text and not markup, so the `'` in it is escaped as a host's value is:
   // that is how this page has always written it.
@@ -1655,9 +1536,7 @@ fn differingFiles(differing: Int) -> Html {
     "{differing} files in the app's directory are not the ones that are running."
   }
   html"""
-    <div class=problem><b>{count}</b> A deploy that was staged and not switched to, or an
-    edit made on the machine: either way, what is below is what the host is running, and the
-    directory holds something else.</div>
+    <div class=problem><b>{count}</b></div>
     """
 }
 
@@ -1707,22 +1586,16 @@ fn codePiece(piece: host.CodePiece) -> Html {
 fn codePlainWhy(file: host.CodeFile) -> Html {
   if file.plain == "cut" {
     return html"""
-      <p class=muted>Shown with no colouring: the text below stops at what the host carries,
-      and colouring part of a file would say that the rest of it is whatever the cut fell
-      inside.</p>
+      <p class=muted>No colouring for a cut file.</p>
       """
   }
   if file.plain == "dense" {
     return html"""
-      <p class=muted>Shown with no colouring: this file comes to more pieces than one page
-      carries ({codePieceLimit()}), and a page that was slow to arrive would be worse than a
-      page with no colour on it.</p>
+      <p class=muted>No colouring past {codePieceLimit()} pieces.</p>
       """
   }
   html"""
-    <p class=muted>Shown with no colouring: the host reads <code>.cove</code>,
-    <code>.toml</code>, <code>.css</code> and XML, and has no reader for this kind of file.
-    A colouring guessed from a name would be a claim about the file; none is no claim.</p>
+    <p class=muted>No colouring for this kind of file.</p>
     """
 }
 
@@ -1747,11 +1620,11 @@ fn codeBody(file: host.CodeFile) -> Html {
 /// does — so where the host answers it is said instead.
 fn codeFilePage(base: String, app: host.App, name: String) -> Html {
   let at = appAt(base, app)
-  let back = html"""<p class=actions><a href="{at}/code">← every file</a></p>"""
+  let back = html"""<p class=actions><a href="{at}/code">Back to files</a></p>"""
   match host.codeFile(app.name, name) {
     Ok(file) => {
       let whole = text.bytes(file.bytes)
-      let cut = html.only(file.cut, html" <span class=muted>(cut at {text.bytes(codeTextBytes())}: the whole file is {whole})</span>")
+      let cut = html.only(file.cut, html" <span class=muted>(cut at {text.bytes(codeTextBytes())}, {whole} in full)</span>")
       let facts = html"""
         <div class="scroll narrow">
           <table class=facts>
@@ -1768,9 +1641,7 @@ fn codeFilePage(base: String, app: host.App, name: String) -> Html {
       } else if file.kind == "asset" {
         html"""
           <h2>Not text</h2>
-          <p class=muted>Not UTF-8, so there is no text of it to show. The host answers this
-          file itself, at <code>{servedAt(app, file)}</code> on {servedOn(app)}, where a
-          browser shows it as it is.</p>
+          <p class=muted>Served at <code>{servedAt(app, file)}</code> on {servedOn(app)}.</p>
           """
       } else {
         // Only an asset is meant not to be text. A `.cove` file that is not
@@ -1779,8 +1650,7 @@ fn codeFilePage(base: String, app: host.App, name: String) -> Html {
         // refused, from the other end.
         html"""
           <h2>Not text</h2>
-          <p class=muted>Not UTF-8, which for this file is not a kind of file but a fault: the
-          host reads it as text or does not load the app at all.</p>
+          <p class=muted>Not UTF-8. The app does not load with this file.</p>
           """
       }
       layout(

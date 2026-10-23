@@ -844,7 +844,7 @@ fn the_pages_enable_disable_configure_and_reset() {
     // above the quiet ones and its pill is the way to the page that fixes
     // it.
     assert!(
-        overview.contains("href=\"/apps/notes/settings\">refused →</a>"),
+        overview.contains("href=\"/apps/notes/settings\">refused</a>"),
         "{overview}"
     );
     assert!(
@@ -854,7 +854,7 @@ fn the_pages_enable_disable_configure_and_reset() {
     // And its Overview says why before anybody asks.
     let its_own = ui(&host, "GET", "/apps/notes", &authed(), "").body;
     assert!(
-        its_own.contains("Refused, so nothing reaches it"),
+        its_own.contains("Refused. "),
         "{its_own}"
     );
     // Reset brings it back.
@@ -1008,17 +1008,17 @@ fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
     let quiet = ui(&host, "GET", "/apps/hello", &authed(), "").body;
     assert!(quiet.contains("<h2>Worth a look</h2>"), "{quiet}");
     assert!(quiet.contains("class=\"is-ok\""), "{quiet}");
-    assert!(quiet.contains("Nothing: no request failed"), "{quiet}");
+    assert!(quiet.contains("No request failed. "), "{quiet}");
     // The green line names what was looked at, the comparison with the
     // app's directory included — which this deploy is small enough for.
     assert!(
-        quiet.contains("every file of the deploy is the same as the one in the app's directory"),
+        quiet.contains("Every file of the deploy is the same as the one in the app's directory"),
         "{quiet}"
     );
     // The numbers are above it, and the way to Settings below.
     assert!(quiet.contains("<h2>Now</h2>"), "{quiet}");
     assert!(
-        quiet.contains("/apps/hello/settings\">Settings</a>:"),
+        quiet.contains("/apps/hello/settings\">Change grant, allowlist and limits</a>"),
         "{quiet}"
     );
     // `/spin` runs past the deadline: one failed request, and the Overview
@@ -1027,7 +1027,7 @@ fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
     let loud = ui(&host, "GET", "/apps/hello", &authed(), "").body;
     assert!(loud.contains("A request failed"), "{loud}");
     assert!(loud.contains("class=\"is-bad\""), "{loud}");
-    assert!(loud.contains("Nothing else: "), "{loud}");
+    assert!(loud.contains("No request was turned away"), "{loud}");
     assert!(
         loud.find("is-bad").unwrap() < loud.find("is-ok").unwrap(),
         "the bad news is first:\n{loud}"
@@ -1041,10 +1041,10 @@ fn the_overview_says_what_is_worth_a_look_and_when_nothing_is() {
     assert!(list.contains("2 want a look."), "{list}");
     assert!(list.contains("1 error."), "{list}");
     assert!(
-        list.contains("href=\"/apps/hello\">1 failed →</a>"),
+        list.contains("href=\"/apps/hello\">1 failed</a>"),
         "{list}"
     );
-    assert!(list.contains(">Access off →</a>"), "{list}");
+    assert!(list.contains(">Access off</a>"), "{list}");
     assert!(
         list.find(">hello</a>").unwrap() < list.find(">notes</a>").unwrap(),
         "the app with something to say is first:\n{list}"
