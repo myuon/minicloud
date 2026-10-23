@@ -1861,7 +1861,7 @@ fn sqlCell(value: Option<String>) -> Html {
 /// markup on these pages.
 fn sqlAnswerTable(answer: host.SqlAnswer) -> Html {
   if answer.columns.length() == 0 {
-    return html"<p class=muted>The statement answered no columns.</p>"
+    return html"<p class=muted>No columns.</p>"
   }
   var heads = Vector.of()
   for column in answer.columns {
@@ -1898,14 +1898,14 @@ fn sqlAnswerTable(answer: host.SqlAnswer) -> Html {
 /// and a link is less to type than a `SELECT`.
 fn sqlTablesTable(at: String, tables: Array<host.SqlTable>) -> Html {
   if tables.length() == 0 {
-    return html"<p class=muted>This store has no tables yet.</p>"
+    return html"<p class=muted>No tables.</p>"
   }
   var rows = Vector.of()
   for table in tables {
     let count = if table.counted {
       html"{table.rows}"
     } else {
-      html"""<span class=muted title="counting its rows ran out of the window's time">not counted</span>"""
+      html"""<span class=muted title="counting timed out">not counted</span>"""
     }
     // A name is an identifier in the statement's text, which is where
     // SQLite takes one: quoted, with a `"` in it doubled.
@@ -1947,23 +1947,12 @@ fn sqlForm(at: String, statement: String) -> Html {
     """
 }
 
-/// What the page says above the box, which is what the window is and what it
-/// will not do.
-fn sqlLead(app: host.App) -> Html {
-  about(
-    html"Reading only — a statement that writes is refused.",
-    html"""
-      What is in <code>{app.name}</code>'s relational store. The box runs one statement that
-      <b>only reads</b>: a statement that writes is refused by the host, the same refusal the
-      app's own <code>sql.query</code> gets, so there is nothing here that can change this
-      app's data — repairing data is done on the machine, where it is deliberate. At most
-      {sqlRowLimit()} rows come back, and an answer with more rows than that says so rather
-      than showing the first {sqlRowLimit()} of them; a statement still running after
-      {sqlStatementMs()} ms is stopped where it is. A value is text: <code>NULL</code> and the
-      empty string are said in words, and a long one is cut to the column. Nothing typed here
-      is kept — a read is not a change, so the history does not record it.
-      """,
-  )
+/// What the page says above the box: the limits a statement runs into.
+fn sqlLead() -> Html {
+  html"""
+    <p class=muted>A statement that writes is refused.</p>
+    <p class=muted>At most {sqlRowLimit()} rows · stopped after {sqlStatementMs()} ms</p>
+    """
 }
 
 /// One app's SQL store: its tables and their row counts, or — with `?q=` —
@@ -1978,8 +1967,7 @@ fn sqlPage(base: String, app: host.App, request: web.Request) -> Html {
       "{app.name} sql",
       html"""
         {head}
-        <p class=lead><code>{app.name}</code> is not granted <code>sql</code>: it has no
-        relational store, and the host keeps no file for it.</p>
+        <p class=lead>Not granted <code>sql</code>.</p>
         """,
     )
   }
@@ -1991,15 +1979,15 @@ fn sqlPage(base: String, app: host.App, request: web.Request) -> Html {
       base,
       "apps",
       "{app.name} sql",
-      html"{head}{sqlLead(app)}{form}<h2>Tables</h2>{sqlTablesTable(at, tables)}",
+      html"{head}{sqlLead()}{form}<h2>Tables</h2>{sqlTablesTable(at, tables)}",
     )
   }
   let answered = match host.sqlQuery(app.name, statement) {
     Ok(answer) => html"<h2>Answer</h2>{sqlAnswerTable(answer)}"
-    Err(error) => html"<div class=problem><b>Not answered.</b> The host said:<pre>{error.message}</pre></div>"
+    Err(error) => html"<div class=problem><b>Not answered.</b><pre>{error.message}</pre></div>"
   }
-  let back = html"""<p class=actions><a href="{at}/sql">← the tables</a></p>"""
-  layout(base, "apps", "{app.name} sql", html"{head}{sqlLead(app)}{form}{answered}{back}")
+  let back = html"""<p class=actions><a href="{at}/sql">Back to tables</a></p>"""
+  layout(base, "apps", "{app.name} sql", html"{head}{sqlLead()}{form}{answered}{back}")
 }
 
 // ------------------------------------------- an app's queues
@@ -2044,19 +2032,14 @@ fn queueDuration(millis: Int) -> String {
 /// says `held` rather than calling a backoff a lease.
 fn queueState(state: String) -> Html {
   if state == "due" {
-    return html"""<span class="state serving" title="the next delivery tick may take it">due</span>"""
+    return html"""<span class="state serving">due</span>"""
   }
   if state == "held" {
     return html"""
-      <span class="state disabled" title="its due time is ahead: a delivery holding it on
-      lease, or a failed delivery waiting for its retry. The store keeps one due time for
-      both, so the host does not say which.">held</span>
+      <span class="state disabled" title="leased, or waiting to retry">held</span>
       """
   }
-  html"""
-    <span class="state refused" title="buried as a dead letter: nothing delivers it again
-    until somebody puts it back">dead</span>
-    """
+  html"""<span class="state refused">dead</span>"""
 }
 
 /// A message's body in a row. A queue carries whatever an app sent — a
@@ -2064,7 +2047,7 @@ fn queueState(state: String) -> Html {
 /// markup on these pages, and every part of it is a `String` in a hole.
 fn queueBodyCell(message: host.QueueMessage) -> Html {
   if message.bytes == 0 {
-    return html"""<span class=muted title="the message's body is empty">empty</span>"""
+    return html"<span class=muted>empty</span>"
   }
   // The host cut at its own length; a row of a table wants less again.
   let preview = text.truncateBytes(message.body, queueBodyBytes())
@@ -2088,8 +2071,7 @@ fn queuesTable(queues: Array<host.Queue>) -> Html {
       html"<code>{queue.path}</code>"
     } else {
       html"""
-        <span class="state removed" title="the app's [[queues]] no longer declares this queue,
-        so the host delivers nothing from it">not declared</span>
+        <span class="state removed" title="nothing is delivered from it">not declared</span>
         """
     }
     let values = if queue.declared {
@@ -2218,32 +2200,18 @@ fn queueMore(listed: Int, counted: Int, what: String) -> Html {
     return html""
   }
   html"""
-    <p class=muted>The first {listed} {what}, which is this window's limit; the counts above
-    are whole. <code>minicloud queues</code> on the machine reads the rest.</p>
+    <p class=muted>The first {listed} {what}. Run <code>minicloud queues</code> on the machine
+    for the rest.</p>
     """
 }
 
-/// What the page says above the tables: what the window is, and what it
-/// will not do.
+/// What the page says above the tables: the one thing it cannot do, and
+/// where that is done instead.
 fn queuesLead(app: host.App) -> Html {
-  about(
-    html"Reading only — nothing here sends, deletes or revives a message.",
-    html"""
-      What is on <code>{app.name}</code>'s queues. <b>Reading only</b>: the host's window
-      leases nothing and counts no attempt, so a message read here is delivered exactly as if
-      nobody had looked, and there is nothing on this page that sends, deletes or revives one.
-      <b>due</b> is what the next delivery tick may take, oldest sent first; <b>held</b> is a
-      message whose due time is ahead — a delivery holding it on lease, or a failed delivery
-      waiting for its retry — and the store keeps one due time for both, so neither the host
-      nor this page claims to know which. At most {queueListSize()} messages are listed, and a
-      body longer than the column is cut — the id opens it whole. A dead letter is kept until
-      somebody deals with it: the host prunes none, so a number here that grows is work nobody
-      has looked at. To put one back:
-      <code>minicloud queues {app.name} --revive &lt;id&gt;</code> on the machine, because
-      reviving is a change and a change wants the confirmation and the line in the history
-      that the forms here have.
-      """,
-  )
+  html"""
+    <p class=muted>Revive a dead letter on the machine with
+    <code>minicloud queues {app.name} --revive &lt;id&gt;</code>.</p>
+    """
 }
 
 /// One app's queues: each declared queue with what it holds, the messages
@@ -2259,16 +2227,9 @@ fn queuesPage(base: String, app: host.App, request: web.Request) -> Html {
   if queues.length() == 0 {
     // Two different nothings, and which it is decides what to do about it.
     let why = if app.granted.contains("queue") {
-      html"""
-        <code>{app.name}</code> is granted <code>queue</code>, and its <code>app.toml</code>
-        declares no <code>[[queues]]</code>: a queue must be declared before anything can be
-        sent to it.
-        """
+      html"<code>app.toml</code> declares no <code>[[queues]]</code>."
     } else {
-      html"""
-        <code>{app.name}</code> is not granted <code>queue</code>: it has no queue, and the
-        host keeps no file for it.
-        """
+      html"Not granted <code>queue</code>."
     }
     return layout(base, "apps", title, html"{head}<p class=lead>{why}</p>")
   }
@@ -2310,12 +2271,11 @@ fn queueMessagePage(base: String, app: host.App, id: Int) -> Html {
   let at = appAt(base, app)
   let head = appHead(base, app, "Queues")
   let title = "{app.name} queues"
-  let back = html"""<p class=actions><a href="{at}/queues">← every queue</a></p>"""
+  let back = html"""<p class=actions><a href="{at}/queues">Back to queues</a></p>"""
   match host.queueMessage(app.name, id) {
     Ok(message) => {
       let carried = text.bytes(queueBodyChars())
-      let whole = text.bytes(message.bytes)
-      let cut = html.only(message.cut, html" <span class=muted>(cut at {carried} of text: the whole body is {whole})</span>")
+      let cut = html.only(message.cut, html" <span class=muted>· body cut at {carried}</span>")
       // A dead letter's due time is the one it had when it was buried, so
       // showing it as "due" would be saying something untrue; the two rows
       // it has instead are when it was buried and why.
@@ -2360,7 +2320,7 @@ fn queueMessagePage(base: String, app: host.App, id: Int) -> Html {
 /// paragraph starts under the time, where it reads as the next line's.
 fn logTable(lines: Array<host.LogLine>, withApp: Bool = false) -> Html {
   if lines.length() == 0 {
-    return html"<p class=muted>No lines yet.</p>"
+    return html"<p class=muted>No lines.</p>"
   }
   var rows = Vector.of()
   for line in lines {
@@ -2413,7 +2373,7 @@ fn logSteps(at: String, n: Int) -> Html {
       steps.push(html"""<a href="{at}?n={size}">{size}</a>""")
     }
   }
-  html"<p class=actions><span class=muted>lines:</span> {html.join(steps.freeze(), html" ")}</p>"
+  html"<p class=actions><span class=muted>Show</span> {html.join(steps.freeze(), html" ")} <span class=muted>lines</span></p>"
 }
 
 /// One app's log: the host's ring of its last lines, oldest first.
@@ -2422,17 +2382,15 @@ fn logPage(base: String, app: host.App, request: web.Request) -> Html {
   let n = logLines(request)
   let lines = host.logs(app.name, n)
   let how = logSteps("{at}/logs", n)
-  let summary = html"What the app logged and what the host said of it, oldest first."
   let told = html"""
-    {lines.length()} lines, of the last {logKept()} the host keeps in memory, which a restart
-    empties. Every line is also appended to <code>&lt;data&gt;/{app.name}/log.txt</code>, which
-    this page does not read.
+    <p class=muted>Since the last restart. Older lines are in
+    <code>&lt;data&gt;/{app.name}/log.txt</code>.</p>
     """
   layout(
     base,
     "apps",
     "{app.name} log",
-    html"{appHead(base, app, "Logs")}{about(summary, told)}{how}{logTable(lines)}{how}",
+    html"{appHead(base, app, "Logs")}{told}{how}{logTable(lines)}{how}",
   )
 }
 
@@ -2486,7 +2444,7 @@ fn windowSteps(page: String, over: String) -> Html {
       steps.push(html"""<a href="{page}?over={name}">{label}</a>""")
     }
   }
-  html"<p class=actions><span class=muted>window:</span> {html.join(steps.freeze(), html" ")}</p>"
+  html"<p class=actions>{html.join(steps.freeze(), html" ")}</p>"
 }
 
 /// Microseconds as milliseconds with one decimal, which is what the speed
@@ -2956,14 +2914,11 @@ fn metricsChart(
   bName: String,
 ) -> Html {
   if a.length() < 2 {
-    return html"<p class=muted>One row so far — a line wants two. Come back in a minute.</p>"
+    return html"<p class=muted>One sample so far.</p>"
   }
   let largest = metricsLargest(a, b)
   if largest == 0 {
-    return html"""
-      <p class=muted>{label}: nothing but zero in this window, which is not worth a line along
-      the bottom.</p>
-      """
+    return html"<p class=muted>All zero.</p>"
   }
   let ticks = chartTicks(kind, largest)
   let top = ticks.get(ticks.length() - 1).unwrapOr(largest)
@@ -3012,19 +2967,6 @@ fn shareOf(part: Int, whole: Int) -> Int {
   part * 100 / whole
 }
 
-/// What a page says of how a heap is collected, the once: each run has a
-/// heap of its own that is gone when it ends, and a collection comes only
-/// when it has allocated twice what was live.
-fn gcAbout() -> Html {
-  html"""
-    <p class=muted>Every run has a heap of its own, thrown away when it ends. The heap is
-    collected when what the run allocated since the last collection reaches twice what was
-    live, so a light run often never collects; a run that needs more than
-    <code>max_heap_words</code> fails with a heap error. Allocated is every word handed out,
-    reuse counted each time, at eight bytes a word.</p>
-    """
-}
-
 /// One app's metrics: what it served and how long it took, over the window
 /// asked for — the totals, then the two charts.
 ///
@@ -3038,15 +2980,6 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
   let span = metricsSpan(over)
   let points = host.series(app.name, over)
   let head = appHead(base, app, "Metrics")
-  let lead = html"""
-    <p class=lead>How fast <code>{app.name}</code> answers and how much of it it served. The
-    host takes a sample of every app's counters once a minute and keeps the minutes for about
-    two days and the hours for about three months, so these are what the app did in each
-    minute — or, for the last 30 days, each hour — and not a running total. The <b>p50</b> and
-    <b>p99</b> are <b>estimates</b>: the host does not keep the time of every request, it
-    counts them into a histogram of time ranges and reads the quantile off that, so a figure
-    here is the right range and not an exact time.</p>
-    """
   let steps = metricsSteps(at, over)
   let reload = reloading("{at}/metrics?over={over}", 5, paused(request))
   let title = "{app.name} metrics"
@@ -3056,12 +2989,8 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
       "apps",
       title,
       html"""
-        {head}{lead}{reload.control}{steps}
-        <p class=muted>Nothing to show for {span}: either the host has not sampled
-        <code>{app.name}</code> yet — it takes a sample a minute, so a minute after it has
-        served something — or it keeps no history at all, which it does not when it is started
-        without a data directory. This page cannot tell which, and a chart of nothing would say
-        neither.</p>
+        {head}{reload.control}{steps}
+        <p class=muted>No samples in {span}.</p>
         """,
       reload.seconds,
       reload.link,
@@ -3143,10 +3072,7 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
   let each = if over == "month" { "hour" } else { "minute" }
   let rows = if points.length() == 1 { "1 row" } else { "{points.length()} rows" }
   let covers = html"""
-    <p class=muted>{rows}, one for each {each} the host sampled, from
-    {jst(first * 1000)} to {jst(last * 1000)}. Each chart is scaled from zero
-    to a round number past its own largest value, the latest value of each line is written at
-    its end, and the times are JST. Hover a point, or tap it, for its {each}.</p>
+    <p class=muted>{rows} · {jst(first * 1000)} to {jst(last * 1000)}</p>
     """
   let traffic = metricsChart(
     "requests served and errors a {each}, {span}",
@@ -3197,10 +3123,10 @@ fn metricsPage(base: String, app: host.App, request: web.Request) -> Html {
     "apps",
     title,
     html"""
-      {head}{lead}{reload.control}{steps}{figures}{covers}
+      {head}{reload.control}{steps}{figures}{covers}
       <h2>Traffic</h2>{traffic}
       <h2>Speed, in milliseconds</h2>{speed}
-      <h2>Garbage collection</h2>{gcAbout()}{gc}
+      <h2>Garbage collection</h2>{gc}
       <h2>Allocation</h2>{allocation}
       """,
     reload.seconds,
@@ -3366,14 +3292,6 @@ fn platformPage(base: String, request: web.Request) -> Html {
   let now = host.platformNow()
   let recent = host.platform("hour")
   let last = recent.get(recent.length() - 1)
-  let lead = html"""
-    <p class=lead>The host itself. Every app runs in one process on one pool of workers, so
-    the limits that bind them all are the process's: the service's <code>MemoryMax</code> and
-    <code>CPUQuota</code>, the disk its data directory is on, and its workers. The figures
-    below are now; the charts are what the host sampled once a minute, kept as the apps'
-    are. A dash is a figure the host cannot read here — it reads its cgroup and
-    <code>/proc</code>, which only Linux has.</p>
-    """
   let figures = html"""
     <div class=strip>
       {memoryFig(now)}{cpuFig(last)}{diskFig(now)}{workersFig(now)}{machineFig(now)}
@@ -3388,11 +3306,8 @@ fn platformPage(base: String, request: web.Request) -> Html {
       "platform",
       "platform",
       html"""
-        <h1>Platform</h1>{lead}{reload.control}{figures}{steps}
-        <p class=muted>Nothing to chart for {span}: either the host has not sampled itself
-        yet — the first minute after a start keeps nothing, as there is nothing yet to take
-        the CPU's difference from — or it keeps no history, which it does not without a data
-        directory.</p>
+        <h1>Platform</h1>{reload.control}{figures}{steps}
+        <p class=muted>No samples in {span}.</p>
         """,
       reload.seconds,
       reload.link,
@@ -3440,10 +3355,7 @@ fn platformPage(base: String, request: web.Request) -> Html {
   let final = timeRows.get(timeRows.length() - 1).unwrapOr(0)
   let rows = if points.length() == 1 { "1 row" } else { "{points.length()} rows" }
   let covers = html"""
-    <p class=muted>{rows}, one for each {each} the host sampled, from
-    {jst(first * 1000)} to {jst(final * 1000)}. The CPU is what the
-    {each} used of the quota (of one CPU without one); memory, disk and workers are as they
-    were at its end, and an hour is its worst minute. The times are JST.</p>
+    <p class=muted>{rows} · {jst(first * 1000)} to {jst(final * 1000)}</p>
     """
   let memoryChart = metricsChart(
     "memory used and MemoryMax, {span}",
@@ -3516,16 +3428,13 @@ fn platformPage(base: String, request: web.Request) -> Html {
     "platform",
     "platform",
     html"""
-      <h1>Platform</h1>{lead}{reload.control}{figures}{steps}{covers}
+      <h1>Platform</h1>{reload.control}{figures}{steps}{covers}
       <h2>Memory</h2>{memoryChart}
       <h2>CPU</h2>{cpuChart}
       <h2>Disk</h2>{diskChart}
       <h2>Requests</h2>{workChart}
       <h2>Garbage collection</h2>
-      <p class=muted>Read the allocation beside the Memory chart: allocation churning while
-      memory stays flat means what the runs allocate is being reclaimed; memory climbing with
-      it would mean something is held.</p>
-      {gcAbout()}{gcChart}{allocationChart}
+      {gcChart}{allocationChart}
       """,
     reload.seconds,
     reload.link,
@@ -3570,12 +3479,9 @@ fn allLogsPage(base: String, request: web.Request) -> Html {
   let n = logLines(request)
   let all = host.allLogs(n)
   let how = logSteps("{base}/logs", n)
-  let summary = html"Every app that logs, in one order, oldest first."
   let said = html"""
-    {all.lines.length()} lines: the newest the host has, of the last {logKept()} it keeps in
-    memory for each app, which a restart empties. One app with a lot to say fills the page —
-    ask for more lines, or read an app alone from its chip above. Every line is also appended
-    to <code>&lt;data&gt;/&lt;app&gt;/log.txt</code>, which this page does not read.
+    <p class=muted>Since the last restart. Older lines are in
+    <code>&lt;data&gt;/&lt;app&gt;/log.txt</code>.</p>
     """
   layout(
     base,
@@ -3584,15 +3490,10 @@ fn allLogsPage(base: String, request: web.Request) -> Html {
     html"""
       <h1>Logs</h1>
       {logChips(base, all.apps)}
-      {about(summary, said)}
+      {said}
       {how}{logTable(all.lines, true)}{how}
       """,
   )
-}
-
-/// How many lines the host's ring keeps (`crate::logs::LOG_LINES`).
-fn logKept() -> Int {
-  1000
 }
 
 /// What a `?done=` says after a change went through.
@@ -3684,7 +3585,7 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
       """
     let force = html.only(
       secret.apps.length() > 0,
-      html"<label><input type=checkbox name=force> even though apps use it (they are refused)</label>",
+      html"<label><input type=checkbox name=force> refuse the apps that use it</label>",
     )
     let delete = if secret.set {
       html"""
@@ -3710,7 +3611,7 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
       """)
   }
   let table = if rows.length() == 0 {
-    html"<p class=muted>No secret is stored or used.</p>"
+    html"<p class=muted>No secrets.</p>"
   } else {
     html"""
       <div class="scroll cardwrap">
@@ -3741,20 +3642,14 @@ fn secretsPage(base: String, secrets: Array<host.Secret>, notice: Html, name: St
         </div>
         <div class=actions>
           <button class=primary>Set</button>
-          <span class=muted>Stored by the host (<code>&lt;data&gt;/_host/secrets</code>, mode
-          0600); the apps that use it are reloaded with it.</span>
+          <span class=muted>Reloads the apps that use it.</span>
         </div>
       </form>
     </div>
     """
   let how = about(
-    html"A value is write-only: no page, log or history shows it.",
-    html"""
-      An app takes a stored secret with
-      <code>[secrets] key = \{ store = "name" \}</code> in its app.toml, for
-      <code>auth.check</code> or a <code>[fetch.headers]</code> header. A value is write-only:
-      no page, log or history shows it.
-      """,
+    html"Values can't be read back.",
+    html"""Use one in an app with <code>[secrets] key = \{ store = "name" \}</code> in its app.toml.""",
   )
   layout(base, "secrets", "secrets", html"<h1>Secrets</h1>{how}{notice}{table}{add}")
 }
@@ -3775,7 +3670,7 @@ fn historyPage(base: String, changes: Array<host.Change>) -> Html {
       """)
   }
   let table = if rows.length() == 0 {
-    html"<p class=muted>No changes yet.</p>"
+    html"<p class=muted>No changes.</p>"
   } else {
     html"""
       <div class="scroll cardwrap">
@@ -3789,10 +3684,5 @@ fn historyPage(base: String, changes: Array<host.Change>) -> Html {
       </div>
       """
   }
-  let summary = html"Every change to an app, made here or on the machine, refused ones included."
-  let told = html"""
-    Every change, made here or with <code>minicloud update|remove|enable|disable|reset</code> on
-    the machine, refused ones included; newest first.
-    """
-  layout(base, "history", "history", html"<h1>History</h1>{about(summary, told)}{table}")
+  layout(base, "history", "history", html"<h1>History</h1>{table}")
 }

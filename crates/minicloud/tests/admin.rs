@@ -1288,20 +1288,14 @@ fn the_platform_page_shows_the_host_against_its_limits() {
         "<span class=big>1 / 2</span>",
         "3 in flight, 2 queued",
         "<span class=big>1.25</span>",
-        "2 rows, one for each minute",
+        "2 rows · ",
         "<svg class=chart",
         "class=\"ln ln-limit\"",
     ] {
         assert!(body.contains(expected), "no `{expected}` in:\n{body}");
     }
-    // The apps' heaps, summed, with how to read them beside the memory.
-    for expected in [
-        "<h2>Garbage collection</h2>",
-        "allocation churning while memory stays flat",
-        "at eight bytes a word",
-    ] {
-        assert!(body.contains(expected), "no `{expected}` in:\n{body}");
-    }
+    // The apps' heaps, summed.
+    assert!(body.contains("<h2>Garbage collection</h2>"), "{body}");
     // And an app's own: its share of runs that collected, and the runs
     // its heap limit failed.
     let metrics = ui(&host, "GET", "/apps/hello/metrics", &authed(), "").body;
@@ -1316,7 +1310,7 @@ fn the_platform_page_shows_the_host_against_its_limits() {
     // The other windows: the month has no hours rolled up yet.
     let month = ui(&host, "GET", "/platform?over=month", &authed(), "").body;
     assert!(
-        month.contains("Nothing to chart for the last 30 days"),
+        month.contains("No samples in the last 30 days."),
         "{month}"
     );
     assert!(
