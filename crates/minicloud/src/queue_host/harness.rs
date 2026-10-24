@@ -633,6 +633,44 @@ impl Harness {
         taken
     }
 
+    /// The host stops, as `Host`'s drop does it: the engine closes, which
+    /// drops every run that has not answered, and each delivery's task —
+    /// which the runtime may still run before it stops — finds its answer
+    /// never came with the engine closed; then the process ends. A run that
+    /// had answered is settled first, as its task would. Answers what the
+    /// process's end took, as [`Harness::crash`] does.
+    pub fn shut_down(&mut self) -> Vec<(i64, i64)> {
+        let deliveries = self.deliveries.clone();
+        for mut delivery in std::mem::take(&mut self.pending) {
+            let Stage::Admitted {
+                reply,
+                answer,
+                started,
+            } = &mut delivery.stage
+            else {
+                self.pending.push(delivery);
+                continue;
+            };
+            // The engine drops the flight, and its end of the oneshot.
+            reply.take();
+            match answer.try_recv() {
+                Ok(answered) => {
+                    deliveries.settle(&delivery.policy, &delivery.message, Some(answered))
+                }
+                Err(_) => {
+                    deliveries.abandon(&delivery.message);
+                    let mut ghost = self.ghost.lock().unwrap();
+                    let facts = ghost.entry(delivery.message.id).or_default();
+                    match started {
+                        true => facts.crashed_started += 1,
+                        false => facts.crashed_unstarted += 1,
+                    }
+                }
+            }
+        }
+        self.crash()
+    }
+
     // ------------------------------------------------------- faults
 
     /// Fails the next `n` settles of message `id`.

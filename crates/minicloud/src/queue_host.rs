@@ -267,6 +267,12 @@ pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
         let Some(data) = front.options.data.clone() else {
             return;
         };
+        // A host that is stopping lets the deliveries it has finish and
+        // starts none: one admitted now would only be dropped when the
+        // engine closes, its lease left to run out.
+        if front.draining.load(Ordering::Relaxed) {
+            continue;
+        }
         for slot in front.engine.slots() {
             let Some(app) = slot.current() else { continue };
             if !slot.enabled() || app.ready().is_none() {
@@ -323,9 +329,16 @@ fn start(
     let Some(answer) = admitted else { return };
     let deliveries = deliveries.clone();
     let policy = policy.clone();
+    let engine = Arc::clone(&front.engine);
     tokio::spawn(async move {
-        let outcome = answer.await.ok();
-        deliveries.settle(&policy, &message, outcome);
+        match answer.await {
+            Ok(reply) => deliveries.settle(&policy, &message, Some(reply)),
+            // The engine dropped the run because the host is stopping (it
+            // closes before the runtime does, and this task may still be
+            // run in between): a shutdown, not the run's answer.
+            Err(_) if engine.is_closed() => deliveries.abandon(&message),
+            Err(_) => deliveries.settle(&policy, &message, None),
+        }
     });
 }
 
@@ -606,6 +619,19 @@ impl<S: Store> Deliveries<S> {
                 why,
             },
         );
+    }
+
+    /// Lets go of a delivery whose run the host dropped because it is
+    /// shutting down, writing nothing.
+    ///
+    /// The engine closes before the runtime stops, and a run still queued
+    /// then is dropped with its answer never sent. Settled as "no answer",
+    /// it would spend an attempt — and on the last one bury the message —
+    /// for a run the app may never have begun, because the host stopped. A
+    /// shutdown is a crash as far as the queue is concerned: the lease is
+    /// left to run out, and the next process delivers the message again.
+    pub(crate) fn abandon(&self, message: &Message) {
+        self.counters.queue_delivery_ended(&message.queue);
     }
 
     /// Settles one admitted delivery on what its run came to: the reply,

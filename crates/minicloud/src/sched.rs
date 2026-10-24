@@ -674,6 +674,12 @@ impl Engine {
         self.queue.close();
     }
 
+    /// Whether [`Engine::close`] has been called: a run whose answer never
+    /// came was dropped by the host stopping, not lost by the run.
+    pub fn is_closed(&self) -> bool {
+        self.queue.is_closed()
+    }
+
     fn run_worker(self: &Arc<Self>, worker: usize) {
         while let Some((app, job)) = self.queue.take() {
             let ran = catch_unwind(AssertUnwindSafe(|| self.run_job(worker, job)));

@@ -800,6 +800,46 @@ fn a_crash_between_any_two_steps_loses_nothing_and_leaves_no_stale_settle() {
     }
 }
 
+/// N6: at shutdown the engine closes before the runtime stops, dropping the
+/// runs still waiting, and a delivery's task may run in between and find
+/// its answer never came. That is the host stopping, not the run failing:
+/// nothing is written, as in a crash: the message keeps its lease, the
+/// lease runs out, and the next process delivers it. (Settled as "no
+/// answer", it was retried at once with the attempt spent, and on the last
+/// attempt buried.)
+#[test]
+fn n6_a_run_dropped_by_the_shutdown_is_not_an_answer() {
+    for started in [false, true] {
+        let mut h = Harness::new(
+            "n6",
+            vec![policy("mail", |p| {
+                p.max_attempts = 2;
+                p.lease = std::time::Duration::from_secs(30);
+            })],
+        );
+        let id = leased(&mut h);
+        if started {
+            h.start_run(id);
+        }
+        assert_eq!(h.shut_down(), vec![], "the shutdown let go of it");
+        let facts = h.facts(id);
+        assert!(
+            facts.written.is_empty() && facts.failed.is_empty(),
+            "nothing written: {facts:?}"
+        );
+        let row = h.row(id).expect("not settled");
+        assert_eq!((row.state, row.attempts), ("held", 1), "started {started}");
+        h.check_attempts(id);
+        assert_eq!(h.logs(), "", "nothing said: a fresh process");
+
+        h.advance(31);
+        h.tick();
+        assert_eq!(h.facts(id).leases.len(), 2, "started {started}");
+        h.take(id, 200);
+        assert!(h.row(id).is_none(), "started {started}: delivered");
+    }
+}
+
 // ------------------------------------------------------------ the clock
 
 /// A clock set back between the lease and the settle: the settle does not

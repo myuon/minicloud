@@ -177,8 +177,9 @@ pub(crate) struct Front {
     /// put one there ([`Host::set_load_status`]).
     pub(crate) load_status_source: std::sync::RwLock<Option<crate::load::Status>>,
     pub(crate) admin_token: String,
-    /// Set by [`Host::shutdown`]: new requests are answered 503.
-    draining: AtomicBool,
+    /// Set by [`Host::shutdown`]: new requests are answered 503, and the
+    /// queues' delivery loop starts no new delivery.
+    pub(crate) draining: AtomicBool,
     /// What the public listener accepts with, when it terminates TLS.
     pub(crate) certificates: Option<Arc<crate::tls::Certificates>>,
 }
