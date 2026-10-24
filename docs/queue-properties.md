@@ -280,11 +280,12 @@ action, so a fault can fall between any two.
 
 | # | Property | Finding | Shown by | Fixed |
 |---|---|---|---|---|
-| F1 | S5 | lowering `max_attempts` does not stop a waiting retry | reading | |
+| F1 | S5 | lowering `max_attempts` does not stop a waiting retry; `lease` alone ignores `M` | store PBT, shrunk (`qa/queue-store-pbt`) | |
 | F2 | S6, S7 | a run that never started (scheduler timeout / cancel) spends an attempt and can bury | reading | |
 | F3 | S7 | a failed settle write is ignored; the lease later expires as "no answer" | reading | |
 | F4 | S8, L3a | whole-second truncation: early delivery, short leases, sub-second `lease`/`retry` become 0 | reading | |
-| F5 | S10 | `revive` ignores `max_depth` | reading | |
+| F5 | S10 | `revive` ignores `max_depth` | store PBT, shrunk | |
+| N1 | S1, S4, S6 | a settle with no token (`None`) matches a message whose lease was *ended* (`retry`/`give_back`), not only one never leased: `done(id, None)` deletes a given-back message | store PBT, shrunk; not reachable from the delivery loop | |
 | F6 | L2 | in-flight counted per app, room per queue: one queue starves another | reading | |
 | F7 | L1 | messages of an undeclared queue are never delivered nor shown | reading | |
 | F8 | S1 | power loss may lose an acknowledged send (`synchronous = NORMAL`) | docs | open question |
