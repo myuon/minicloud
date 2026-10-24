@@ -186,7 +186,7 @@ impl HostApi for QueueHost {
         match op {
             "send" | "sendAfter" => {
                 let body = args[1].as_str().unwrap_or_default();
-                let at = now();
+                let at = now_ms();
                 // A negative delay is no delay: deliver now, as `send` does.
                 let delay = match op {
                     "sendAfter" => args.get(2).and_then(Value::as_int).unwrap_or(0).max(0),
@@ -203,7 +203,9 @@ impl HostApi for QueueHost {
                     name,
                     body,
                     at,
-                    at.saturating_add(delay),
+                    // The delay is in seconds at the call, as it always was;
+                    // the store keeps milliseconds.
+                    at.saturating_add(delay.saturating_mul(1000)),
                     policy.max_body_bytes as usize,
                     policy.max_depth,
                 ) {
@@ -234,10 +236,15 @@ impl HostApi for QueueHost {
     }
 }
 
-fn now() -> i64 {
+/// The host's clock in milliseconds since the epoch: what the store's times
+/// are kept in, so that a `sendAfter` at 10.9 s is not due at 11 s and a
+/// lease of "1500ms" is not one of a second.
+fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// How often the host looks for messages that are due.
@@ -254,7 +261,7 @@ const EVERY: Duration = Duration::from_secs(1);
 /// the message when the run ends. Waiting here would make one slow consumer
 /// hold up every other app's queue.
 pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
-    let clock: Clock = Arc::new(now);
+    let clock: Clock = Arc::new(now_ms);
     loop {
         tokio::time::sleep(EVERY).await;
         let Some(data) = front.options.data.clone() else {
@@ -315,8 +322,8 @@ fn start(
     });
 }
 
-/// The clock a delivery reads: seconds since the epoch, [`now`] in the
-/// host. A seam, so that the loop's tests can hold time still, move it in
+/// The clock a delivery reads: milliseconds since the epoch, [`now_ms`] in
+/// the host. A seam, so that the loop's tests can hold time still, move it in
 /// milliseconds, or set it back.
 pub(crate) type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
@@ -334,27 +341,21 @@ pub(crate) trait Store: Send + 'static {
         &self,
         queue: &str,
         max_attempts: i64,
-        now_unix: i64,
+        now_ms: i64,
     ) -> Result<Vec<(Message, String)>, String>;
     fn lease(
         &self,
         queue: Option<&str>,
-        now_unix: i64,
+        now_ms: i64,
         limit: usize,
-        lease_secs: i64,
+        lease_ms: i64,
         max_attempts: i64,
     ) -> Result<Vec<Message>, String>;
     fn done(&self, id: i64, lease_id: i64) -> Result<bool, String>;
-    fn retry(&self, id: i64, lease_id: i64, now_unix: i64, delay_secs: i64)
+    fn retry(&self, id: i64, lease_id: i64, now_ms: i64, delay_ms: i64) -> Result<bool, String>;
+    fn give_back(&self, id: i64, lease_id: i64, now_ms: i64, delay_ms: i64)
         -> Result<bool, String>;
-    fn give_back(
-        &self,
-        id: i64,
-        lease_id: i64,
-        now_unix: i64,
-        delay_secs: i64,
-    ) -> Result<bool, String>;
-    fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String>;
+    fn bury(&self, id: i64, lease_id: i64, now_ms: i64, why: &str) -> Result<bool, String>;
     fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten);
     fn forget(&mut self, id: i64, lease_id: i64);
     fn unwritten(&self) -> Vec<(i64, i64, Unwritten)>;
@@ -365,43 +366,37 @@ impl Store for Queues {
         &self,
         queue: &str,
         max_attempts: i64,
-        now_unix: i64,
+        now_ms: i64,
     ) -> Result<Vec<(Message, String)>, String> {
-        Queues::bury_spent(self, queue, max_attempts, now_unix)
+        Queues::bury_spent(self, queue, max_attempts, now_ms)
     }
     fn lease(
         &self,
         queue: Option<&str>,
-        now_unix: i64,
+        now_ms: i64,
         limit: usize,
-        lease_secs: i64,
+        lease_ms: i64,
         max_attempts: i64,
     ) -> Result<Vec<Message>, String> {
-        Queues::lease(self, queue, now_unix, limit, lease_secs, max_attempts)
+        Queues::lease(self, queue, now_ms, limit, lease_ms, max_attempts)
     }
     fn done(&self, id: i64, lease_id: i64) -> Result<bool, String> {
         Queues::done(self, id, lease_id)
     }
-    fn retry(
-        &self,
-        id: i64,
-        lease_id: i64,
-        now_unix: i64,
-        delay_secs: i64,
-    ) -> Result<bool, String> {
-        Queues::retry(self, id, lease_id, now_unix, delay_secs)
+    fn retry(&self, id: i64, lease_id: i64, now_ms: i64, delay_ms: i64) -> Result<bool, String> {
+        Queues::retry(self, id, lease_id, now_ms, delay_ms)
     }
     fn give_back(
         &self,
         id: i64,
         lease_id: i64,
-        now_unix: i64,
-        delay_secs: i64,
+        now_ms: i64,
+        delay_ms: i64,
     ) -> Result<bool, String> {
-        Queues::give_back(self, id, lease_id, now_unix, delay_secs)
+        Queues::give_back(self, id, lease_id, now_ms, delay_ms)
     }
-    fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String> {
-        Queues::bury(self, id, lease_id, now_unix, why)
+    fn bury(&self, id: i64, lease_id: i64, now_ms: i64, why: &str) -> Result<bool, String> {
+        Queues::bury(self, id, lease_id, now_ms, why)
     }
     fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten) {
         Queues::hold(self, id, lease_id, unwritten)
@@ -498,7 +493,7 @@ impl<S: Store> Deliveries<S> {
                     Some(&policy.name),
                     now,
                     room as usize,
-                    policy.lease.as_secs() as i64,
+                    policy.lease.as_millis() as i64,
                     i64::from(policy.max_attempts),
                 )
             };
@@ -565,7 +560,7 @@ impl<S: Store> Deliveries<S> {
             message,
             Settle::GiveBack {
                 at: (self.now)(),
-                delay_secs: policy.retry.as_secs() as i64,
+                delay_ms: policy.retry.as_millis() as i64,
                 why,
             },
         );
@@ -621,13 +616,9 @@ impl<S: Store> Deliveries<S> {
         } else {
             // Doubling, so a consumer that is down is asked less and less
             // often rather than every `retry` for as long as it is down.
-            let delay_secs =
-                policy.retry.as_secs() as i64 * (1 << (message.attempts.min(10) - 1).max(0));
-            Settle::Retry {
-                at,
-                delay_secs,
-                why,
-            }
+            let delay_ms =
+                policy.retry.as_millis() as i64 * (1 << (message.attempts.min(10) - 1).max(0));
+            Settle::Retry { at, delay_ms, why }
         };
         self.keep_and_write(message, settle);
     }
@@ -670,9 +661,9 @@ impl<S: Store> Deliveries<S> {
         let queue = &unwritten.queue;
         let written = match &unwritten.settle {
             Settle::Done => store.done(id, token),
-            Settle::Retry { at, delay_secs, .. } => store.retry(id, token, *at, *delay_secs),
+            Settle::Retry { at, delay_ms, .. } => store.retry(id, token, *at, *delay_ms),
             Settle::Bury { at, why } => store.bury(id, token, *at, why),
-            Settle::GiveBack { at, delay_secs, .. } => store.give_back(id, token, *at, *delay_secs),
+            Settle::GiveBack { at, delay_ms, .. } => store.give_back(id, token, *at, *delay_ms),
         };
         let Ok(matched) = written else { return };
         store.forget(id, token);
@@ -685,14 +676,13 @@ impl<S: Store> Deliveries<S> {
             Settle::Done => {
                 counters.queue_delivered.fetch_add(1, Ordering::Relaxed);
             }
-            Settle::Retry {
-                delay_secs, why, ..
-            } => {
+            Settle::Retry { delay_ms, why, .. } => {
                 counters.queue_retried.fetch_add(1, Ordering::Relaxed);
                 self.logs.push(
                     "host",
                     &format!(
-                        "queue `{queue}`: message {id} not taken ({why}); again in {delay_secs}s"
+                        "queue `{queue}`: message {id} not taken ({why}); again in {}",
+                        spoken(*delay_ms)
                     ),
                 );
             }
@@ -714,6 +704,15 @@ impl<S: Store> Deliveries<S> {
                 }
             }
         }
+    }
+}
+
+/// A length of time in milliseconds as the app's log says it: whole
+/// seconds as `30s`, anything else as `1500ms`.
+fn spoken(ms: i64) -> String {
+    match ms % 1000 {
+        0 => format!("{}s", ms / 1000),
+        _ => format!("{ms}ms"),
     }
 }
 

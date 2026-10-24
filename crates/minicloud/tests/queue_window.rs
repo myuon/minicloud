@@ -56,6 +56,13 @@ fn now() -> i64 {
         .map_or(0, |since| since.as_secs() as i64)
 }
 
+/// Now in milliseconds, which the queue store keeps its times in.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as i64)
+}
+
 /// The store of `app`'s queues, the one the host has open where it has one.
 fn store(apps: &Apps, app: &str) -> std::sync::Arc<std::sync::Mutex<minicloud::queue::Queues>> {
     minicloud::queue::shared(&apps.data.join(app).join("queue.sqlite3")).unwrap()
@@ -67,7 +74,7 @@ fn store(apps: &Apps, app: &str) -> std::sync::Arc<std::sync::Mutex<minicloud::q
 fn put(apps: &Apps, app: &str, queue: &str, body: &str) -> i64 {
     let store = store(apps, app);
     let store = store.lock().unwrap();
-    let at = now();
+    let at = now_ms();
     store.send(queue, body, at, at, 64 << 10, 1 << 20).unwrap()
 }
 
@@ -84,7 +91,7 @@ fn bury(apps: &Apps, app: &str, id: i64, why: &str) {
         .execute(
             "INSERT INTO dead (id, queue, body, attempts, due, sent, why, buried) \
              SELECT id, queue, body, attempts, due, sent, ?2, ?3 FROM message WHERE id = ?1",
-            rusqlite::params![id, why, now()],
+            rusqlite::params![id, why, now_ms()],
         )
         .unwrap();
     assert_eq!(moved, 1, "message {id} is on the queue");
@@ -487,7 +494,7 @@ fn the_page_shows_each_queue_what_is_waiting_and_the_dead_letters() {
 /// The bodies still on `post`'s queue, read straight from the store: the
 /// page must not have changed what is there.
 fn waiting_ids(apps: &Apps) -> Vec<String> {
-    minicloud::queue::peek_waiting(&apps.data.join("post/queue.sqlite3"), now(), 100)
+    minicloud::queue::peek_waiting(&apps.data.join("post/queue.sqlite3"), now_ms(), 100)
         .unwrap()
         .into_iter()
         .map(|message| message.body)

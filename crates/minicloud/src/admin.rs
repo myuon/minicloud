@@ -248,7 +248,7 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
                         "id": message.id,
                         "queue": message.queue,
                         "attempts": message.attempts,
-                        "sent_unix": message.sent_unix,
+                        "sent_unix": message.sent_ms.div_euclid(1000),
                         "body": message.body,
                         "why": why,
                     })).collect::<Vec<_>>(),
@@ -263,7 +263,7 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
                     let store = store.lock().unwrap_or_else(|p| p.into_inner());
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |since| since.as_secs() as i64);
+                        .map_or(0, |since| since.as_millis() as i64);
                     // The bound a `send` is held to now: the version that
                     // is serving, as the delivery loop and `queue.send` read
                     // it.

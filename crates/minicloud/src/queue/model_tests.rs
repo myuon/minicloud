@@ -837,8 +837,8 @@ impl Harness {
             message.queue.as_str(),
             &message.body,
             message.attempts,
-            message.due_unix,
-            message.sent_unix,
+            message.due_ms,
+            message.sent_ms,
         );
         check!(
             got == want,
@@ -1081,7 +1081,11 @@ impl Harness {
         waiting.sort_by_key(|(key, _)| *key);
         let want: Vec<_> = waiting
             .iter()
-            .map(|((held, _, id), l)| (*id, l.attempts, l.due, if *held { "held" } else { "due" }))
+            .map(|((held, _, id), l)| {
+                // The window says seconds; the store keeps milliseconds.
+                let due = l.due.div_euclid(1000);
+                (*id, l.attempts, due, if *held { "held" } else { "due" })
+            })
             .collect();
         let got: Vec<_> = peek_waiting(&self.path, m.now, PEEK_MESSAGES)
             .map_err(sql)?

@@ -136,9 +136,9 @@ impl Store for Faulty {
         &self,
         queue: &str,
         max_attempts: i64,
-        now_unix: i64,
+        now_ms: i64,
     ) -> Result<Vec<(Message, String)>, String> {
-        let spent = self.inner.bury_spent(queue, max_attempts, now_unix);
+        let spent = self.inner.bury_spent(queue, max_attempts, now_ms);
         // The time `bury_spent` took, on the host's clock: what a tick that
         // waited on the store's lock, or a slow disk, would see.
         self.ms.fetch_add(
@@ -150,9 +150,9 @@ impl Store for Faulty {
     fn lease(
         &self,
         queue: Option<&str>,
-        now_unix: i64,
+        now_ms: i64,
         limit: usize,
-        lease_secs: i64,
+        lease_ms: i64,
         max_attempts: i64,
     ) -> Result<Vec<Message>, String> {
         self.leases_asked.lock().unwrap().push((
@@ -161,35 +161,27 @@ impl Store for Faulty {
             limit,
         ));
         self.inner
-            .lease(queue, now_unix, limit, lease_secs, max_attempts)
+            .lease(queue, now_ms, limit, lease_ms, max_attempts)
     }
     fn done(&self, id: i64, lease_id: i64) -> Result<bool, String> {
         self.settle(id, Op::Done, |q| q.done(id, lease_id))
     }
-    fn retry(
-        &self,
-        id: i64,
-        lease_id: i64,
-        now_unix: i64,
-        delay_secs: i64,
-    ) -> Result<bool, String> {
-        self.settle(id, Op::Retry, |q| {
-            q.retry(id, lease_id, now_unix, delay_secs)
-        })
+    fn retry(&self, id: i64, lease_id: i64, now_ms: i64, delay_ms: i64) -> Result<bool, String> {
+        self.settle(id, Op::Retry, |q| q.retry(id, lease_id, now_ms, delay_ms))
     }
     fn give_back(
         &self,
         id: i64,
         lease_id: i64,
-        now_unix: i64,
-        delay_secs: i64,
+        now_ms: i64,
+        delay_ms: i64,
     ) -> Result<bool, String> {
         self.settle(id, Op::GiveBack, |q| {
-            q.give_back(id, lease_id, now_unix, delay_secs)
+            q.give_back(id, lease_id, now_ms, delay_ms)
         })
     }
-    fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String> {
-        self.settle(id, Op::Bury, |q| q.bury(id, lease_id, now_unix, why))
+    fn bury(&self, id: i64, lease_id: i64, now_ms: i64, why: &str) -> Result<bool, String> {
+        self.settle(id, Op::Bury, |q| q.bury(id, lease_id, now_ms, why))
     }
     fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten) {
         self.inner.hold(id, lease_id, unwritten)
@@ -228,8 +220,8 @@ pub struct Pending {
 pub struct Harness {
     dir: PathBuf,
     path: PathBuf,
-    /// The host's clock, in milliseconds since the epoch. The loop reads
-    /// it through the host's own truncation to whole seconds.
+    /// The host's clock, in milliseconds since the epoch, which the loop
+    /// reads as the host's `now_ms()` does.
     pub ms: Arc<AtomicI64>,
     /// The queues as the current version declares them; a redeploy is a
     /// new list.
@@ -332,8 +324,8 @@ impl Harness {
             })),
             counters: Arc::new(AppCounters::default()),
             logs: Arc::new(LogRing::default()),
-            // The host's `now()`: whole seconds, the fraction cut off.
-            now: Arc::new(move || clock.load(Ordering::Relaxed).div_euclid(1000)),
+            // The host's `now_ms()`.
+            now: Arc::new(move || clock.load(Ordering::Relaxed)),
         }
     }
 
@@ -343,9 +335,10 @@ impl Harness {
         self.ms.load(Ordering::Relaxed)
     }
 
-    /// The loop's own reading of the clock.
+    /// The clock in whole seconds, the fraction cut off, for a test that
+    /// thinks in seconds; the window's times are seconds too.
     pub fn now(&self) -> i64 {
-        (self.deliveries.now)()
+        self.now_ms().div_euclid(1000)
     }
 
     pub fn set_ms(&mut self, ms: i64) {
@@ -376,7 +369,7 @@ impl Harness {
             .find(|policy| policy.name == queue)
             .expect("a declared queue")
             .clone();
-        let at = self.now();
+        let at = self.now_ms();
         let store = self.deliveries.store.lock().unwrap();
         store
             .inner
@@ -384,7 +377,7 @@ impl Harness {
                 queue,
                 body,
                 at,
-                at.saturating_add(delay.max(0)),
+                at.saturating_add(delay.max(0) * 1000),
                 policy.max_body_bytes as usize,
                 policy.max_depth,
             )
@@ -660,7 +653,7 @@ impl Harness {
 
     /// The message as the store has it, on the queue or among the dead.
     pub fn row(&self, id: i64) -> Option<Peeked> {
-        crate::queue::peek_one(&self.path, id, self.now()).unwrap()
+        crate::queue::peek_one(&self.path, id, self.now_ms()).unwrap()
     }
 
     /// How many dead letters the store holds.

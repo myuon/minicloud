@@ -541,7 +541,6 @@ fn a_lease_refuse_give_back_cycle_does_not_leak() {
 /// out before `t + d`. Sent at x.9 s with a delay of 1 s, ticks every
 /// 100 ms: the first lease must come at x+1.9 s or later.
 #[test]
-#[ignore = "F4: now() truncates to whole seconds, so sendAfter(1) at x.9 s is due at x+1 and leased 0.1 s later"]
 fn f4_send_after_is_not_handed_out_before_its_time() {
     let mut h = Harness::new("f4-early", vec![policy("mail", |_| {})]);
     h.set_ms(1_000_010_900);
@@ -568,7 +567,6 @@ fn f4_send_after_is_not_handed_out_before_its_time() {
 /// handed out again. Leased at x.9 s with `lease = "2s"`, it answers at
 /// x+2.5 s, 1.6 s later; ticks every 100 ms in between.
 #[test]
-#[ignore = "F4: the lease is counted from the truncated second, so a 2 s lease taken at x.9 s runs out after 1.1 s"]
 fn f4_a_delivery_answering_within_its_lease_is_not_leased_again() {
     let mut h = Harness::new(
         "f4-lease",
@@ -597,11 +595,29 @@ fn f4_a_delivery_answering_within_its_lease_is_not_leased_again() {
     assert!(h.row(id).is_none(), "its own answer settles it");
 }
 
+/// A `retry` under a second, which `app.toml` takes, waits that long: not
+/// nothing, and not a second.
+#[test]
+fn f4_a_retry_under_a_second_waits_as_long_as_it_says() {
+    let mut h = Harness::new(
+        "f4-retry",
+        policies("[[queues]]\nname = \"mail\"\nretry = \"500ms\"\n"),
+    );
+    h.set_ms(1_000_010_000);
+    let id = leased(&mut h);
+    h.take(id, 500);
+    h.advance_ms(400);
+    h.tick();
+    assert_eq!(h.facts(id).leases.len(), 1, "not before 500 ms");
+    h.advance_ms(100);
+    h.tick();
+    assert_eq!(h.facts(id).leases.len(), 2, "at 500 ms");
+}
+
 /// The same with a lease that is not whole seconds, which `app.toml` takes:
 /// `lease = "1500ms"` (over a deadline of 500 ms, as a lease must be) holds
 /// the message for a second and a half, not for one.
 #[test]
-#[ignore = "F4: lease = \"1500ms\" becomes 1 s, so a tick a second later leases the message again"]
 fn f4_a_lease_of_a_fraction_of_a_second_is_not_cut() {
     let mut h = Harness::new(
         "f4-sub-second",
