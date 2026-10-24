@@ -46,9 +46,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cove_runtime::{Effect, HostApi, HostType, ModuleSchema, OperationSchema, RuntimeError, Value};
 
+use tokio::sync::oneshot;
+
 use crate::config::QueuePolicy;
+use crate::convert::Reply;
 use crate::hosts::{AppContext, HostModule};
-use crate::queue::Queues;
+use crate::logs::LogRing;
+use crate::queue::{Message, Queues};
+use crate::stats::{AppCounters, Rejection};
 
 /// The capability that opens this module.
 pub const CAPABILITY: &str = "queue";
@@ -241,6 +246,7 @@ const OUTLIVED: &str = "no answer within the lease";
 /// the message when the run ends. Waiting here would make one slow consumer
 /// hold up every other app's queue.
 pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
+    let clock: Clock = Arc::new(now);
     loop {
         tokio::time::sleep(EVERY).await;
         let Some(data) = front.options.data.clone() else {
@@ -255,64 +261,15 @@ pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
             else {
                 continue;
             };
-            for policy in &app.queues {
-                // Before anything is leased: a message whose lease ran out
-                // on its last attempt is a dead letter, not a next try.
-                let spent = {
-                    let store = store.lock().unwrap_or_else(|p| p.into_inner());
-                    store.bury_spent(
-                        &policy.name,
-                        i64::from(policy.max_attempts),
-                        now(),
-                        OUTLIVED,
-                    )
-                };
-                match spent {
-                    Ok(spent) => {
-                        for message in spent {
-                            app.counters.queue_buried.fetch_add(1, Ordering::Relaxed);
-                            app.logs.push(
-                                "host",
-                                &format!(
-                                    "queue `{}`: message {} is a dead letter after {} \
-                                     attempt(s): {OUTLIVED}",
-                                    policy.name, message.id, message.attempts
-                                ),
-                            );
-                        }
-                    }
-                    Err(why) => {
-                        app.logs
-                            .push("host", &format!("queue `{}`: {why}", policy.name));
-                    }
-                }
-                let in_flight = app.counters.queue_in_flight.load(Ordering::Relaxed);
-                let room = (policy.batch as u64).saturating_sub(in_flight);
-                if room == 0 {
-                    continue;
-                }
-                let leased = {
-                    let store = store.lock().unwrap_or_else(|p| p.into_inner());
-                    store.lease(
-                        Some(&policy.name),
-                        now(),
-                        room as usize,
-                        policy.lease.as_secs() as i64,
-                    )
-                };
-                let leased = match leased {
-                    Ok(leased) => leased,
-                    Err(why) => {
-                        app.logs
-                            .push("host", &format!("queue `{}`: {why}", policy.name));
-                        continue;
-                    }
-                };
-                for message in leased {
-                    app.counters.queue_in_flight.fetch_add(1, Ordering::Relaxed);
-                    start(&front, &slot, &app, policy, message, Arc::clone(&store));
-                }
-            }
+            let deliveries = Deliveries {
+                store,
+                counters: Arc::clone(&app.counters),
+                logs: Arc::clone(&app.logs),
+                now: Arc::clone(&clock),
+            };
+            deliveries.tick(&app.queues, |policy, message| {
+                start(&front, &slot, &app, &deliveries, policy, message)
+            });
         }
     }
 }
@@ -322,26 +279,248 @@ fn start(
     front: &Arc<crate::server::Front>,
     slot: &Arc<crate::sched::Slot>,
     app: &Arc<crate::apps::App>,
+    deliveries: &Deliveries<Queues>,
     policy: &QueuePolicy,
-    message: crate::queue::Message,
-    store: Arc<Mutex<Queues>>,
+    message: Message,
 ) {
-    let answer = crate::internal::admit_with(
-        &front.engine,
-        crate::internal::Asked {
-            app,
-            slot: slot.index,
-            forwarding: &front.options.forwarding,
-            by: (crate::internal::QUEUE_HEADER, &policy.name),
-            method: "POST",
-            path: &policy.path,
-            body: message.body.clone(),
-        },
+    let admitted = deliveries.admit(policy, &message, |extra| {
+        crate::internal::admit_with(
+            &front.engine,
+            crate::internal::Asked {
+                app,
+                slot: slot.index,
+                forwarding: &front.options.forwarding,
+                by: (crate::internal::QUEUE_HEADER, &policy.name),
+                method: "POST",
+                path: &policy.path,
+                body: message.body.clone(),
+            },
+            extra,
+        )
+    });
+    let Some(answer) = admitted else { return };
+    let deliveries = deliveries.clone();
+    let policy = policy.clone();
+    tokio::spawn(async move {
+        let outcome = answer.await.ok();
+        deliveries.settle(&policy, &message, outcome);
+    });
+}
+
+/// The clock a delivery reads: seconds since the epoch, [`now`] in the
+/// host. A seam, so that the loop's tests can hold time still, move it in
+/// milliseconds, or set it back.
+pub(crate) type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// What admitting a delivery's run answers: where its reply will arrive,
+/// or why the host turned it away. [`crate::internal::admit_with`]'s
+/// answer; a seam, so that a test decides whether a run is admitted and
+/// when and how it answers.
+pub(crate) type Admitted = Result<oneshot::Receiver<Reply>, Rejection>;
+
+/// What the delivery loop asks of an app's store: [`Queues`]'s own
+/// operations, behind a trait so that a test can put a store beneath the
+/// loop whose writes fail.
+pub(crate) trait Store: Send + 'static {
+    fn bury_spent(
+        &self,
+        queue: &str,
+        max_attempts: i64,
+        now_unix: i64,
+        why: &str,
+    ) -> Result<Vec<Message>, String>;
+    fn lease(
+        &self,
+        queue: Option<&str>,
+        now_unix: i64,
+        limit: usize,
+        lease_secs: i64,
+    ) -> Result<Vec<Message>, String>;
+    fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String>;
+    fn retry(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        delay_secs: i64,
+    ) -> Result<bool, String>;
+    fn give_back(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        delay_secs: i64,
+    ) -> Result<bool, String>;
+    fn bury(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        why: &str,
+    ) -> Result<bool, String>;
+}
+
+impl Store for Queues {
+    fn bury_spent(
+        &self,
+        queue: &str,
+        max_attempts: i64,
+        now_unix: i64,
+        why: &str,
+    ) -> Result<Vec<Message>, String> {
+        Queues::bury_spent(self, queue, max_attempts, now_unix, why)
+    }
+    fn lease(
+        &self,
+        queue: Option<&str>,
+        now_unix: i64,
+        limit: usize,
+        lease_secs: i64,
+    ) -> Result<Vec<Message>, String> {
+        Queues::lease(self, queue, now_unix, limit, lease_secs)
+    }
+    fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String> {
+        Queues::done(self, id, lease_id)
+    }
+    fn retry(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        delay_secs: i64,
+    ) -> Result<bool, String> {
+        Queues::retry(self, id, lease_id, now_unix, delay_secs)
+    }
+    fn give_back(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        delay_secs: i64,
+    ) -> Result<bool, String> {
+        Queues::give_back(self, id, lease_id, now_unix, delay_secs)
+    }
+    fn bury(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        why: &str,
+    ) -> Result<bool, String> {
+        Queues::bury(self, id, lease_id, now_unix, why)
+    }
+}
+
+/// One app's deliveries: what deciding them needs, and nothing of how a
+/// run is admitted or awaited. The host fills it from the app
+/// ([`deliver`]); the loop's tests fill it with a clock, a store and
+/// counters of their own, and drive [`Deliveries::tick`],
+/// [`Deliveries::admit`] and [`Deliveries::settle`] a step at a time.
+pub(crate) struct Deliveries<S> {
+    pub(crate) store: Arc<Mutex<S>>,
+    pub(crate) counters: Arc<AppCounters>,
+    pub(crate) logs: Arc<LogRing>,
+    pub(crate) now: Clock,
+}
+
+impl<S> Clone for Deliveries<S> {
+    fn clone(&self) -> Deliveries<S> {
+        Deliveries {
+            store: Arc::clone(&self.store),
+            counters: Arc::clone(&self.counters),
+            logs: Arc::clone(&self.logs),
+            now: Arc::clone(&self.now),
+        }
+    }
+}
+
+impl<S: Store> Deliveries<S> {
+    /// One look at the app's queues, in the order `app.toml` declares
+    /// them: each one's spent messages buried, then as many leased as it
+    /// has room for, each handed to `start` before the next queue's room
+    /// is counted (a start the host turns away has given its in-flight
+    /// count back by then).
+    pub(crate) fn tick(
+        &self,
+        queues: &[QueuePolicy],
+        mut start: impl FnMut(&QueuePolicy, Message),
+    ) {
+        for policy in queues {
+            // Before anything is leased: a message whose lease ran out
+            // on its last attempt is a dead letter, not a next try.
+            let spent = {
+                let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+                store.bury_spent(
+                    &policy.name,
+                    i64::from(policy.max_attempts),
+                    (self.now)(),
+                    OUTLIVED,
+                )
+            };
+            match spent {
+                Ok(spent) => {
+                    for message in spent {
+                        self.counters.queue_buried.fetch_add(1, Ordering::Relaxed);
+                        self.logs.push(
+                            "host",
+                            &format!(
+                                "queue `{}`: message {} is a dead letter after {} \
+                                 attempt(s): {OUTLIVED}",
+                                policy.name, message.id, message.attempts
+                            ),
+                        );
+                    }
+                }
+                Err(why) => {
+                    self.logs
+                        .push("host", &format!("queue `{}`: {why}", policy.name));
+                }
+            }
+            let in_flight = self.counters.queue_in_flight.load(Ordering::Relaxed);
+            let room = (policy.batch as u64).saturating_sub(in_flight);
+            if room == 0 {
+                continue;
+            }
+            let leased = {
+                let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+                store.lease(
+                    Some(&policy.name),
+                    (self.now)(),
+                    room as usize,
+                    policy.lease.as_secs() as i64,
+                )
+            };
+            let leased = match leased {
+                Ok(leased) => leased,
+                Err(why) => {
+                    self.logs
+                        .push("host", &format!("queue `{}`: {why}", policy.name));
+                    continue;
+                }
+            };
+            for message in leased {
+                self.counters
+                    .queue_in_flight
+                    .fetch_add(1, Ordering::Relaxed);
+                start(policy, message);
+            }
+        }
+    }
+
+    /// Asks for one leased message's run with `admit`, and answers where
+    /// its reply will arrive; `None` for a run the host turned away, whose
+    /// message has been given back.
+    pub(crate) fn admit(
+        &self,
+        policy: &QueuePolicy,
+        message: &Message,
+        admit: impl FnOnce(&[(&str, String)]) -> Admitted,
+    ) -> Option<oneshot::Receiver<Reply>> {
         // Which try this is, and how many there will be: a consumer that
         // wants to say something only when the message is about to become
         // a dead letter compares the two. `lease` raised `attempts` to
         // count this one.
-        &[
+        let answer = admit(&[
             (
                 crate::internal::ATTEMPT_HEADER,
                 message.attempts.to_string(),
@@ -350,42 +529,44 @@ fn start(
                 crate::internal::ATTEMPTS_HEADER,
                 policy.max_attempts.to_string(),
             ),
-        ],
-    );
-    let counters = Arc::clone(&app.counters);
-    let logs = Arc::clone(&app.logs);
-    let policy = policy.clone();
-    let answer = match answer {
-        Ok(answer) => answer,
-        // The queue was full or the host was busy: give the message back
-        // to be tried again, with the attempt `lease` counted taken back,
-        // rather than counting it as a failed delivery — or a busy host
-        // could spend a message's attempts without its consumer ever being
-        // asked. The lease is still asked about: it has not had time to
-        // run out, but a give-back that did not ask would be the one
-        // settle here that could move another delivery's lease.
-        Err(_) => {
-            counters.queue_in_flight.fetch_sub(1, Ordering::Relaxed);
-            let store = store.lock().unwrap_or_else(|p| p.into_inner());
-            if let Ok(false) = store.give_back(
-                message.id,
-                message.lease_id,
-                now(),
-                policy.retry.as_secs() as i64,
-            ) {
-                outlived(&logs, &policy.name, message.id);
+        ]);
+        match answer {
+            Ok(answer) => Some(answer),
+            // The queue was full or the host was busy: give the message back
+            // to be tried again, with the attempt `lease` counted taken back,
+            // rather than counting it as a failed delivery — or a busy host
+            // could spend a message's attempts without its consumer ever being
+            // asked. The lease is still asked about: it has not had time to
+            // run out, but a give-back that did not ask would be the one
+            // settle here that could move another delivery's lease.
+            Err(_) => {
+                self.counters
+                    .queue_in_flight
+                    .fetch_sub(1, Ordering::Relaxed);
+                let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+                if let Ok(false) = store.give_back(
+                    message.id,
+                    message.lease_id,
+                    (self.now)(),
+                    policy.retry.as_secs() as i64,
+                ) {
+                    outlived(&self.logs, &policy.name, message.id);
+                }
+                None
             }
-            return;
         }
-    };
-    tokio::spawn(async move {
-        let outcome = answer.await;
+    }
+
+    /// Settles one admitted delivery on what its run came to: the reply,
+    /// or `None` for a run whose answer never came.
+    pub(crate) fn settle(&self, policy: &QueuePolicy, message: &Message, outcome: Option<Reply>) {
+        let (counters, logs) = (&self.counters, &self.logs);
         counters.queue_in_flight.fetch_sub(1, Ordering::Relaxed);
-        let taken = matches!(&outcome, Ok(reply) if reply.status < 500);
-        let store = store.lock().unwrap_or_else(|p| p.into_inner());
+        let taken = matches!(&outcome, Some(reply) if reply.status < 500);
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
         if taken {
             match store.done(message.id, message.lease_id) {
-                Ok(false) => outlived(&logs, &policy.name, message.id),
+                Ok(false) => outlived(logs, &policy.name, message.id),
                 _ => {
                     counters.queue_delivered.fetch_add(1, Ordering::Relaxed);
                 }
@@ -393,17 +574,17 @@ fn start(
             return;
         }
         let why = match &outcome {
-            Ok(reply) => format!(
+            Some(reply) => format!(
                 "{} {}",
                 reply.status,
                 crate::internal::first_line(&reply.body)
             ),
-            Err(_) => "no answer".to_string(),
+            None => "no answer".to_string(),
         };
         // `attempts` already counts this one, which `lease` raised.
         if message.attempts >= i64::from(policy.max_attempts) {
-            if let Ok(false) = store.bury(message.id, message.lease_id, now(), &why) {
-                outlived(&logs, &policy.name, message.id);
+            if let Ok(false) = store.bury(message.id, message.lease_id, (self.now)(), &why) {
+                outlived(logs, &policy.name, message.id);
                 return;
             }
             counters.queue_buried.fetch_add(1, Ordering::Relaxed);
@@ -419,8 +600,8 @@ fn start(
         // Doubling, so a consumer that is down is asked less and less
         // often rather than every `retry` for as long as it is down.
         let delay = policy.retry.as_secs() as i64 * (1 << (message.attempts.min(10) - 1).max(0));
-        if let Ok(false) = store.retry(message.id, message.lease_id, now(), delay) {
-            outlived(&logs, &policy.name, message.id);
+        if let Ok(false) = store.retry(message.id, message.lease_id, (self.now)(), delay) {
+            outlived(logs, &policy.name, message.id);
             return;
         }
         counters.queue_retried.fetch_add(1, Ordering::Relaxed);
@@ -431,12 +612,12 @@ fn start(
                 policy.name, message.id
             ),
         );
-    });
+    }
 }
 
 /// Says in the app's log that a delivery's answer settled nothing, because
 /// its lease had run out and the message had been handed to another.
-fn outlived(logs: &crate::logs::LogRing, queue: &str, id: i64) {
+fn outlived(logs: &LogRing, queue: &str, id: i64) {
     logs.push(
         "host",
         &format!(
