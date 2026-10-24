@@ -339,9 +339,11 @@ own deliveries. `queue_in_flight` stays the app's total.
   lease has run out, no crash happens, the clock does not jump, and nobody
   revives it or redeploys the queue — then the app is invoked for it at
   most once.
-- **L3b (liveness)** Under E1–E7, and if no crash or shutdown takes a
-  delivery of its last attempt before the run starts, it is invoked at
-  least once. This does not follow from L2 alone: L2 promises a lease,
+- **L3b (liveness)** Under E1–E7, if no crash or shutdown takes a
+  delivery of its last attempt before the run starts, no host stall of a
+  second or more lets that attempt's lease run out while its run waits for
+  a worker, and the queue stays declared (a redeploy that removes it
+  buries the message, D6), it is invoked at least once. This does not follow from L2 alone: L2 promises a lease,
   not an invocation. E7 turns admissions into a start; D1 keeps the lease
   from running out while the run waits for a worker (the scheduler
   answers 503 first, and the attempt is given back); and a crash before
@@ -418,6 +420,13 @@ What is left open:
   meets it.
 - L3b with a crash before the start of the last attempt's run (above): a
   property of crashes, not a gap the host can close.
+- L3b under a host stall, and when a redeploy removes the queue: both
+  exclusions are now in L3b's statement (the model found them, round 2).
+- `revive` into a queue the current version does not declare is allowed
+  and not bounded by any `max_depth`; the next tick buries it again. S10
+  is stated for declared queues.
+- S10 with a host stall on two message ids is the one search that did not
+  finish (66.5M states, nothing found); the same check on B2 is complete.
 
 Contract notes the model forced (see `spec/queue/README.md`), now part of
 the contract above:
