@@ -47,7 +47,8 @@ fn admin_app_toml() -> String {
 
 /// `post` with two queues: `mail`, which is used, and `spare`, which is
 /// declared and never sent to.
-const POST_TOML: &str = "grant = [\"queue\", \"kv\", \"log\"]\n\n[[queues]]\nname = \"mail\"\n\
+const POST_TOML: &str =
+    "grant = [\"queue\", \"kv\", \"log\", \"timer\"]\n\n[[queues]]\nname = \"mail\"\n\
 max_attempts = 2\nretry = \"3600s\"\nlease = \"120s\"\nmax_depth = 500\nbatch = 4\n\n\
 [[queues]]\nname = \"spare\"\n";
 
@@ -401,10 +402,12 @@ fn put(apps: &Apps, queue: &str, body: &str, sent: i64, due: i64) -> i64 {
         .unwrap()
 }
 
+/// Buries a message nothing has leased (`post` is disabled), so with no
+/// lease to name.
 fn bury(apps: &Apps, id: i64, at: i64, why: &str) {
     let store = minicloud::queue::shared(&apps.data.join("post").join("queue.sqlite3")).unwrap();
     let store = store.lock().unwrap();
-    store.bury(id, at, why).unwrap();
+    store.bury(id, None, at, why).unwrap();
 }
 
 #[test]
