@@ -7,8 +7,8 @@
 //! the invariants S1–S10 as far as the store alone can show them.
 //!
 //! The model is written from the doc, not from the SQL. Where the two are
-//! known to disagree (F1: `lease` does not look at `max_attempts`; F5:
-//! `revive` does not look at `max_depth`; and N1, found here: a settle
+//! known to disagree (F5: `revive` does not look at `max_depth`; and N1,
+//! found here: a settle
 //! naming no token matches a message whose lease was ended), [`Contract`]
 //! says whether the model holds the store to the contract — those runs
 //! fail on the code as it is, and are ignored with the finding's id — or
@@ -40,8 +40,6 @@ use super::*;
 const T: i64 = 1_000_000;
 const BODY: usize = 1024;
 const DEPTH: i64 = 100;
-/// The reason the delivery loop gives `bury_spent` (`queue_host::OUTLIVED`).
-const OUTLIVED: &str = "no answer within the lease";
 
 fn ids(messages: &[Message]) -> Vec<i64> {
     messages.iter().map(|m| m.id).collect()
@@ -59,24 +57,24 @@ fn ids(messages: &[Message]) -> Vec<i64> {
 /// issued at `attempts >= M`, and the message is a dead letter at the next
 /// tick, with a reason that is not "no answer within the lease".
 #[test]
-#[ignore = "F1: lease does not look at max_attempts; fixed when lease takes M"]
 fn lowering_max_attempts_stops_a_message_waiting_for_its_retry() {
     let q = Queues::in_memory().unwrap();
     let id = q.send("a", "x", T, T, BODY, DEPTH).unwrap();
     // M = 2: the tick, then the lease.
-    assert!(q.bury_spent("a", 2, T, OUTLIVED).unwrap().is_empty());
-    let taken = q.lease(Some("a"), T, 1, 30).unwrap();
+    assert!(q.bury_spent("a", 2, T).unwrap().is_empty());
+    let taken = q.lease(Some("a"), T, 1, 30, 2).unwrap();
     assert_eq!((taken[0].id, taken[0].attempts), (id, 1));
     assert!(q.retry(id, taken[0].lease_id, T + 1, 10).unwrap());
     // Redeployed with M = 1; the retry comes due.
-    let spent = q.bury_spent("a", 1, T + 11, OUTLIVED).unwrap();
-    let leased = q.lease(Some("a"), T + 11, 1, 30).unwrap();
+    let spent = q.bury_spent("a", 1, T + 11).unwrap();
+    let leased = q.lease(Some("a"), T + 11, 1, 30, 1).unwrap();
     assert!(
         leased.is_empty(),
         "leased at attempts {} with max_attempts 1",
         leased[0].attempts
     );
-    assert_eq!(ids(&spent), [id], "a dead letter at the next tick");
+    let spent: Vec<i64> = spent.iter().map(|(m, _)| m.id).collect();
+    assert_eq!(spent, [id], "a dead letter at the next tick");
     let dead = q.dead(None, 10).unwrap();
     assert_eq!(dead[0].0.id, id);
     assert_ne!(dead[0].1, OUTLIVED, "its lease did not run out");
@@ -91,13 +89,12 @@ fn lowering_max_attempts_stops_a_message_waiting_for_its_retry() {
 /// `M = 1`: sent, leased (attempts 1), the lease runs out, leased again
 /// with attempts 2.
 #[test]
-#[ignore = "F1: lease does not look at max_attempts; fixed when lease takes M"]
 fn lease_alone_does_not_hand_out_a_message_past_max_attempts() {
     let q = Queues::in_memory().unwrap();
     let id = q.send("a", "x", T, T, BODY, DEPTH).unwrap();
-    assert_eq!(ids(&q.lease(Some("a"), T, 1, 30).unwrap()), [id]);
+    assert_eq!(ids(&q.lease(Some("a"), T, 1, 30, 1).unwrap()), [id]);
     // M = 1, and nobody has called bury_spent.
-    let again = q.lease(None, T + 31, 1, 30).unwrap();
+    let again = q.lease(None, T + 31, 1, 30, 1).unwrap();
     assert!(
         again.is_empty(),
         "leased at attempts {} with max_attempts 1",
@@ -139,7 +136,7 @@ fn revive_does_not_fill_a_queue_past_max_depth() {
 fn a_settle_with_no_token_does_not_take_a_message_given_back() {
     let q = Queues::in_memory().unwrap();
     let id = q.send("b", "x", T, T, BODY, DEPTH).unwrap();
-    let taken = q.lease(Some("b"), T, 1, 30).unwrap();
+    let taken = q.lease(Some("b"), T, 1, 30, 3).unwrap();
     assert!(q.give_back(id, taken[0].lease_id, T, 0).unwrap());
     assert!(!q.done(id, None).unwrap(), "done(None) deleted it");
     assert_eq!(q.depths().unwrap(), vec![("b".to_string(), 1, 0)]);
@@ -157,10 +154,10 @@ fn a_settle_with_no_token_does_not_take_a_message_given_back() {
 fn a_give_back_with_no_token_does_not_take_back_an_answered_attempt() {
     let q = Queues::in_memory().unwrap();
     let id = q.send("a", "x", T, T, BODY, DEPTH).unwrap();
-    let taken = q.lease(Some("a"), T, 1, 30).unwrap();
+    let taken = q.lease(Some("a"), T, 1, 30, 3).unwrap();
     assert!(q.retry(id, taken[0].lease_id, T, 0).unwrap());
     assert!(!q.give_back(id, None, T, 0).unwrap());
-    let again = q.lease(Some("a"), T, 1, 30).unwrap();
+    let again = q.lease(Some("a"), T, 1, 30, 3).unwrap();
     assert_eq!(again[0].attempts, 2, "the answered attempt still counts");
 }
 
@@ -187,9 +184,6 @@ const FIRST_POLICY: Policy = Policy {
 /// on; `false` takes the finding as the code has it.
 #[derive(Clone, Copy, Debug)]
 struct Contract {
-    /// S5 / F1: no lease at `attempts >= M`, and the tick buries a due
-    /// message at `attempts >= M` whether it holds a lease or not.
-    s5: bool,
     /// S10 / F5: `revive` refuses a queue that holds `max_depth` already.
     s10: bool,
     /// N1 (new, not in the doc): a settle that names no token matches only
@@ -300,7 +294,6 @@ impl Model {
             .live
             .iter()
             .filter(|(_, l)| l.queue == queue && l.due <= self.now && l.attempts >= max)
-            .filter(|(_, l)| self.contract.s5 || l.token.is_some())
             .map(|(id, l)| {
                 let why = if l.token.is_some() {
                     Why::Outlived
@@ -314,14 +307,14 @@ impl Model {
         spent.into_iter().map(|((_, id), why)| (id, why)).collect()
     }
 
-    /// The ids `lease(queue, now, limit)` must hand out: due (S8), of that
-    /// queue (S9), below the current `M` (S5), oldest sent first.
-    fn leasable(&self, queue: Option<usize>, limit: usize) -> Vec<i64> {
+    /// The ids `lease(queue, now, limit, M)` must hand out: due (S8), of
+    /// that queue (S9), below `M` (S5), oldest sent first.
+    fn leasable(&self, queue: Option<usize>, limit: usize, max_attempts: i64) -> Vec<i64> {
         let mut due: Vec<_> = self
             .live
             .iter()
             .filter(|(_, l)| l.due <= self.now && queue.is_none_or(|q| l.queue == q))
-            .filter(|(_, l)| !self.contract.s5 || l.attempts < self.policy[l.queue].max_attempts)
+            .filter(|(_, l)| l.attempts < max_attempts)
             .map(|(id, l)| (l.sent, *id))
             .collect();
         due.sort();
@@ -600,9 +593,7 @@ impl Harness {
             Op::Tick { queue, limit } => {
                 let name = QUEUES[*queue];
                 let policy = self.m.policy[*queue];
-                let got = self
-                    .q()
-                    .bury_spent(name, policy.max_attempts, now, OUTLIVED);
+                let got = self.q().bury_spent(name, policy.max_attempts, now);
                 if busy {
                     check!(
                         got.is_err(),
@@ -611,7 +602,7 @@ impl Harness {
                 } else {
                     let got = got.map_err(sql)?;
                     let want = self.m.spent(*queue);
-                    let got_ids: Vec<_> = got.iter().map(|m| (m.id, m.attempts)).collect();
+                    let got_ids: Vec<_> = got.iter().map(|(m, _)| (m.id, m.attempts)).collect();
                     let want_ids: Vec<_> = want
                         .iter()
                         .map(|(id, _)| (*id, self.m.live[id].attempts))
@@ -622,18 +613,24 @@ impl Harness {
                          the contract {want_ids:?}",
                         policy.max_attempts
                     );
-                    for message in &got {
+                    for (message, _) in &got {
                         self.message_is(message)?;
                     }
                     for (id, why) in want {
                         self.m.bury(id, why);
                     }
                 }
-                self.lease(Some(*queue), *limit, policy.lease, busy)?;
+                self.lease(
+                    Some(*queue),
+                    *limit,
+                    policy.lease,
+                    policy.max_attempts,
+                    busy,
+                )?;
             }
             Op::Lease { queue, limit } => {
-                let lease = self.m.policy[queue.unwrap_or(0)].lease;
-                self.lease(*queue, *limit, lease, busy)?;
+                let policy = self.m.policy[queue.unwrap_or(0)];
+                self.lease(*queue, *limit, policy.lease, policy.max_attempts, busy)?;
             }
             Op::Settle { how, pick, delay } => {
                 let Some((at, id, token)) = self.pick(*pick) else {
@@ -797,16 +794,19 @@ impl Harness {
         queue: Option<usize>,
         limit: usize,
         lease: i64,
+        max_attempts: i64,
         busy: bool,
     ) -> TestCaseResult {
         let now = self.m.now;
-        let got = self.q().lease(queue.map(|q| QUEUES[q]), now, limit, lease);
+        let got = self
+            .q()
+            .lease(queue.map(|q| QUEUES[q]), now, limit, lease, max_attempts);
         if busy {
             check!(got.is_err(), "lease under a held lock answered {got:?}");
             return Ok(());
         }
         let got = got.map_err(sql)?;
-        let want = self.m.leasable(queue, limit);
+        let want = self.m.leasable(queue, limit, max_attempts);
         check!(
             ids(&got) == want,
             "S5/S8/S9: lease({queue:?}, now {now}, limit {limit}) handed out {:?} \
@@ -987,7 +987,7 @@ impl Harness {
             let truthful = match &d.why {
                 Why::Said(said) => rwhy == said,
                 Why::Outlived => rwhy == OUTLIVED,
-                Why::Lowered => rwhy != OUTLIVED,
+                Why::Lowered => rwhy.starts_with("max_attempts lowered to "),
             };
             check!(
                 truthful,
@@ -1148,23 +1148,11 @@ fn hold_to(contract: Contract) {
     }
 }
 
-/// Every property the store alone can show, with F1 and F5 as the code has
+/// Every property the store alone can show, with F5 and N1 as the code has
 /// them.
 #[test]
 fn the_store_keeps_its_contract_but_for_the_known_findings() {
     hold_to(Contract {
-        s5: false,
-        s10: false,
-        untokened: false,
-    });
-}
-
-/// S5 as the contract says it: no lease at `attempts >= M`.
-#[test]
-#[ignore = "F1: lease does not look at max_attempts; fixed when lease takes M"]
-fn the_store_keeps_s5() {
-    hold_to(Contract {
-        s5: true,
         s10: false,
         untokened: false,
     });
@@ -1175,7 +1163,6 @@ fn the_store_keeps_s5() {
 #[ignore = "F5: revive ignores max_depth; fixed when revive refuses a full queue"]
 fn the_store_keeps_s10() {
     hold_to(Contract {
-        s5: false,
         s10: true,
         untokened: false,
     });
@@ -1187,7 +1174,6 @@ fn the_store_keeps_s10() {
 #[ignore = "N1: new, not in the doc; `lease_id IS NULL` cannot tell never leased from lease ended"]
 fn the_store_keeps_untokened_settles_to_unleased_messages() {
     hold_to(Contract {
-        s5: false,
         s10: false,
         untokened: true,
     });

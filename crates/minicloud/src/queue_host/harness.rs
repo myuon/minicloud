@@ -92,6 +92,9 @@ pub struct Faulty {
     /// Every `lease` the loop asked for.
     leases_asked: LeasesAsked,
     tick: Arc<AtomicU64>,
+    /// The host's clock, and how far each `bury_spent` moves it.
+    ms: Arc<AtomicI64>,
+    slow_bury_spent: Arc<AtomicI64>,
 }
 
 impl Faulty {
@@ -134,9 +137,15 @@ impl Store for Faulty {
         queue: &str,
         max_attempts: i64,
         now_unix: i64,
-        why: &str,
-    ) -> Result<Vec<Message>, String> {
-        self.inner.bury_spent(queue, max_attempts, now_unix, why)
+    ) -> Result<Vec<(Message, String)>, String> {
+        let spent = self.inner.bury_spent(queue, max_attempts, now_unix);
+        // The time `bury_spent` took, on the host's clock: what a tick that
+        // waited on the store's lock, or a slow disk, would see.
+        self.ms.fetch_add(
+            self.slow_bury_spent.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        spent
     }
     fn lease(
         &self,
@@ -144,13 +153,15 @@ impl Store for Faulty {
         now_unix: i64,
         limit: usize,
         lease_secs: i64,
+        max_attempts: i64,
     ) -> Result<Vec<Message>, String> {
         self.leases_asked.lock().unwrap().push((
             self.tick.load(Ordering::Relaxed) as u32,
             queue.unwrap_or_default().to_string(),
             limit,
         ));
-        self.inner.lease(queue, now_unix, limit, lease_secs)
+        self.inner
+            .lease(queue, now_unix, limit, lease_secs, max_attempts)
     }
     fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String> {
         self.settle(id, Op::Done, |q| q.done(id, lease_id))
@@ -230,6 +241,10 @@ pub struct Harness {
     fail: FailPlan,
     leases_asked: LeasesAsked,
     tick: Arc<AtomicU64>,
+    /// How many milliseconds of the host's clock each `bury_spent` takes:
+    /// 0 unless a test wants a tick slow enough for a lease to run out in
+    /// the middle of it.
+    pub slow_bury_spent: Arc<AtomicI64>,
     /// `queue_in_flight` as each tick left it, oldest first: what the
     /// next tick's room is counted from.
     pub in_flight_after_tick: Vec<u64>,
@@ -261,7 +276,16 @@ impl Harness {
         let fail = Arc::default();
         let leases_asked = Arc::default();
         let tick = Arc::default();
-        let deliveries = Harness::open(&path, &ms, &ghost, &fail, &leases_asked, &tick);
+        let slow_bury_spent = Arc::default();
+        let deliveries = Harness::open(
+            &path,
+            &ms,
+            &ghost,
+            &fail,
+            &leases_asked,
+            &tick,
+            &slow_bury_spent,
+        );
         Harness {
             dir,
             path,
@@ -275,6 +299,7 @@ impl Harness {
             fail,
             leases_asked,
             tick,
+            slow_bury_spent,
             in_flight_after_tick: Vec::new(),
             crashes: 0,
         }
@@ -289,8 +314,9 @@ impl Harness {
         fail: &FailPlan,
         leases_asked: &LeasesAsked,
         tick: &Arc<AtomicU64>,
+        slow_bury_spent: &Arc<AtomicI64>,
     ) -> Deliveries<Faulty> {
-        let ms = Arc::clone(ms);
+        let clock = Arc::clone(ms);
         Deliveries {
             store: Arc::new(Mutex::new(Faulty {
                 inner: Queues::open(path).unwrap(),
@@ -298,11 +324,13 @@ impl Harness {
                 fail: Arc::clone(fail),
                 leases_asked: Arc::clone(leases_asked),
                 tick: Arc::clone(tick),
+                ms: Arc::clone(ms),
+                slow_bury_spent: Arc::clone(slow_bury_spent),
             })),
             counters: Arc::new(AppCounters::default()),
             logs: Arc::new(LogRing::default()),
             // The host's `now()`: whole seconds, the fraction cut off.
-            now: Arc::new(move || ms.load(Ordering::Relaxed).div_euclid(1000)),
+            now: Arc::new(move || clock.load(Ordering::Relaxed).div_euclid(1000)),
         }
     }
 
@@ -580,6 +608,7 @@ impl Harness {
             &self.fail,
             &self.leases_asked,
             &self.tick,
+            &self.slow_bury_spent,
         );
         self.crashes += 1;
         self.check();

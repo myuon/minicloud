@@ -234,11 +234,6 @@ fn now() -> i64 {
 /// `SELECT` per app that has a queue.
 const EVERY: Duration = Duration::from_secs(1);
 
-/// The reason a message is buried with when its lease ran out on its last
-/// attempt: that delivery did not answer in time, and may still be running,
-/// so "no answer" alone would say less than is known.
-const OUTLIVED: &str = "no answer within the lease";
-
 /// Delivers what apps have put on their queues, for as long as the host
 /// runs.
 ///
@@ -327,14 +322,14 @@ pub(crate) trait Store: Send + 'static {
         queue: &str,
         max_attempts: i64,
         now_unix: i64,
-        why: &str,
-    ) -> Result<Vec<Message>, String>;
+    ) -> Result<Vec<(Message, String)>, String>;
     fn lease(
         &self,
         queue: Option<&str>,
         now_unix: i64,
         limit: usize,
         lease_secs: i64,
+        max_attempts: i64,
     ) -> Result<Vec<Message>, String>;
     fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String>;
     fn retry(
@@ -366,9 +361,8 @@ impl Store for Queues {
         queue: &str,
         max_attempts: i64,
         now_unix: i64,
-        why: &str,
-    ) -> Result<Vec<Message>, String> {
-        Queues::bury_spent(self, queue, max_attempts, now_unix, why)
+    ) -> Result<Vec<(Message, String)>, String> {
+        Queues::bury_spent(self, queue, max_attempts, now_unix)
     }
     fn lease(
         &self,
@@ -376,8 +370,9 @@ impl Store for Queues {
         now_unix: i64,
         limit: usize,
         lease_secs: i64,
+        max_attempts: i64,
     ) -> Result<Vec<Message>, String> {
-        Queues::lease(self, queue, now_unix, limit, lease_secs)
+        Queues::lease(self, queue, now_unix, limit, lease_secs, max_attempts)
     }
     fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String> {
         Queues::done(self, id, lease_id)
@@ -440,32 +435,35 @@ impl<S: Store> Deliveries<S> {
     /// has room for, each handed to `start` before the next queue's room
     /// is counted (a start the host turns away has given its in-flight
     /// count back by then).
+    ///
+    /// The clock is read once, and every queue is buried and leased at that
+    /// instant. Read twice, a lease that ran out between the two readings
+    /// would be too early for `bury_spent` and in time for `lease`, and its
+    /// message would be handed out once more than `max_attempts`. `queues`
+    /// is the version the tick read when it began, so its `max_attempts` is
+    /// the "current" one the contract's S5 means, for the whole tick.
     pub(crate) fn tick(
         &self,
         queues: &[QueuePolicy],
         mut start: impl FnMut(&QueuePolicy, Message),
     ) {
+        let now = (self.now)();
         for policy in queues {
-            // Before anything is leased: a message whose lease ran out
-            // on its last attempt is a dead letter, not a next try.
+            // Before anything is leased: a message that has had its
+            // attempts is a dead letter, not a next try.
             let spent = {
                 let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
-                store.bury_spent(
-                    &policy.name,
-                    i64::from(policy.max_attempts),
-                    (self.now)(),
-                    OUTLIVED,
-                )
+                store.bury_spent(&policy.name, i64::from(policy.max_attempts), now)
             };
             match spent {
                 Ok(spent) => {
-                    for message in spent {
+                    for (message, why) in spent {
                         self.counters.queue_buried.fetch_add(1, Ordering::Relaxed);
                         self.logs.push(
                             "host",
                             &format!(
                                 "queue `{}`: message {} is a dead letter after {} \
-                                 attempt(s): {OUTLIVED}",
+                                 attempt(s): {why}",
                                 policy.name, message.id, message.attempts
                             ),
                         );
@@ -485,9 +483,10 @@ impl<S: Store> Deliveries<S> {
                 let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
                 store.lease(
                     Some(&policy.name),
-                    (self.now)(),
+                    now,
                     room as usize,
                     policy.lease.as_secs() as i64,
+                    i64::from(policy.max_attempts),
                 )
             };
             let leased = match leased {

@@ -56,7 +56,6 @@ fn l3a_with_no_fault_each_message_is_invoked_exactly_once() {
 /// lowered to its `attempts` is not handed out again; it is a dead letter
 /// at the next tick, saying why.
 #[test]
-#[ignore = "F1: lease does not look at max_attempts, and bury_spent buries only a message still holding a lease"]
 fn f1_lowering_max_attempts_stops_a_waiting_retry() {
     let mut h = Harness::new(
         "f1",
@@ -95,6 +94,38 @@ fn f1_lowering_max_attempts_stops_a_waiting_retry() {
         row.why.contains("max_attempts"),
         "the reason says max_attempts was lowered: {:?}",
         row.why
+    );
+}
+
+/// S5, N2: a tick reads the clock once. With one attempt allowed, a lease
+/// that runs out while the tick is between `bury_spent` and `lease` (the
+/// tick waited on the store, say) is neither buried as spent by the first
+/// nor handed out by the second: the message has had its one delivery. It
+/// is buried at the next tick, as having had no answer within its lease.
+#[test]
+fn n2_a_lease_running_out_in_the_middle_of_a_tick_is_not_handed_out_again() {
+    use std::sync::atomic::Ordering;
+    let mut h = Harness::new(
+        "n2",
+        vec![policy("mail", |p| {
+            p.max_attempts = 1;
+            p.lease = std::time::Duration::from_secs(30);
+        })],
+    );
+    let id = leased(&mut h);
+    h.start_run(id);
+    // Half a second before the lease runs out, a tick whose `bury_spent`
+    // takes a whole second.
+    h.advance_ms(29_500);
+    h.slow_bury_spent.store(1000, Ordering::Relaxed);
+    h.tick();
+    h.slow_bury_spent.store(0, Ordering::Relaxed);
+    assert_eq!(h.facts(id).leases.len(), 1, "not leased past max_attempts");
+    h.tick();
+    let row = h.row(id).expect("a dead letter");
+    assert_eq!(
+        (row.state, row.why.as_str()),
+        ("dead", "no answer within the lease")
     );
 }
 
