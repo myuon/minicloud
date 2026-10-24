@@ -702,6 +702,19 @@ impl Harness {
             self.pending.len() as u64,
             "queue_in_flight against the deliveries in flight"
         );
+        for policy in &self.queues {
+            let of_queue = self
+                .pending
+                .iter()
+                .filter(|pending| pending.message.queue == policy.name)
+                .count() as u64;
+            assert_eq!(
+                self.counters().queue_in_flight_of(&policy.name),
+                of_queue,
+                "`{}`'s in-flight count against its deliveries in flight",
+                policy.name
+            );
+        }
     }
 
     /// S6 for message `id`, from the store's row and the ghost facts:

@@ -348,7 +348,6 @@ fn busy_first_queue(h: &mut Harness, ticks: usize) -> i64 {
 /// L2: a due message is eventually leased, per queue: a busy queue does not
 /// starve another of the same app.
 #[test]
-#[ignore = "F6: room is a queue's batch less the whole app's in-flight count; a first queue that fills it starves a later one"]
 fn f6_a_busy_queue_does_not_starve_another() {
     let mut h = Harness::new("f6", policies(TWO_QUEUES));
     let second = busy_first_queue(&mut h, 200);
@@ -358,37 +357,32 @@ fn f6_a_busy_queue_does_not_starve_another() {
     );
 }
 
-/// The counterexample to L2, shown on the run above. On every tick:
-/// `first` is leased its whole room of 4, which raises the app's in-flight
-/// count to 4 before `second` is looked at; `second`'s room is then
-/// `2 - 4`, saturating to 0, so `lease` is never asked for it. Each tick
-/// begins in the same state — nothing in flight (every delivery answered),
-/// 4 due on `first`, `second`'s message due with 0 attempts — and ends in
-/// the same one, so the pattern is a cycle: an environment that keeps
-/// `first` that busy repeats it for ever, and `second`'s message, due all
-/// along, is never handed out. A finite run cannot prove that, but the
-/// state repeating can.
+/// What closes the counterexample to L2. It was a cycle: on every tick
+/// `first` was leased its whole room of 4, which raised the app's in-flight
+/// count to 4 before `second` was looked at, and `second`'s room, `2 - 4`,
+/// saturated to 0, so `lease` was never asked for it. Now each queue's room
+/// is its own `batch` less its own deliveries: on every tick `first` is
+/// asked with 4 and `second` with 2, `second`'s message is leased on the
+/// first, and the app has both queues' deliveries in flight at once.
 #[test]
-fn f6_counterexample_the_second_queue_has_no_room_on_any_tick() {
-    let mut h = Harness::new("f6-cex", policies(TWO_QUEUES));
+fn f6_each_queue_has_room_of_its_own() {
+    let mut h = Harness::new("f6-room", policies(TWO_QUEUES));
     let second = busy_first_queue(&mut h, 50);
     let asked = h.leases_asked();
-    for tick in 1..=50u32 {
-        let this: Vec<_> = asked.iter().filter(|(t, _, _)| *t == tick).collect();
-        assert_eq!(
-            this,
-            vec![&(tick, "first".to_string(), 4)],
-            "tick {tick}: `first` asked with room 4, `second` not asked (room 0)"
-        );
-    }
-    assert!(h.in_flight_after_tick.iter().all(|n| *n == 4));
-    let row = h.row(second).unwrap();
     assert_eq!(
-        (row.state, row.attempts),
-        ("due", 0),
-        "due all along, never tried"
+        asked.iter().filter(|(t, _, _)| *t == 1).collect::<Vec<_>>(),
+        vec![&(1, "first".to_string(), 4), &(1, "second".to_string(), 2)],
     );
-    assert!(h.facts(second).leases.is_empty());
+    for tick in 1..=50u32 {
+        let first: Vec<_> = asked
+            .iter()
+            .filter(|(t, queue, _)| *t == tick && queue == "first")
+            .collect();
+        assert_eq!(first, vec![&(tick, "first".to_string(), 4)], "tick {tick}");
+    }
+    assert_eq!(h.in_flight_after_tick[0], 5, "4 of `first`, 1 of `second`");
+    assert_eq!(h.facts(second).leases.len(), 1);
+    assert!(h.row(second).is_none(), "delivered");
 }
 
 // ------------------------------------------------------------ in flight

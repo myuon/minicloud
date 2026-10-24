@@ -477,7 +477,9 @@ impl<S: Store> Deliveries<S> {
                         .push("host", &format!("queue `{}`: {why}", policy.name));
                 }
             }
-            let in_flight = self.counters.queue_in_flight.load(Ordering::Relaxed);
+            // This queue's own deliveries, not the app's: another queue
+            // that keeps its `batch` busy must not leave this one no room.
+            let in_flight = self.counters.queue_in_flight_of(&policy.name);
             let room = (policy.batch as u64).saturating_sub(in_flight);
             if room == 0 {
                 continue;
@@ -501,9 +503,7 @@ impl<S: Store> Deliveries<S> {
                 }
             };
             for message in leased {
-                self.counters
-                    .queue_in_flight
-                    .fetch_add(1, Ordering::Relaxed);
+                self.counters.queue_delivery_started(&policy.name);
                 start(policy, message);
             }
         }
@@ -540,9 +540,7 @@ impl<S: Store> Deliveries<S> {
             // could spend a message's attempts without its consumer ever being
             // asked.
             Err(_) => {
-                self.counters
-                    .queue_in_flight
-                    .fetch_sub(1, Ordering::Relaxed);
+                self.counters.queue_delivery_ended(&message.queue);
                 self.give_back(policy, message, None);
                 None
             }
@@ -582,9 +580,7 @@ impl<S: Store> Deliveries<S> {
     ///   off at its deadline, cancelled, failed) is no answer, whatever its
     ///   status: an attempt spent, never the message taken.
     pub(crate) fn settle(&self, policy: &QueuePolicy, message: &Message, outcome: Option<Reply>) {
-        self.counters
-            .queue_in_flight
-            .fetch_sub(1, Ordering::Relaxed);
+        self.counters.queue_delivery_ended(&message.queue);
         let said = |reply: &Reply| {
             format!(
                 "{} {}",

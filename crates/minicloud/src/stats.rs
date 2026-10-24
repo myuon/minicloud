@@ -4,7 +4,7 @@
 //! never used to decide anything, so no ordering between two of them is
 //! promised.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -215,6 +215,11 @@ pub struct AppCounters {
     pub queue_sent: AtomicU64,
     pub queue_refused: AtomicU64,
     pub queue_in_flight: AtomicU64,
+    /// `queue_in_flight` queue by queue, which a queue's room is counted
+    /// from: its own `batch` less its own deliveries. Counted from the
+    /// app's total, a queue that keeps its `batch` busy leaves no room
+    /// for the others, and one of them is never delivered.
+    queue_in_flight_by_queue: Mutex<BTreeMap<String, u64>>,
     pub queue_delivered: AtomicU64,
     pub queue_retried: AtomicU64,
     pub queue_buried: AtomicU64,
@@ -226,6 +231,42 @@ pub struct AppCounters {
 }
 
 impl AppCounters {
+    /// A delivery of `queue` was started: counted in flight, for the app
+    /// and for the queue.
+    pub fn queue_delivery_started(&self, queue: &str) {
+        self.queue_in_flight.fetch_add(1, Ordering::Relaxed);
+        let mut by_queue = self
+            .queue_in_flight_by_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *by_queue.entry(queue.to_string()).or_default() += 1;
+    }
+
+    /// A delivery of `queue` ended, however it ended.
+    pub fn queue_delivery_ended(&self, queue: &str) {
+        self.queue_in_flight.fetch_sub(1, Ordering::Relaxed);
+        let mut by_queue = self
+            .queue_in_flight_by_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(n) = by_queue.get_mut(queue) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                by_queue.remove(queue);
+            }
+        }
+    }
+
+    /// Deliveries of `queue` in flight.
+    pub fn queue_in_flight_of(&self, queue: &str) -> u64 {
+        self.queue_in_flight_by_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(queue)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// A static file answered: `modified` is false for a `304`.
     pub fn asset(&self, modified: bool) {
         self.assets.fetch_add(1, Ordering::Relaxed);
