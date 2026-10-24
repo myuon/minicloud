@@ -9,9 +9,12 @@
 //!
 //! A queue is declared in `app.toml` (`[[queues]]`) before it can be sent
 //! to, so a misspelt name is an `Err` at the call and not a queue nobody
-//! reads. Sending is a write to the app's own SQLite file and nothing else:
-//! the message is on disk when `send` answers, so a host that stops between
-//! the send and the delivery still has it.
+//! reads. Declared by the app's **current** version: a run of the version a
+//! redeploy replaced sends under the new version's `[[queues]]`
+//! ([`crate::apps::CurrentQueues`]), since that is the version that
+//! delivers. Sending is a write to the app's own SQLite file and nothing
+//! else: the message is on disk when `send` answers, so a host that stops
+//! between the send and the delivery still has it.
 //!
 //! **Delivery is a run of the app** ([`crate::internal`]), at the queue's
 //! path, with the message as the body and `x-minicloud-queue` and
@@ -26,15 +29,19 @@
 //! worker past its deadline) is not an attempt at all: its message is
 //! given back, as one turned away at admission is.
 //!
-//! **A delivery may happen twice.** A run that takes longer than `lease`
-//! is taken to be lost and the message is tried again; if the first run
-//! then finishes, the work has been done twice. The alternative — never
+//! **A delivery may happen twice.** A delivery whose lease runs out is
+//! taken to be lost and the message is tried again; if the first run then
+//! finishes, the work has been done twice. The alternative — never
 //! retrying — loses a message whenever the host stops mid-delivery, which
 //! is worse. A consumer must be able to be asked twice, which is a
-//! property of the work and not something the host can give it.
+//! property of the work and not something the host can give it. What the
+//! host can do is not cause it: a queue's `lease` must outlast the app's
+//! `limits.deadline` by a second ([`crate::config`]), so a run that answers
+//! at all answers within its lease, and only a crash, a stall or the clock
+//! leaves a delivery to be made again.
 //!
-//! What the first run's answer no longer does is settle the message. Only
-//! the delivery holding the current lease does that ([`crate::queue`]'s
+//! What a late run's answer does not do is settle the message. Only the
+//! delivery holding the current lease does that ([`crate::queue`]'s
 //! "Leases, not deletes"): a run that outlived its lease cannot delete the
 //! message from under the delivery that has it now, move that one's lease,
 //! or bury it while it is being taken. Its answer is said in the app's log
@@ -44,6 +51,15 @@
 //! the message is a dead letter ("no answer within the lease") instead of
 //! a next try. A delivery the host turns away before the app sees it is
 //! not an attempt, and gives back the one its lease counted.
+//!
+//! **Each tick** (`Deliveries::tick`) reads the clock and the app's
+//! current version once, then: writes the settles kept from deliveries
+//! whose write failed (`Deliveries::flush`); buries the messages of
+//! queues the version no longer declares; and, queue by queue, buries what
+//! has had its `max_attempts` and leases what fits in that queue's own
+//! `batch`. A host that is shutting down starts no delivery, and a run its
+//! closing engine drops is let go with nothing written, as a crash would
+//! leave it (`Deliveries::abandon`).
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -694,7 +710,7 @@ impl<S: Store> Deliveries<S> {
     /// Keeps a delivery's settle beside the store, then writes it.
     ///
     /// Kept first, so that a write that fails is not a settle dropped: it
-    /// stays kept, the next tick writes it again ([`Deliveries::flush`]),
+    /// stays kept, the next tick writes it again (`Deliveries::flush`),
     /// and until then the message is its delivery's — not buried as having
     /// had no answer when its lease runs out, nor handed out again. Before
     /// this a failed `done` was counted as delivered and its message later
