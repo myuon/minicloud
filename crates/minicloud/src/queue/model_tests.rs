@@ -7,13 +7,16 @@
 //! the invariants S1–S10 as far as the store alone can show them.
 //!
 //! The model is written from the doc, not from the SQL. Where the two are
-//! known to disagree (F5: `revive` does not look at `max_depth`; and N1,
-//! found here: a settle
-//! naming no token matches a message whose lease was ended), [`Contract`]
-//! says whether the model holds the store to the contract — those runs
-//! fail on the code as it is, and are ignored with the finding's id — or
-//! takes the finding as the code has it, so that everything else is still
-//! checked on every run.
+//! known to disagree (F5: `revive` does not look at `max_depth`),
+//! [`Contract`] says whether the model holds the store to the contract —
+//! those runs fail on the code as it is, and are ignored with the
+//! finding's id — or takes the finding as the code has it, so that
+//! everything else is still checked on every run.
+//!
+//! Every settle names a token (N1): one a delivery holds, current or
+//! stale. A settle that named none could not tell a message never leased
+//! from one whose lease a `retry` or `give_back` ended, and the store no
+//! longer takes one.
 //!
 //! The lease ids are the real `next_lease_id`'s, which is process-global:
 //! a crash here reopens the file but not the process, so the counter goes
@@ -64,7 +67,7 @@ fn lowering_max_attempts_stops_a_message_waiting_for_its_retry() {
     assert!(q.bury_spent("a", 2, T).unwrap().is_empty());
     let taken = q.lease(Some("a"), T, 1, 30, 2).unwrap();
     assert_eq!((taken[0].id, taken[0].attempts), (id, 1));
-    assert!(q.retry(id, taken[0].lease_id, T + 1, 10).unwrap());
+    assert!(q.retry(id, taken[0].lease_id.unwrap(), T + 1, 10).unwrap());
     // Redeployed with M = 1; the retry comes due.
     let spent = q.bury_spent("a", 1, T + 11).unwrap();
     let leased = q.lease(Some("a"), T + 11, 1, 30, 1).unwrap();
@@ -116,47 +119,45 @@ fn revive_does_not_fill_a_queue_past_max_depth() {
         q.send("a", body, T, T, BODY, 4).unwrap();
     }
     assert!(q.send("a", "5", T, T, BODY, 4).is_err());
-    assert!(q.bury(first, None, T, "500 boom").unwrap());
+    assert!(q.bury_unleased(first, T, "500 boom").unwrap());
     q.send("a", "5", T, T, BODY, 4).unwrap();
     let revived = q.revive(first, T);
     assert_eq!(q.depths().unwrap(), vec![("a".to_string(), 4, 1)]);
     assert!(!matches!(revived, Ok(true)), "revived into a full queue");
 }
 
-/// S1, S4, N1 (new, not among the doc's findings): a settle that names no
-/// token takes away a message whose lease a `give_back` ended.
+/// S1, S4, N1 (found by the model): a settle once took away a message whose
+/// lease a `give_back` had ended, by naming no token.
 ///
 /// `lease_id IS NULL` is both "never leased" and "lease ended by `retry` or
-/// `give_back`", so `done(id, None)` — which the doc means for a message no
-/// delivery has taken — matches a message a delivery took and gave back,
-/// and deletes it. No caller in the host settles with `None` today, so the
-/// delivery loop cannot reach it; the store's API can.
+/// `give_back`", so `done(id, None)` matched a message a delivery had taken
+/// and given back, and deleted it. A settle now names the lease it holds,
+/// and the one a `give_back` ended matches nothing.
 #[test]
-#[ignore = "N1: new; a token-less settle matches a message whose lease was ended"]
-fn a_settle_with_no_token_does_not_take_a_message_given_back() {
+fn a_settle_after_a_give_back_does_not_take_the_message() {
     let q = Queues::in_memory().unwrap();
     let id = q.send("b", "x", T, T, BODY, DEPTH).unwrap();
     let taken = q.lease(Some("b"), T, 1, 30, 3).unwrap();
-    assert!(q.give_back(id, taken[0].lease_id, T, 0).unwrap());
-    assert!(!q.done(id, None).unwrap(), "done(None) deleted it");
+    let token = taken[0].lease_id.unwrap();
+    assert!(q.give_back(id, token, T, 0).unwrap());
+    assert!(
+        !q.done(id, token).unwrap(),
+        "done after give_back deleted it"
+    );
     assert_eq!(q.depths().unwrap(), vec![("b".to_string(), 1, 0)]);
 }
 
-/// S6, N1: a `give_back` that names no token takes back an attempt whose
-/// delivery reached the app.
-///
-/// Leased (attempts 1), the app answers 500 and the delivery retries, which
-/// ends the lease; `give_back(id, None)` then matches and takes the attempt
-/// back to 0, though the app was invoked once. S6.2, invocations ≤
-/// attempts, no longer holds.
+/// S6, N1: a `give_back` once took back an attempt whose delivery had
+/// reached the app, by naming no token after a `retry` had ended the lease.
+/// S6.2, invocations ≤ attempts, then no longer held.
 #[test]
-#[ignore = "N1: new; a token-less settle matches a message whose lease was ended"]
-fn a_give_back_with_no_token_does_not_take_back_an_answered_attempt() {
+fn a_give_back_after_a_retry_does_not_take_back_the_answered_attempt() {
     let q = Queues::in_memory().unwrap();
     let id = q.send("a", "x", T, T, BODY, DEPTH).unwrap();
     let taken = q.lease(Some("a"), T, 1, 30, 3).unwrap();
-    assert!(q.retry(id, taken[0].lease_id, T, 0).unwrap());
-    assert!(!q.give_back(id, None, T, 0).unwrap());
+    let token = taken[0].lease_id.unwrap();
+    assert!(q.retry(id, token, T, 0).unwrap());
+    assert!(!q.give_back(id, token, T, 0).unwrap());
     let again = q.lease(Some("a"), T, 1, 30, 3).unwrap();
     assert_eq!(again[0].attempts, 2, "the answered attempt still counts");
 }
@@ -186,12 +187,6 @@ const FIRST_POLICY: Policy = Policy {
 struct Contract {
     /// S10 / F5: `revive` refuses a queue that holds `max_depth` already.
     s10: bool,
-    /// N1 (new, not in the doc): a settle that names no token matches only
-    /// a message no lease has been issued for in this life — sent, or
-    /// revived — and not one whose lease a `retry` or `give_back` ended.
-    /// `false` takes the code's `lease_id IS NULL`, under which it matches
-    /// both, and leaves S6.2 unchecked for a message given back that way.
-    untokened: bool,
 }
 
 /// Why a dead letter is dead, as the contract tells the causes apart (S7).
@@ -218,8 +213,6 @@ struct Live {
     leases: i64,
     given_back: i64,
     answered: i64,
-    /// Given back by a settle that named no token, after a lease (N1).
-    untokened: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -237,7 +230,7 @@ struct Dead {
 #[derive(Clone, Debug)]
 struct Delivery {
     id: i64,
-    token: Option<i64>,
+    token: i64,
 }
 
 #[derive(Debug)]
@@ -323,10 +316,8 @@ impl Model {
     }
 
     /// Whether a settle naming `token` is the current holder's (S4.2).
-    fn holds(&self, id: i64, token: Option<i64>) -> bool {
-        self.live.get(&id).is_some_and(|l| {
-            l.token == token && (token.is_some() || !self.contract.untokened || l.leases == 0)
-        })
+    fn holds(&self, id: i64, token: i64) -> bool {
+        self.live.get(&id).is_some_and(|l| l.token == Some(token))
     }
 
     fn bury(&mut self, id: i64, why: Why) {
@@ -364,8 +355,6 @@ enum Pick {
     /// One a delivery holds that a later lease, a settle or a revive has
     /// replaced.
     Stale(usize),
-    /// `None`, for a message by id (any id ever sent).
-    Untokened(usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -422,7 +411,6 @@ fn store_op() -> impl Strategy<Value = Op> {
     let pick = prop_oneof![
         3 => any::<usize>().prop_map(Pick::Fresh),
         2 => any::<usize>().prop_map(Pick::Stale),
-        1 => any::<usize>().prop_map(Pick::Untokened),
     ];
     let how = prop_oneof![
         Just(Settle::Done),
@@ -586,7 +574,6 @@ impl Harness {
                         leases: 0,
                         given_back: 0,
                         answered: 0,
-                        untokened: false,
                     },
                 );
             }
@@ -648,10 +635,8 @@ impl Harness {
                     return Ok(());
                 }
                 let got = got.map_err(sql)?;
-                if let Some(at) = at {
-                    // A delivery settles once.
-                    self.m.deliveries.remove(at);
-                }
+                // A delivery settles once.
+                self.m.deliveries.remove(at);
                 let holds = self.m.holds(id, token);
                 check!(
                     got == holds,
@@ -675,9 +660,8 @@ impl Harness {
                             if l.attempts > 0 {
                                 l.attempts -= 1;
                                 l.given_back += 1;
-                                l.untokened |= token.is_none();
                             }
-                        } else if token.is_some() {
+                        } else {
                             l.answered += 1;
                         }
                     }
@@ -731,7 +715,6 @@ impl Harness {
                         leases: 0,
                         given_back: 0,
                         answered: 0,
-                        untokened: false,
                     },
                 );
             }
@@ -835,7 +818,7 @@ impl Harness {
             self.m.tokens.insert(token.unwrap());
             self.m.deliveries.push(Delivery {
                 id: message.id,
-                token,
+                token: token.unwrap(),
             });
             self.message_is(message)?;
         }
@@ -863,8 +846,8 @@ impl Harness {
         Ok(())
     }
 
-    /// The delivery index (if a delivery's), id and token a settle names.
-    fn pick(&self, pick: Pick) -> Option<(Option<usize>, i64, Option<i64>)> {
+    /// The delivery index, id and token a settle names.
+    fn pick(&self, pick: Pick) -> Option<(usize, i64, i64)> {
         let current = |d: &Delivery| self.m.holds(d.id, d.token);
         let among = |fresh: bool, n: usize| {
             let found: Vec<usize> = (0..self.m.deliveries.len())
@@ -872,19 +855,11 @@ impl Harness {
                 .collect();
             let at = *found.get(n % found.len().max(1))?;
             let d = &self.m.deliveries[at];
-            Some((Some(at), d.id, d.token))
+            Some((at, d.id, d.token))
         };
         match pick {
             Pick::Fresh(n) => among(true, n),
             Pick::Stale(n) => among(false, n),
-            Pick::Untokened(n) => {
-                let id = self
-                    .m
-                    .sent_ids
-                    .iter()
-                    .nth(n % self.m.sent_ids.len().max(1))?;
-                Some((None, *id, None))
-            }
         }
     }
 
@@ -1033,7 +1008,7 @@ impl Harness {
             // S6.2, as far as the store sees invocations: deliveries that
             // answered and asked for a retry.
             check!(
-                l.untokened || l.answered <= l.attempts,
+                l.answered <= l.attempts,
                 "S6.2: message {id} answered {} times on {} attempts",
                 l.answered,
                 l.attempts
@@ -1042,7 +1017,7 @@ impl Harness {
             let holders = m
                 .deliveries
                 .iter()
-                .filter(|d| d.id == *id && d.token.is_some() && d.token == l.token)
+                .filter(|d| d.id == *id && Some(d.token) == l.token)
                 .count();
             check!(holders <= 1, "S4.1: {holders} deliveries hold message {id}");
         }
@@ -1148,33 +1123,15 @@ fn hold_to(contract: Contract) {
     }
 }
 
-/// Every property the store alone can show, with F5 and N1 as the code has
-/// them.
+/// Every property the store alone can show, with F5 as the code has it.
 #[test]
 fn the_store_keeps_its_contract_but_for_the_known_findings() {
-    hold_to(Contract {
-        s10: false,
-        untokened: false,
-    });
+    hold_to(Contract { s10: false });
 }
 
 /// S10 as the contract says it: `revive` does not fill a queue past `D`.
 #[test]
 #[ignore = "F5: revive ignores max_depth; fixed when revive refuses a full queue"]
 fn the_store_keeps_s10() {
-    hold_to(Contract {
-        s10: true,
-        untokened: false,
-    });
-}
-
-/// N1 as the doc's S4 and S6 read together: a settle with no token does not
-/// match a message whose lease a retry ended.
-#[test]
-#[ignore = "N1: new, not in the doc; `lease_id IS NULL` cannot tell never leased from lease ended"]
-fn the_store_keeps_untokened_settles_to_unleased_messages() {
-    hold_to(Contract {
-        s10: false,
-        untokened: true,
-    });
+    hold_to(Contract { s10: true });
 }

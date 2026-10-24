@@ -73,11 +73,24 @@ fn put(apps: &Apps, app: &str, queue: &str, body: &str) -> i64 {
 
 /// Buries a message with a reason of the test's own, where a reason the
 /// consumer wrote would not do. No delivery has leased it (the tests that
-/// bury have `post` disabled), so there is no lease to name.
+/// bury have `post` disabled), and the store settles only what a delivery
+/// holds, so the test moves the row itself, in one transaction, as
+/// `Queues::bury` would: with the attempts it has, which is what the page
+/// shows.
 fn bury(apps: &Apps, app: &str, id: i64, why: &str) {
-    let store = store(apps, app);
-    let store = store.lock().unwrap();
-    store.bury(id, None, now(), why).unwrap();
+    let mut conn = rusqlite::Connection::open(apps.data.join(app).join("queue.sqlite3")).unwrap();
+    let tx = conn.transaction().unwrap();
+    let moved = tx
+        .execute(
+            "INSERT INTO dead (id, queue, body, attempts, due, sent, why, buried) \
+             SELECT id, queue, body, attempts, due, sent, ?2, ?3 FROM message WHERE id = ?1",
+            rusqlite::params![id, why, now()],
+        )
+        .unwrap();
+    assert_eq!(moved, 1, "message {id} is on the queue");
+    tx.execute("DELETE FROM message WHERE id = ?1", [id])
+        .unwrap();
+    tx.commit().unwrap();
 }
 
 /// One operation of the control fixture.

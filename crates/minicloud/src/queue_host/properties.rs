@@ -657,7 +657,7 @@ fn a_crash_between_any_two_steps_loses_nothing_and_leaves_no_stale_settle() {
         );
         match at {
             CrashAt::Settled => assert!(taken.is_empty()),
-            _ => assert_eq!(taken, vec![(id, Some(first_lease))], "{at:?}"),
+            _ => assert_eq!(taken, vec![(id, first_lease)], "{at:?}"),
         }
 
         // S1: still there unless a written done took it.

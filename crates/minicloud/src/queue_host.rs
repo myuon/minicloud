@@ -331,28 +331,17 @@ pub(crate) trait Store: Send + 'static {
         lease_secs: i64,
         max_attempts: i64,
     ) -> Result<Vec<Message>, String>;
-    fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String>;
-    fn retry(
-        &self,
-        id: i64,
-        lease_id: Option<i64>,
-        now_unix: i64,
-        delay_secs: i64,
-    ) -> Result<bool, String>;
+    fn done(&self, id: i64, lease_id: i64) -> Result<bool, String>;
+    fn retry(&self, id: i64, lease_id: i64, now_unix: i64, delay_secs: i64)
+        -> Result<bool, String>;
     fn give_back(
         &self,
         id: i64,
-        lease_id: Option<i64>,
+        lease_id: i64,
         now_unix: i64,
         delay_secs: i64,
     ) -> Result<bool, String>;
-    fn bury(
-        &self,
-        id: i64,
-        lease_id: Option<i64>,
-        now_unix: i64,
-        why: &str,
-    ) -> Result<bool, String>;
+    fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String>;
 }
 
 impl Store for Queues {
@@ -374,13 +363,13 @@ impl Store for Queues {
     ) -> Result<Vec<Message>, String> {
         Queues::lease(self, queue, now_unix, limit, lease_secs, max_attempts)
     }
-    fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String> {
+    fn done(&self, id: i64, lease_id: i64) -> Result<bool, String> {
         Queues::done(self, id, lease_id)
     }
     fn retry(
         &self,
         id: i64,
-        lease_id: Option<i64>,
+        lease_id: i64,
         now_unix: i64,
         delay_secs: i64,
     ) -> Result<bool, String> {
@@ -389,19 +378,13 @@ impl Store for Queues {
     fn give_back(
         &self,
         id: i64,
-        lease_id: Option<i64>,
+        lease_id: i64,
         now_unix: i64,
         delay_secs: i64,
     ) -> Result<bool, String> {
         Queues::give_back(self, id, lease_id, now_unix, delay_secs)
     }
-    fn bury(
-        &self,
-        id: i64,
-        lease_id: Option<i64>,
-        now_unix: i64,
-        why: &str,
-    ) -> Result<bool, String> {
+    fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String> {
         Queues::bury(self, id, lease_id, now_unix, why)
     }
 }
@@ -545,7 +528,7 @@ impl<S: Store> Deliveries<S> {
                 let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
                 if let Ok(false) = store.give_back(
                     message.id,
-                    message.lease_id,
+                    token(message),
                     (self.now)(),
                     policy.retry.as_secs() as i64,
                 ) {
@@ -564,7 +547,7 @@ impl<S: Store> Deliveries<S> {
         let taken = matches!(&outcome, Some(reply) if reply.status < 500);
         let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
         if taken {
-            match store.done(message.id, message.lease_id) {
+            match store.done(message.id, token(message)) {
                 Ok(false) => outlived(logs, &policy.name, message.id),
                 _ => {
                     counters.queue_delivered.fetch_add(1, Ordering::Relaxed);
@@ -582,7 +565,7 @@ impl<S: Store> Deliveries<S> {
         };
         // `attempts` already counts this one, which `lease` raised.
         if message.attempts >= i64::from(policy.max_attempts) {
-            if let Ok(false) = store.bury(message.id, message.lease_id, (self.now)(), &why) {
+            if let Ok(false) = store.bury(message.id, token(message), (self.now)(), &why) {
                 outlived(logs, &policy.name, message.id);
                 return;
             }
@@ -599,7 +582,7 @@ impl<S: Store> Deliveries<S> {
         // Doubling, so a consumer that is down is asked less and less
         // often rather than every `retry` for as long as it is down.
         let delay = policy.retry.as_secs() as i64 * (1 << (message.attempts.min(10) - 1).max(0));
-        if let Ok(false) = store.retry(message.id, message.lease_id, (self.now)(), delay) {
+        if let Ok(false) = store.retry(message.id, token(message), (self.now)(), delay) {
             outlived(logs, &policy.name, message.id);
             return;
         }
@@ -612,6 +595,14 @@ impl<S: Store> Deliveries<S> {
             ),
         );
     }
+}
+
+/// The lease a delivery settles under. Every message the loop delivers came
+/// from [`Queues::lease`], which always gives one.
+fn token(message: &Message) -> i64 {
+    message
+        .lease_id
+        .expect("a message the loop delivers was leased")
 }
 
 /// Says in the app's log that a delivery's answer settled nothing, because

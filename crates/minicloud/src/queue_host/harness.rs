@@ -163,13 +163,13 @@ impl Store for Faulty {
         self.inner
             .lease(queue, now_unix, limit, lease_secs, max_attempts)
     }
-    fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String> {
+    fn done(&self, id: i64, lease_id: i64) -> Result<bool, String> {
         self.settle(id, Op::Done, |q| q.done(id, lease_id))
     }
     fn retry(
         &self,
         id: i64,
-        lease_id: Option<i64>,
+        lease_id: i64,
         now_unix: i64,
         delay_secs: i64,
     ) -> Result<bool, String> {
@@ -180,7 +180,7 @@ impl Store for Faulty {
     fn give_back(
         &self,
         id: i64,
-        lease_id: Option<i64>,
+        lease_id: i64,
         now_unix: i64,
         delay_secs: i64,
     ) -> Result<bool, String> {
@@ -188,13 +188,7 @@ impl Store for Faulty {
             q.give_back(id, lease_id, now_unix, delay_secs)
         })
     }
-    fn bury(
-        &self,
-        id: i64,
-        lease_id: Option<i64>,
-        now_unix: i64,
-        why: &str,
-    ) -> Result<bool, String> {
+    fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String> {
         self.settle(id, Op::Bury, |q| q.bury(id, lease_id, now_unix, why))
     }
 }
@@ -582,7 +576,7 @@ impl Harness {
     /// The process dies: every delivery in flight is gone unsettled, the
     /// counters are a fresh process's, and the store is opened again from
     /// its file. Answers the deliveries it took, as (id, lease id).
-    pub fn crash(&mut self) -> Vec<(i64, Option<i64>)> {
+    pub fn crash(&mut self) -> Vec<(i64, i64)> {
         let lost: Vec<_> = std::mem::take(&mut self.pending);
         {
             let mut ghost = self.ghost.lock().unwrap();
@@ -596,7 +590,7 @@ impl Harness {
         }
         let taken = lost
             .iter()
-            .map(|pending| (pending.message.id, pending.message.lease_id))
+            .map(|pending| (pending.message.id, super::token(&pending.message)))
             .collect();
         drop(lost);
         // The old connection goes before the new one comes, as the
