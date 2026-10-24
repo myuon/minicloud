@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use super::{Deliveries, Store};
 use crate::config::QueuePolicy;
-use crate::convert::Reply;
+use crate::convert::{Origin, Reply};
 use crate::logs::LogRing;
 use crate::queue::{Message, Peeked, Queues};
 use crate::stats::{AppCounters, Rejection};
@@ -532,14 +532,29 @@ impl Harness {
             "app `post`: the request waited 1200 ms for a worker, longer than its 1000 ms \
              deadline; it was not run\n",
         )
-        .with_header("retry-after", "1");
+        .with_header("retry-after", "1")
+        .made_by(Origin::NotStarted);
         self.reply(id, false, Some(reply));
     }
 
     /// The run was cancelled while it waited, and never started: the
     /// scheduler's own 499.
     pub fn cancel_before_start(&mut self, id: i64) {
-        self.reply(id, false, Some(Reply::text(499, "")));
+        self.reply(
+            id,
+            false,
+            Some(Reply::text(499, "").made_by(Origin::NotStarted)),
+        );
+    }
+
+    /// The run was cancelled after its entry started: the scheduler's 499
+    /// again, now for a run the app had begun and not answered.
+    pub fn cancel_mid_run(&mut self, id: i64) {
+        self.reply(
+            id,
+            true,
+            Some(Reply::text(499, "").made_by(Origin::Stopped)),
+        );
     }
 
     /// Settles every delivery whose run has answered or gone, as the

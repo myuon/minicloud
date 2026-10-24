@@ -1143,6 +1143,7 @@ impl Front {
                 )],
                 body: Bytes::from(ops::metrics(&self.ops(), &self.platform_now())),
                 stream: None,
+                origin: crate::convert::Origin::Answer,
             };
         }
         if path == "/_host/series" {
@@ -1220,6 +1221,7 @@ impl Front {
                 headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
                 body: Bytes::from(ops::page(&self.ops())),
                 stream: None,
+                origin: crate::convert::Origin::Answer,
             };
         }
         if let Some(name) = path
@@ -1597,6 +1599,7 @@ pub(crate) fn json_reply(value: &Json) -> Reply {
         headers: vec![("content-type".into(), "application/json".into())],
         body: Bytes::from(body),
         stream: None,
+        origin: crate::convert::Origin::Answer,
     }
 }
 
@@ -1642,6 +1645,7 @@ fn asset_reply(asset: &crate::assets::Asset, if_none_match: Option<&str>, app: &
         ],
         body: Bytes::new(),
         stream: None,
+        origin: crate::convert::Origin::Answer,
     };
     if modified {
         reply

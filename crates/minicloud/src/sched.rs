@@ -63,7 +63,7 @@ use tokio::sync::oneshot;
 
 use crate::apps::App;
 use crate::config::AppLimits;
-use crate::convert::{request_value, response_of, AppRequest, BadResponse, Reply};
+use crate::convert::{request_value, response_of, AppRequest, BadResponse, Origin, Reply};
 use crate::hosts::PendingWork;
 use crate::logs::LogRing;
 use crate::stats::AppCounters;
@@ -835,9 +835,12 @@ impl Engine {
         (step, ended)
     }
 
-    /// Answers `flight` with `reply`, counted as `kind`.
+    /// Answers `flight` with `reply`, counted as `kind`, for a run whose
+    /// entry never started. The reply says so ([`Origin::NotStarted`]): a
+    /// queue's delivery gives such a run's attempt back rather than taking
+    /// the host's 503 or 499 for the app's answer.
     fn fail(&self, flight: Flight, kind: ErrorKind, reply: Reply) {
-        self.fail_metered(flight, kind, reply, None);
+        self.fail_metered(flight, kind, reply.made_by(Origin::NotStarted), None);
     }
 
     /// [`Engine::fail`], for a run that got as far as running: its meter.
@@ -951,7 +954,7 @@ impl Engine {
                         self.fail_metered(
                             flight,
                             kind,
-                            Reply::text(kind.status(), body),
+                            Reply::text(kind.status(), body).made_by(Origin::Stopped),
                             Some(meter),
                         );
                     }

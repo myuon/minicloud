@@ -136,7 +136,6 @@ fn n2_a_lease_running_out_in_the_middle_of_a_tick_is_not_handed_out_again() {
 /// the attempt is given back — and on the last attempt the message is not
 /// buried as if its consumer had failed.
 #[test]
-#[ignore = "F2: the scheduler's QueueTimeout 503 is taken for the app's 5xx; the attempt is spent and the last one buries"]
 fn f2_a_run_that_timed_out_in_the_scheduler_is_given_back() {
     let mut h = Harness::new("f2-timeout", vec![policy("mail", |p| p.max_attempts = 1)]);
     let id = leased(&mut h);
@@ -150,12 +149,11 @@ fn f2_a_run_that_timed_out_in_the_scheduler_is_given_back() {
 }
 
 /// The same for a run cancelled while it waited: the scheduler answers 499
-/// without starting it. Below 500, so the delivery takes it for the app's
-/// answer and **deletes the message** — S1 as well as S6: nothing of the
-/// app ran. (No path cancels a queue delivery's run today — its `Cancel`
-/// is the delivery's own and nobody fires it — so this waits for one.)
+/// without starting it. Below 500, so the delivery once took it for the app's
+/// answer and deleted the message — S1 as well as S6: nothing of the app
+/// ran. (No path cancels a queue delivery's run today — its `Cancel` is
+/// the delivery's own and nobody fires it — so this waits for one.)
 #[test]
-#[ignore = "F2 (worse than the reading): a 499 for a run cancelled before it started is below 500, so it is done: the message is deleted though the app never ran (S1)"]
 fn f2_a_run_cancelled_before_it_started_is_given_back() {
     let mut h = Harness::new("f2-cancel", vec![policy("mail", |p| p.max_attempts = 1)]);
     let id = leased(&mut h);
@@ -169,27 +167,33 @@ fn f2_a_run_cancelled_before_it_started_is_given_back() {
     h.check_attempts(id);
 }
 
-/// What the delivery does today on each never-started answer, so that the
-/// two ignored tests above are seen to fail for the reason they say.
+/// S1, S7: a run cancelled after its entry started is answered 499 by the
+/// host, not by the app. Below 500, but it is no answer: the message is not
+/// taken, the attempt counts, and on the last one the dead letter says the
+/// run did not answer.
 #[test]
-fn f2_today_a_never_started_run_spends_its_attempt() {
-    let mut h = Harness::new("f2-today", vec![policy("mail", |p| p.max_attempts = 1)]);
-    let id = leased(&mut h);
-    h.time_out_in_scheduler(id);
-    h.poll();
-    let row = h.row(id).unwrap();
-    assert_eq!(row.state, "dead");
-    assert!(
-        row.why.starts_with("503 app `post`: the request waited"),
-        "{}",
-        row.why
+fn f2_a_run_cancelled_after_it_started_is_no_answer() {
+    let mut h = Harness::new(
+        "f2-cancel-mid",
+        vec![policy("mail", |p| p.max_attempts = 2)],
     );
-
     let id = leased(&mut h);
-    h.cancel_before_start(id);
+    h.start_run(id);
+    h.cancel_mid_run(id);
     h.poll();
-    assert!(h.row(id).is_none(), "taken as done");
-    assert_eq!(h.delivered(), 1);
+    let row = h.row(id).expect("S1: not taken");
+    assert_eq!((row.state, row.attempts), ("held", 1), "retried: {row:?}");
+    assert_eq!(h.delivered(), 0);
+    h.check_attempts(id);
+
+    h.advance(3600);
+    h.tick();
+    h.start_run(id);
+    h.cancel_mid_run(id);
+    h.poll();
+    let row = h.row(id).expect("a dead letter");
+    assert_eq!(row.state, "dead");
+    assert!(row.why.starts_with("no answer: 499"), "{}", row.why);
 }
 
 // ------------------------------------------------------------ F3 / S7
@@ -370,7 +374,7 @@ fn f6_counterexample_the_second_queue_has_no_room_on_any_tick() {
 #[test]
 fn in_flight_returns_after_every_way_a_delivery_ends() {
     type Ending = fn(&mut Harness, i64);
-    let endings: [(&str, Ending); 9] = [
+    let endings: [(&str, Ending); 10] = [
         ("answered 200", |h, id| h.take(id, 200)),
         ("answered 404", |h, id| h.take(id, 404)),
         ("answered 500", |h, id| h.take(id, 500)),
@@ -389,6 +393,11 @@ fn in_flight_returns_after_every_way_a_delivery_ends() {
         }),
         ("cancelled before it started", |h, id| {
             h.cancel_before_start(id);
+            h.poll();
+        }),
+        ("cancelled after it started", |h, id| {
+            h.start_run(id);
+            h.cancel_mid_run(id);
             h.poll();
         }),
         ("settle write failed", |h, id| {

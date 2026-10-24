@@ -19,7 +19,12 @@
 //! answers 2xx-4xx has taken the message; one that answers 5xx or does not
 //! answer has not, and it is tried again after `retry`, doubling each time,
 //! until `max_attempts` — then it is a **dead letter**, kept with the
-//! reason rather than dropped.
+//! reason rather than dropped. Only the app's own answer counts as one
+//! ([`crate::convert::Origin`]): when the host answers in a run's place —
+//! it was cancelled, or cut off at its deadline — the run did not answer,
+//! whatever the status, and a run the host never started (it waited for a
+//! worker past its deadline) is not an attempt at all: its message is
+//! given back, as one turned away at admission is.
 //!
 //! **A delivery may happen twice.** A run that takes longer than `lease`
 //! is taken to be lost and the message is tried again; if the first run
@@ -49,7 +54,7 @@ use cove_runtime::{Effect, HostApi, HostType, ModuleSchema, OperationSchema, Run
 use tokio::sync::oneshot;
 
 use crate::config::QueuePolicy;
-use crate::convert::Reply;
+use crate::convert::{Origin, Reply};
 use crate::hosts::{AppContext, HostModule};
 use crate::logs::LogRing;
 use crate::queue::{Message, Queues};
@@ -525,26 +530,65 @@ impl<S: Store> Deliveries<S> {
                 self.counters
                     .queue_in_flight
                     .fetch_sub(1, Ordering::Relaxed);
-                let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
-                if let Ok(false) = store.give_back(
-                    message.id,
-                    token(message),
-                    (self.now)(),
-                    policy.retry.as_secs() as i64,
-                ) {
-                    outlived(&self.logs, &policy.name, message.id);
-                }
+                self.give_back(policy, message);
                 None
             }
         }
     }
 
+    /// Gives a delivery's message back, with the attempt `lease` counted
+    /// taken back, for a run the app never saw. The lease is still asked
+    /// about: a give-back that did not ask would be the one settle that
+    /// could move another delivery's lease.
+    fn give_back(&self, policy: &QueuePolicy, message: &Message) {
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        if let Ok(false) = store.give_back(
+            message.id,
+            token(message),
+            (self.now)(),
+            policy.retry.as_secs() as i64,
+        ) {
+            outlived(&self.logs, &policy.name, message.id);
+        }
+    }
+
     /// Settles one admitted delivery on what its run came to: the reply,
     /// or `None` for a run whose answer never came.
+    ///
+    /// Who made the reply decides, not its status ([`Origin`]):
+    ///
+    /// - the **app's own answer** below 500 has taken the message, and 500
+    ///   or more has not;
+    /// - the **host's word on a run that never started** (it waited for a
+    ///   worker past its deadline, or was cancelled while it waited) is not
+    ///   an attempt: the message is given back, as one turned away at
+    ///   admission is. Taken for the app's answer, the scheduler's 503
+    ///   spent an attempt and could bury a message the app never saw, and a
+    ///   499 is below 500 and deleted it;
+    /// - the **host's word on a run that started** and did not answer (cut
+    ///   off at its deadline, cancelled, failed) is no answer, whatever its
+    ///   status: an attempt spent, never the message taken.
     pub(crate) fn settle(&self, policy: &QueuePolicy, message: &Message, outcome: Option<Reply>) {
         let (counters, logs) = (&self.counters, &self.logs);
         counters.queue_in_flight.fetch_sub(1, Ordering::Relaxed);
-        let taken = matches!(&outcome, Some(reply) if reply.status < 500);
+        if let Some(reply) = &outcome {
+            if reply.origin == Origin::NotStarted {
+                logs.push(
+                    "host",
+                    &format!(
+                        "queue `{}`: message {}'s run never started ({} {}); given back",
+                        policy.name,
+                        message.id,
+                        reply.status,
+                        crate::internal::first_line(&reply.body)
+                    ),
+                );
+                self.give_back(policy, message);
+                return;
+            }
+        }
+        let taken =
+            matches!(&outcome, Some(reply) if reply.origin == Origin::Answer && reply.status < 500);
         let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
         if taken {
             match store.done(message.id, token(message)) {
@@ -556,8 +600,13 @@ impl<S: Store> Deliveries<S> {
             return;
         }
         let why = match &outcome {
-            Some(reply) => format!(
+            Some(reply) if reply.origin == Origin::Answer => format!(
                 "{} {}",
+                reply.status,
+                crate::internal::first_line(&reply.body)
+            ),
+            Some(reply) => format!(
+                "no answer: {} {}",
                 reply.status,
                 crate::internal::first_line(&reply.body)
             ),

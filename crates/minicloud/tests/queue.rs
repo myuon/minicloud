@@ -275,7 +275,6 @@ fn a_queue_that_cannot_be_read_refuses_that_app_alone() {
 /// turn behind runs of the others for longer than `post`'s 20 ms
 /// deadline. The send itself is made before the load starts.
 #[test]
-#[ignore = "F2: the scheduler's QueueTimeout 503 is taken for the app's 5xx, so the last attempt buries a message the app never saw"]
 fn a_delivery_that_timed_out_waiting_for_a_worker_is_given_back() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;

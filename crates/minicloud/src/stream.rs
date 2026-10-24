@@ -152,6 +152,7 @@ impl Answering {
             ],
             body: Bytes::new(),
             stream: None,
+            origin: crate::convert::Origin::Answer,
         });
         if !sent {
             return Err("socket.accept: this run has answered already".to_string());
@@ -207,6 +208,7 @@ impl Answering {
             headers,
             body: Bytes::new(),
             stream: Some(body),
+            origin: crate::convert::Origin::Answer,
         });
         if !sent {
             return Err("this run has answered already".to_string());
