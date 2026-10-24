@@ -202,6 +202,22 @@ pub enum Settle {
     },
 }
 
+/// What [`Queues::revive`] came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Revived {
+    /// Back on its queue.
+    Back,
+    /// No dead letter has that id.
+    NoSuch,
+    /// Its queue holds `depth` messages already, its `max_depth`: it is
+    /// left among the dead.
+    Full {
+        queue: String,
+        depth: i64,
+        max_depth: i64,
+    },
+}
+
 /// A settle decided and not yet written, with what saying it needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unwritten {
@@ -705,20 +721,55 @@ impl Queues {
 
     /// Puts a dead letter back on its queue, due now, with its attempts
     /// counted afresh and no lease, so no delivery from before it was
-    /// buried can settle it; answers whether there was one with that id.
-    pub fn revive(&self, id: i64, now_unix: i64) -> Result<bool, String> {
+    /// buried can settle it.
+    ///
+    /// `max_depth` answers the `max_depth` the app's current version gives
+    /// a queue, or `None` for a queue it does not declare. A queue that
+    /// already holds that many is not given one more ([`Revived::Full`]):
+    /// a revive adds a waiting message as a `send` does, and the bound a
+    /// `send` is refused at would mean nothing if a revive could go past it.
+    pub fn revive(
+        &self,
+        id: i64,
+        now_unix: i64,
+        max_depth: impl FnOnce(&str) -> Option<i64>,
+    ) -> Result<Revived, String> {
         let tx = self.write()?;
-        let moved = tx
-            .execute(
-                "INSERT INTO message (id, queue, body, attempts, due, sent) \
-                 SELECT id, queue, body, 0, ?2, sent FROM dead WHERE id = ?1",
-                params![id, now_unix],
-            )
+        let queue: Option<String> = tx
+            .query_row("SELECT queue FROM dead WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
             .map_err(fail)?;
+        let Some(queue) = queue else {
+            return Ok(Revived::NoSuch);
+        };
+        if let Some(max_depth) = max_depth(&queue) {
+            let depth: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM message WHERE queue = ?1",
+                    [&queue],
+                    |row| row.get(0),
+                )
+                .map_err(fail)?;
+            if depth >= max_depth {
+                return Ok(Revived::Full {
+                    queue,
+                    depth,
+                    max_depth,
+                });
+            }
+        }
+        tx.execute(
+            "INSERT INTO message (id, queue, body, attempts, due, sent) \
+             SELECT id, queue, body, 0, ?2, sent FROM dead WHERE id = ?1",
+            params![id, now_unix],
+        )
+        .map_err(fail)?;
         tx.execute("DELETE FROM dead WHERE id = ?1", [id])
             .map_err(fail)?;
         tx.commit().map_err(fail)?;
-        Ok(moved > 0)
+        Ok(Revived::Back)
     }
 
     /// Deletes the dead letters buried before `before_unix`; answers how
@@ -1192,15 +1243,15 @@ mod tests {
         assert_eq!(q.dead(Some("other"), 10).unwrap(), vec![]);
         assert_eq!(q.dead(Some("a"), 10).unwrap().len(), 1);
 
-        assert!(q.revive(id, T + 50).unwrap());
+        assert_eq!(q.revive(id, T + 50, |_| None), Ok(Revived::Back));
         assert!(q.dead(None, 10).unwrap().is_empty());
         let got = q.lease(None, T + 50, 10, 30, 100).unwrap();
         assert_eq!(ids(&got), [id]);
         // Counted afresh, then once for this lease.
         assert_eq!(got[0].attempts, 1);
         assert_eq!(got[0].sent_unix, T);
-        assert!(!q.revive(id, T + 60).unwrap());
-        assert!(!q.revive(9999, T + 60).unwrap());
+        assert_eq!(q.revive(id, T + 60, |_| None), Ok(Revived::NoSuch));
+        assert_eq!(q.revive(9999, T + 60, |_| None), Ok(Revived::NoSuch));
     }
 
     #[test]
@@ -1454,7 +1505,7 @@ mod tests {
         let id = send(&q, "a", "x", T);
         let before = lease_of(&q.lease(None, T, 1, 30, 100).unwrap(), id);
         assert!(q.bury(id, before, T + 1, "gave up").unwrap());
-        assert!(q.revive(id, T + 2).unwrap());
+        assert_eq!(q.revive(id, T + 2, |_| None), Ok(Revived::Back));
         // Revived, it has no lease, and its attempts start again from 0, so
         // a token made of `attempts` would match here.
         assert!(!q.done(id, before).unwrap());
@@ -1500,7 +1551,7 @@ mod tests {
         // Revived: no attempts and no lease.
         let revived = send(&q, "a", "revived", T + 1);
         assert!(q.bury_unleased(revived, T + 1, "gave up").unwrap());
-        assert!(q.revive(revived, T + 1).unwrap());
+        assert_eq!(q.revive(revived, T + 1, |_| None), Ok(Revived::Back));
         // Sent and never tried.
         let fresh = send(&q, "a", "fresh", T + 2);
         // Another queue's spent message is that queue's to bury.

@@ -264,14 +264,41 @@ async fn reply(front: &Front, request: Request<Incoming>) -> Reply {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |since| since.as_secs() as i64);
-                    match store.revive(id, now) {
-                        Ok(true) => Reply::text(
+                    // The bound a `send` is held to now: the version that
+                    // is serving, as the delivery loop and `queue.send` read
+                    // it.
+                    let current = front
+                        .engine
+                        .slot_named(&name)
+                        .and_then(|slot| slot.current());
+                    let max_depth = |queue: &str| {
+                        current
+                            .as_ref()?
+                            .queues
+                            .iter()
+                            .find(|policy| policy.name == queue)
+                            .map(|policy| policy.max_depth)
+                    };
+                    match store.revive(id, now, max_depth) {
+                        Ok(crate::queue::Revived::Back) => Reply::text(
                             200,
                             format!("dead letter {id} of `{name}` is on its queue again\n"),
                         ),
-                        Ok(false) => {
+                        Ok(crate::queue::Revived::NoSuch) => {
                             Reply::text(404, format!("`{name}` has no dead letter {id}\n"))
                         }
+                        Ok(crate::queue::Revived::Full {
+                            queue,
+                            depth,
+                            max_depth,
+                        }) => Reply::text(
+                            409,
+                            format!(
+                                "queue `{queue}` of `{name}` holds {depth} messages already, \
+                                 its max_depth of {max_depth}; dead letter {id} stays dead \
+                                 until there is room\n"
+                            ),
+                        ),
                         Err(why) => Reply::text(500, format!("{why}\n")),
                     }
                 }

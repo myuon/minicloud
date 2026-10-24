@@ -346,3 +346,42 @@ fn a_delivery_that_timed_out_waiting_for_a_worker_is_given_back() {
         "given back: {logs}"
     );
 }
+
+/// S10 (F5): a revive adds a waiting message as a send does, so it is
+/// refused as a send is when the queue holds its `max_depth`: the admin
+/// answers 409 and says why, and the dead letter stays dead.
+#[test]
+fn reviving_into_a_full_queue_is_refused() {
+    let apps = post("[[queues]]\nname = \"mail\"\nmax_depth = 2\nmax_attempts = 1\n");
+    let host = start(&apps, 2);
+    let dead: i64 = get(host.addr, "/post/send?body=fail")
+        .body
+        .trim()
+        .parse()
+        .unwrap();
+    wait_until("the dead letter", || {
+        count(&host, "post", "queue_buried") == 1
+    });
+    for _ in 0..2 {
+        assert_eq!(
+            get(host.addr, "/post/send-after?body=later&secs=3600").status,
+            202
+        );
+    }
+    let refused = send_raw(
+        host.admin_addr.expect("an admin listener"),
+        format!(
+            "POST /apps/post/queues/revive/{dead} HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: close\r\nAuthorization: Bearer {ADMIN_TOKEN}\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(
+        refused.body.contains("max_depth of 2") && refused.body.contains("holds 2"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(get(host.addr, "/post/depth").body.trim(), "2");
+}

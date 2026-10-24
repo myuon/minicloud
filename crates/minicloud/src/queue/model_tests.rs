@@ -6,12 +6,11 @@
 //! what [`Queues::dead`], [`Queues::depths`] and the window's reads say, and
 //! the invariants S1–S10 as far as the store alone can show them.
 //!
-//! The model is written from the doc, not from the SQL. Where the two are
-//! known to disagree (F5: `revive` does not look at `max_depth`),
-//! [`Contract`] says whether the model holds the store to the contract —
-//! those runs fail on the code as it is, and are ignored with the
-//! finding's id — or takes the finding as the code has it, so that
-//! everything else is still checked on every run.
+//! The model is written from the doc, not from the SQL, and holds the
+//! store to the contract as it is stated: no finding is taken as the code
+//! has it. (Until F1, F5 and N1 were fixed, a flag let the default run
+//! take each of them as the code had it, and a strict run per finding was
+//! ignored.)
 //!
 //! Every settle names a token (N1): one a delivery holds, current or
 //! stale. A settle that named none could not tell a message never leased
@@ -105,13 +104,12 @@ fn lease_alone_does_not_hand_out_a_message_past_max_attempts() {
     );
 }
 
-/// S10, F5: `revive` puts a dead letter back on a queue that already holds
+/// S10, F5: `revive` put a dead letter back on a queue that already held
 /// `max_depth` messages.
 ///
 /// `max_depth` 4: four sent, the fifth refused; one buried, one more sent,
 /// so the queue is full again; reviving the dead one makes five.
 #[test]
-#[ignore = "F5: revive ignores max_depth; fixed when revive refuses a full queue"]
 fn revive_does_not_fill_a_queue_past_max_depth() {
     let q = Queues::in_memory().unwrap();
     let first = q.send("a", "1", T, T, BODY, 4).unwrap();
@@ -121,9 +119,16 @@ fn revive_does_not_fill_a_queue_past_max_depth() {
     assert!(q.send("a", "5", T, T, BODY, 4).is_err());
     assert!(q.bury_unleased(first, T, "500 boom").unwrap());
     q.send("a", "5", T, T, BODY, 4).unwrap();
-    let revived = q.revive(first, T);
+    let revived = q.revive(first, T, |_| Some(4));
     assert_eq!(q.depths().unwrap(), vec![("a".to_string(), 4, 1)]);
-    assert!(!matches!(revived, Ok(true)), "revived into a full queue");
+    assert_eq!(
+        revived,
+        Ok(Revived::Full {
+            queue: "a".into(),
+            depth: 4,
+            max_depth: 4
+        })
+    );
 }
 
 /// S1, S4, N1 (found by the model): a settle once took away a message whose
@@ -181,14 +186,6 @@ const FIRST_POLICY: Policy = Policy {
     max_depth: 4,
 };
 
-/// Which of the known findings the model holds the store to the contract
-/// on; `false` takes the finding as the code has it.
-#[derive(Clone, Copy, Debug)]
-struct Contract {
-    /// S10 / F5: `revive` refuses a queue that holds `max_depth` already.
-    s10: bool,
-}
-
 /// Why a dead letter is dead, as the contract tells the causes apart (S7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Why {
@@ -235,7 +232,6 @@ struct Delivery {
 
 #[derive(Debug)]
 struct Model {
-    contract: Contract,
     now: i64,
     policy: [Policy; 2],
     live: BTreeMap<i64, Live>,
@@ -253,9 +249,8 @@ struct Model {
 }
 
 impl Model {
-    fn new(contract: Contract) -> Model {
+    fn new() -> Model {
         Model {
-            contract,
             now: T,
             policy: [FIRST_POLICY; 2],
             live: BTreeMap::new(),
@@ -487,7 +482,7 @@ impl Drop for Harness {
 }
 
 impl Harness {
-    fn new(contract: Contract) -> Harness {
+    fn new() -> Harness {
         static RUN: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "minicloud-queue-model-{}-{}",
@@ -500,7 +495,7 @@ impl Harness {
             dir,
             path,
             q: None,
-            m: Model::new(contract),
+            m: Model::new(),
         };
         harness.reopen();
         harness
@@ -681,19 +676,26 @@ impl Harness {
                 } else {
                     *self.m.dead.keys().nth(pick % self.m.dead.len()).unwrap()
                 };
-                let got = self.q().revive(id, now);
+                let policy = self.m.policy;
+                let got = self.q().revive(id, now, |name| {
+                    let queue = QUEUES.iter().position(|q| *q == name)?;
+                    Some(policy[queue].max_depth)
+                });
                 if busy {
                     check!(got.is_err(), "revive under a held lock answered {got:?}");
                     return Ok(());
                 }
                 let Some(dead) = self.m.dead.get(&id) else {
-                    check!(got == Ok(false), "revive({id}) of no dead letter: {got:?}");
+                    check!(
+                        got == Ok(Revived::NoSuch),
+                        "revive({id}) of no dead letter: {got:?}"
+                    );
                     return Ok(());
                 };
                 let queue = dead.queue;
-                if self.m.contract.s10 && !self.m.may_send(queue) {
+                if !self.m.may_send(queue) {
                     check!(
-                        !matches!(got, Ok(true)),
+                        matches!(got, Ok(Revived::Full { .. })),
                         "S10: revive({id}) into `{}` at depth {} of max_depth {}",
                         QUEUES[queue],
                         self.m.depth(queue),
@@ -701,7 +703,7 @@ impl Harness {
                     );
                     return Ok(());
                 }
-                check!(got == Ok(true), "revive({id}) answered {got:?}");
+                check!(got == Ok(Revived::Back), "revive({id}) answered {got:?}");
                 let dead = self.m.dead.remove(&id).unwrap();
                 self.m.live.insert(
                     id,
@@ -1113,25 +1115,15 @@ fn config() -> Config {
     }
 }
 
-fn hold_to(contract: Contract) {
+/// Every property the store alone can show, S1–S10 as the contract states
+/// them, over `PROPTEST_CASES` random sequences.
+#[test]
+fn the_store_keeps_its_contract() {
     let mut runner = TestRunner::new(config());
-    let outcome = runner.run(&ops(), |ops| Harness::new(contract).run(&ops));
+    let outcome = runner.run(&ops(), |ops| Harness::new().run(&ops));
     match outcome {
         Ok(()) => {}
         Err(TestError::Fail(why, ops)) => panic!("{why}\nshrunk to {ops:#?}"),
         Err(e) => panic!("{e}"),
     }
-}
-
-/// Every property the store alone can show, with F5 as the code has it.
-#[test]
-fn the_store_keeps_its_contract_but_for_the_known_findings() {
-    hold_to(Contract { s10: false });
-}
-
-/// S10 as the contract says it: `revive` does not fill a queue past `D`.
-#[test]
-#[ignore = "F5: revive ignores max_depth; fixed when revive refuses a full queue"]
-fn the_store_keeps_s10() {
-    hold_to(Contract { s10: true });
 }
