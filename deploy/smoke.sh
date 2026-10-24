@@ -114,6 +114,37 @@ grep -q 'nothing switched' "$scratch/refused.log" || fail "install.sh did not sa
 [ "$(readlink "$root/current")" = releases/before ] || fail "install.sh switched current although an app does not check"
 grep -q 'fn broken' "$root/apps/hello/hello.cove" || fail "install.sh touched the app it refused"
 sed -i '/^fn broken( {$/d' "$root/apps/hello/hello.cove"
+# A bundled app whose deploy fails after the check passed (here: a staged
+# copy left behind that cannot be removed) puts back the bundled apps
+# deployed before it, the kept previous versions too, and switches nothing.
+# The release is repacked to bundle three: admin (installed, with a
+# previous version), extra (new) and hello (installed; its deploy fails).
+multi="$scratch/multi"
+mkdir -p "$multi/unpacked"
+tar -xzf "$tarball" -C "$multi/unpacked"
+top="$(basename "$tarball" .tar.gz)"
+cp -R "$examples/hello" "$multi/unpacked/$top/apps/extra"
+cp -R "$examples/hello" "$multi/unpacked/$top/apps/hello"
+tar -czf "$multi/$(basename "$tarball")" -C "$multi/unpacked" "$top"
+(cd "$multi" && sha256sum "$(basename "$tarball")" > "$(basename "$tarball").sha256")
+mkdir -p "$root/apps/.deploy/hello/stuck/in"
+chmod 555 "$root/apps/.deploy/hello/stuck"
+[ -f "$root/apps/.previous/admin/app.toml" ] || fail "the admin app has no previous version to test with"
+apps_tree() {
+  (cd "$root/apps" && find . -path ./.deploy -prune -o -print | LC_ALL=C sort | while IFS= read -r path; do
+    if [ -f "$path" ]; then printf '%s ' "$path"; cksum < "$path"; else echo "$path"; fi
+  done)
+}
+before="$(apps_tree)"
+if bash "$here/install.sh" --with-bundled-apps "admin extra hello" "$multi/$(basename "$tarball")" > "$scratch/partial.log" 2>&1; then
+  fail "install.sh switched although a bundled app's deploy failed"
+fi
+grep -q "deploying the bundled app \`hello\` failed .*(extra admin) were put back; nothing switched" "$scratch/partial.log" \
+  || fail "install.sh did not say it put the bundled apps back: $(cat "$scratch/partial.log")"
+[ "$(readlink "$root/current")" = releases/before ] || fail "install.sh switched current although a bundled app's deploy failed"
+[ "$(apps_tree)" = "$before" ] || fail "a failed bundled deploy left the apps changed: $(diff <(echo "$before") <(apps_tree))"
+chmod 755 "$root/apps/.deploy/hello/stuck"
+rm -rf "$root/apps/.deploy/hello"
 # Redeploying the bundled app (the default) keeps the version it replaces.
 bash "$here/install.sh" "$tarball" > /dev/null
 [ -f "$root/apps/.previous/admin/app.toml" ] || fail "a redeploy did not keep the admin app's previous version"
