@@ -23,7 +23,7 @@
 //! path = "/queue/mail"            # where a message is delivered
 //! max_attempts = 5                # deliveries before it becomes a dead letter
 //! retry = "30s"                   # after a failure; doubles each attempt
-//! lease = "60s"                   # how long one delivery may take
+//! lease = "60s"                   # at least limits.deadline + 1s
 //! max_depth = 10000               # messages waiting
 //! max_body_bytes = 65536
 //! batch = 8                       # deliveries of this queue at once
@@ -1544,6 +1544,7 @@ pub fn parse_app_with(
             .unwrap_or(8),
         });
     }
+    queues_outlast_the_run(&queues, limits.run.deadline)?;
     let defer = DeferLimits {
         max_in_flight: positive(
             "defer",
@@ -1703,9 +1704,116 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
     Ok(Duration::from_millis(n * unit))
 }
 
+/// How much longer than a run's `deadline` a queue's `lease` must be.
+pub const LEASE_OVER_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Refuses queues whose `lease` a run could outlast.
+///
+/// A lease that runs out while its delivery is still running is taken for
+/// a delivery that was lost: the message is handed out again, the consumer
+/// is asked twice, and the first run's answer settles nothing. The deadline
+/// bounds a run, waiting for a worker included, so a lease longer than the
+/// deadline is one no run outlasts; the second on top is for what lies
+/// between the run's end and its settle being written. An app that declares
+/// queues therefore needs a deadline, and every lease past it.
+fn queues_outlast_the_run(
+    queues: &[QueuePolicy],
+    deadline: Option<Duration>,
+) -> Result<(), String> {
+    if queues.is_empty() {
+        return Ok(());
+    }
+    let Some(deadline) = deadline else {
+        return Err(
+            "`[[queues]]` needs `limits.deadline`: a queue's lease must be longer than a run \
+             may take, and a run with no deadline may take for ever"
+                .to_string(),
+        );
+    };
+    let spoken = |length: Duration| match length.subsec_millis() {
+        0 => format!("{}s", length.as_secs()),
+        _ => format!("{}ms", length.as_millis()),
+    };
+    for queue in queues {
+        if queue.lease < deadline + LEASE_OVER_DEADLINE {
+            return Err(format!(
+                "`[[queues]] name = \"{}\"`: its lease of {} is not at least {} longer than \
+                 `limits.deadline` of {}, so a delivery could still be running when its lease \
+                 runs out and be handed out again; make `lease` at least {}",
+                queue.name,
+                spoken(queue.lease),
+                spoken(LEASE_OVER_DEADLINE),
+                spoken(deadline),
+                spoken(deadline + LEASE_OVER_DEADLINE)
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_queues_lease_must_outlast_the_runs_deadline_by_a_second() {
+        // The defaults: a lease of 60 s, a deadline of 10 s.
+        let config = parse_app("[[queues]]\nname = \"mail\"\n", "a").unwrap();
+        assert_eq!(config.queues[0].lease, Duration::from_secs(60));
+        // A second over is enough.
+        parse_app(
+            "[limits]\ndeadline = \"20s\"\n\n[[queues]]\nname = \"mail\"\nlease = \"21s\"\n",
+            "a",
+        )
+        .unwrap();
+        parse_app(
+            "[limits]\ndeadline = \"300ms\"\n\n[[queues]]\nname = \"mail\"\nlease = \"1300ms\"\n",
+            "a",
+        )
+        .unwrap();
+        for (deadline, lease) in [("20s", "20s"), ("20s", "20999ms"), ("1s", "1500ms")] {
+            let error = parse_app(
+                &format!(
+                    "[limits]\ndeadline = \"{deadline}\"\n\n\
+                     [[queues]]\nname = \"mail\"\n\n\
+                     [[queues]]\nname = \"late\"\nlease = \"{lease}\"\n"
+                ),
+                "a",
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("name = \"late\"")
+                    && error.contains(&format!("lease of {lease}"))
+                    && error.contains(&format!("`limits.deadline` of {deadline}")),
+                "{error}"
+            );
+        }
+        // The deadline alone can make a default lease too short.
+        let error = parse_app(
+            "[limits]\ndeadline = \"60s\"\n\n[[queues]]\nname = \"mail\"\n",
+            "a",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("lease of 60s") && error.contains("at least 61s"),
+            "{error}"
+        );
+        // No queues, no bound.
+        parse_app("[limits]\ndeadline = \"600s\"\n", "a").unwrap();
+    }
+
+    #[test]
+    fn queues_need_a_deadline() {
+        let error = queues_outlast_the_run(
+            &parse_app("[[queues]]\nname = \"mail\"\n", "a")
+                .unwrap()
+                .queues,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("limits.deadline"), "{error}");
+        assert_eq!(queues_outlast_the_run(&[], None), Ok(()));
+    }
 
     #[test]
     fn an_empty_file_is_every_default() {

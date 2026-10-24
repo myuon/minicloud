@@ -818,9 +818,21 @@ it: the alternative is losing a message whenever the host stops in the
 wrong moment. A consumer must be able to be asked twice. Saying so is
 better than a guarantee that would be a lie.
 
+**A lease outlasts the run.** A queue's `lease` must be at least a second
+longer than the app's `limits.deadline`, and an app that declares
+`[[queues]]` must have a deadline; otherwise the app is refused, with a
+message naming both values. The deadline bounds a run, its wait for a
+worker included, so a delivery whose app answers at all answers before its
+lease runs out, and the second on top covers the settle being written. The
+defaults (a lease of 60 s, a deadline of 10 s) keep it. **This is a
+breaking change**: an `app.toml` whose lease was not past its deadline by
+a second — a `deadline = "60s"` with the default lease, say — loaded
+before and is refused now; give its queues a longer `lease` (the `watch`
+example sets `lease = "61s"` beside its 60 s deadline).
+
 **Only the delivery holding the current lease settles the message.**
-Nothing holds a queue's `lease` to the app's `deadline`, so a run can still
-be going when its lease runs out and the message is handed to another. If
+A run can still be going when its lease runs out — a host stalled past the
+second, a clock set forward — and then the message is handed to another. If
 the first run's answer still counted, it would settle the second's message:
 take it off the queue while the second is working on it, move the second's
 lease so a third delivery could take it, or bury it while it is being taken.

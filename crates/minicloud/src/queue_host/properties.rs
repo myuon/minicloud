@@ -597,26 +597,30 @@ fn f4_a_delivery_answering_within_its_lease_is_not_leased_again() {
     assert!(h.row(id).is_none(), "its own answer settles it");
 }
 
-/// The same with a lease under a second, which `app.toml` takes: `lease =
-/// "500ms"` must hold the message for half a second, not for nothing.
+/// The same with a lease that is not whole seconds, which `app.toml` takes:
+/// `lease = "1500ms"` (over a deadline of 500 ms, as a lease must be) holds
+/// the message for a second and a half, not for one.
 #[test]
-#[ignore = "F4: lease = \"500ms\" becomes 0 s, so the next tick in the same second leases the message again"]
-fn f4_a_lease_under_a_second_is_not_nothing() {
+#[ignore = "F4: lease = \"1500ms\" becomes 1 s, so a tick a second later leases the message again"]
+fn f4_a_lease_of_a_fraction_of_a_second_is_not_cut() {
     let mut h = Harness::new(
         "f4-sub-second",
-        policies("[[queues]]\nname = \"mail\"\nlease = \"500ms\"\n"),
+        policies(
+            "[limits]\ndeadline = \"500ms\"\n\n\
+             [[queues]]\nname = \"mail\"\nlease = \"1500ms\"\n",
+        ),
     );
     h.set_ms(1_000_010_000);
     let id = leased(&mut h);
     h.start_run(id);
-    for _ in 0..4 {
+    for _ in 0..14 {
         h.advance_ms(100);
         h.tick();
     }
     assert_eq!(
         h.facts(id).leases.len(),
         1,
-        "not handed out again within 500 ms"
+        "not handed out again within 1500 ms"
     );
 }
 
