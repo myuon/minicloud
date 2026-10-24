@@ -133,7 +133,11 @@ undone by a process that is gone. What can be promised:
 scheduler that waits past its deadline is answered `503` by the scheduler
 (`sched.rs`, `QueueTimeout`) without the app ever starting, and the
 delivery counts it as a failed attempt — and on the last attempt buries
-the message. The same for a run cancelled before it starts (`499`).
+the message. A run cancelled before it starts is answered `499`, which
+is below 500: the delivery takes it for the app's answer and `done`s
+the message, so the message is lost (S1) though the app never ran. No
+path cancels a queue delivery's run today (its `Cancel` is its own and
+nothing fires it), so this waits for one.
 **Violation by reading**, to be reproduced.
 
 **Proposed fix.** The delivery learns that the run never started (a flag
@@ -280,11 +284,11 @@ action, so a fault can fall between any two.
 
 | # | Property | Finding | Shown by | Fixed |
 |---|---|---|---|---|
-| F1 | S5 | lowering `max_attempts` does not stop a waiting retry | reading | |
-| F2 | S6, S7 | a run that never started (scheduler timeout / cancel) spends an attempt and can bury | reading | |
-| F3 | S7 | a failed settle write is ignored; the lease later expires as "no answer" | reading | |
-| F4 | S8, L3a | whole-second truncation: early delivery, short leases, sub-second `lease`/`retry` become 0 | reading | |
+| F1 | S5 | lowering `max_attempts` does not stop a waiting retry | loop harness | |
+| F2 | S6, S7, S1 | a run that never started spends an attempt and can bury (scheduler timeout); a cancel's `499` is taken as done and deletes it | loop harness; timeout also end to end (`tests/queue.rs`) | |
+| F3 | S7 | a failed settle write is ignored; the lease later expires as "no answer" | loop harness | |
+| F4 | S8, L3a | whole-second truncation: early delivery, short leases, sub-second `lease`/`retry` become 0 | loop harness | |
 | F5 | S10 | `revive` ignores `max_depth` | reading | |
-| F6 | L2 | in-flight counted per app, room per queue: one queue starves another | reading | |
+| F6 | L2 | in-flight counted per app, room per queue: one queue starves another | loop harness (a repeating cycle) | |
 | F7 | L1 | messages of an undeclared queue are never delivered nor shown | reading | |
 | F8 | S1 | power loss may lose an acknowledged send (`synchronous = NORMAL`) | docs | open question |
