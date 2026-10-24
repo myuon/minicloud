@@ -136,14 +136,16 @@ so, and what it asserts is counted.
   app's `Err` while the rest of the run goes on; a client that goes away is
   told to the run, which ends; an app not granted `stream` is refused at
   load;
-- queues (`queue.rs`, and `queue.rs`'s 29 unit tests): a message outlives
+- queues (`queue.rs`, and `queue.rs`'s 33 unit tests): a message outlives
   the request that sent it, is delivered as a run, is on disk and is off
   the queue once taken; a client cannot deliver one itself; a delivery that
   is refused is tried again and then buried with its reason in the log, and
   each delivery says which try it is and how many there will be,
   while the app and its neighbour go on; a delivery that outlives its lease
   settles nothing, is said in the log and is not counted, while the one
-  that took the message after it is; a queue the app does not declare
+  that took the message after it is, and a message whose every delivery
+  outlives its lease is a dead letter after `max_attempts` rather than
+  delivered for ever; a queue the app does not declare
   is an `Err` that says which it has; a queue past `max_depth` refuses the
   send; the messages survive a restart; five ways of writing `[[queues]]`
   wrong refuse that app alone. `sendAfter` holds its message back and then
@@ -154,7 +156,10 @@ so, and what it asserts is counted.
   delivery whose lease has been handed on cannot delete, retry or bury the
   message, nor can one from before a revive, in every order two deliveries'
   leases and settles can come in; and that a store made before lease ids is
-  given the column and still settles;
+  given the column and still settles; that a lease that runs out on the
+  last attempt makes a dead letter while a retried, revived or fresh
+  message does not, that a delivery the host turned away gives its attempt
+  back, and that leasing one queue takes nothing of another;
 - `defer` (`defer.rs`): a query in the path reaches the app as a query; the
   client is answered at once and the work is done after it, as a run of its
   own counted in `served`; a client that sends

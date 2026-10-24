@@ -830,6 +830,18 @@ lease changes nothing; the app's log says so, and the counters do not count
 it. `attempts` could not be the token: reviving a dead letter counts it
 afresh from 0.
 
+That took away what used to end a consumer that is always too slow: its own
+late `done`. So **a lease that runs out on the last attempt makes a dead
+letter** ("no answer within the lease"). Before it leases a queue, the
+delivery loop buries what is due, has used `max_attempts` and still holds a
+lease — which can only be a last delivery that did not answer in time,
+because every settle either ends the lease (`retry`) or takes the message
+away (`done`, `bury`). A delivery the host turns away before the app sees
+it (the app's queue full, the host busy) is not an attempt: it gives the
+message back with the attempt its lease counted taken back, so a busy host
+cannot spend a message's attempts. And a lease takes from one queue at a
+time, so one queue's loop never counts an attempt on another's message.
+
 **A failure is retried with a doubling delay** until `max_attempts`, then
 the message is buried as a dead letter with the reason. Burying rather than
 dropping is the point of the feature: a queue that silently loses what

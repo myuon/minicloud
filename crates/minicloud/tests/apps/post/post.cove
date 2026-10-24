@@ -12,8 +12,9 @@ use timer
 /// `/queue/mail` is where the host delivers, and it refuses anyone but the
 /// host. A body of `fail` makes that delivery fail, which is how the tests
 /// see a retry and a dead letter; one of `slow` makes its first delivery
-/// wait 2.5 seconds before it takes the message, which is how they see a
-/// delivery outlive its lease.
+/// wait 2.5 seconds before it takes the message, and one of `slower` makes
+/// every delivery wait as long, which is how they see a delivery outlive
+/// its lease.
 export fn handle(request: web.Request) -> web.Response {
   if request.path == "/send" {
     return match queue.send("mail", request.query.get("body").unwrapOr("")) {
@@ -63,7 +64,7 @@ export fn handle(request: web.Request) -> web.Response {
       log.warn("refusing {request.body}")
       return answer(500, "this consumer refuses")
     }
-    if request.body == "slow" && attempt == "1" {
+    if (request.body == "slow" && attempt == "1") || request.body == "slower" {
       timer.sleep(2500)
     }
     let before = kv.get("taken").unwrapOr("")

@@ -52,6 +52,18 @@
 //! never been leased, or has been revived, has none, and only a settle
 //! that says so (`None`) matches it.
 //!
+//! **A lease that runs out on the last attempt is a dead letter.** Before
+//! lease ids, the slow delivery's own `done` ended a message a consumer
+//! could never answer in time; now it settles nothing, and the message
+//! would be leased again past `max_attempts` for as long as the consumer is
+//! slow. So the delivery loop calls [`Queues::bury_spent`] before it
+//! leases: a message that is due, has used its attempts and still holds a
+//! lease can only be one whose last delivery did not answer in time, since
+//! every settle either ends the lease ([`Queues::retry`],
+//! [`Queues::give_back`]) or takes the message away. A delivery the host
+//! turns away before the app sees it is not an attempt, and
+//! [`Queues::give_back`] takes back the one `lease` counted.
+//!
 //! # Retention
 //!
 //! This layer never discards a dead letter by itself: how long they are kept
@@ -76,11 +88,13 @@
 //! sent first. `held` is a message whose `due` is still ahead — which is
 //! either a delivery holding it on lease ([`Queues::lease`] pushed `due` out
 //! by the queue's `lease`) or a failed delivery waiting for its retry
-//! ([`Queues::retry`] pushed it out by the delay). One column carries both,
-//! so nothing here can tell them apart, and the window says so rather than
-//! calling a backoff a lease. `attempts` is the useful difference: a held
-//! message with 0 attempts cannot exist, and one with 2 has been tried
-//! twice whichever of the two it is in.
+//! ([`Queues::retry`] pushed it out by the delay), or one sent for later.
+//! One column carries all three, and the window says so rather than
+//! calling a backoff a lease. (`lease_id` could now tell a lease from the
+//! rest, since only a lease sets it; the window does not read it yet.)
+//! `attempts` is the useful difference: one with 2 has been tried twice
+//! whichever it is, and one with 0 has never been tried — sent for later,
+//! or given back by a host too busy to begin it ([`Queues::give_back`]).
 //!
 //! Error messages never carry the file path: they reach HTTP responses and
 //! logs that outsiders may read, and the data directory's layout is not
@@ -308,8 +322,14 @@ impl Queues {
     /// Each message taken is given a lease id of its own, which replaces
     /// whatever lease it had: the delivery that held that one, if it is
     /// still running, can no longer settle it.
+    ///
+    /// `queue` takes from that queue alone (`None`, from all of them). The
+    /// delivery loop leases a queue at a time, with that queue's lease and
+    /// room; a message of another queue taken here would have an attempt
+    /// counted and no delivery to make it.
     pub fn lease(
         &self,
+        queue: Option<&str>,
         now_unix: i64,
         limit: usize,
         lease_secs: i64,
@@ -321,11 +341,12 @@ impl Queues {
             let mut select = tx
                 .prepare_cached(
                     "SELECT id, queue, body, attempts, due, sent FROM message \
-                     WHERE due <= ?1 ORDER BY sent, id LIMIT ?2",
+                     WHERE due <= ?1 AND (?3 IS NULL OR queue = ?3) \
+                     ORDER BY sent, id LIMIT ?2",
                 )
                 .map_err(fail)?;
             let rows = select
-                .query_map(params![now_unix, limit], message_row)
+                .query_map(params![now_unix, limit, queue], message_row)
                 .map_err(fail)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(fail)?
         };
@@ -370,6 +391,10 @@ impl Queues {
     /// Puts it back, due `delay_secs` from `now_unix`, for another try, if
     /// `lease_id` is still its lease; answers whether it was, as
     /// [`Queues::done`] does.
+    ///
+    /// The lease ends here: a message waiting for its retry is held by
+    /// nobody, which is what tells it apart from one whose lease ran out
+    /// ([`Queues::bury_spent`]).
     pub fn retry(
         &self,
         id: i64,
@@ -380,11 +405,84 @@ impl Queues {
         let moved = self
             .conn
             .execute(
-                "UPDATE message SET due = ?2 WHERE id = ?1 AND lease_id IS ?3",
+                "UPDATE message SET due = ?2, lease_id = NULL WHERE id = ?1 AND lease_id IS ?3",
                 params![id, now_unix.saturating_add(delay_secs), lease_id],
             )
             .map_err(fail)?;
         Ok(moved > 0)
+    }
+
+    /// Puts it back as [`Queues::retry`] does, and takes back the attempt
+    /// [`Queues::lease`] counted: for a delivery that never began, because
+    /// the host turned the run away before the app saw the message.
+    ///
+    /// A host that is busy is not the consumer failing, and a message given
+    /// back this way must not come nearer its `max_attempts` for it — or a
+    /// busy hour could make a dead letter of a message no consumer was ever
+    /// asked to take.
+    pub fn give_back(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        delay_secs: i64,
+    ) -> Result<bool, String> {
+        let moved = self
+            .conn
+            .execute(
+                "UPDATE message SET due = ?2, lease_id = NULL, attempts = max(attempts - 1, 0) \
+                 WHERE id = ?1 AND lease_id IS ?3",
+                params![id, now_unix.saturating_add(delay_secs), lease_id],
+            )
+            .map_err(fail)?;
+        Ok(moved > 0)
+    }
+
+    /// Buries the messages of `queue` whose lease ran out on their last
+    /// allowed attempt, with `why`, and answers them as they were.
+    ///
+    /// A delivery that answers settles its message, and one that fails on
+    /// the last attempt buries it. A delivery that outlives its lease
+    /// settles nothing, and without this the message would be leased again
+    /// past `max_attempts`, and again for as long as the consumer is too
+    /// slow — never a dead letter, however many times it is tried. What is
+    /// buried here is exactly that: due, tried `max_attempts` times or more,
+    /// and still holding a lease, which no settle has ended (`retry` and
+    /// `give_back` end it, `done` and `bury` take the message away, and a
+    /// sent or revived message has never had one).
+    pub fn bury_spent(
+        &self,
+        queue: &str,
+        max_attempts: i64,
+        now_unix: i64,
+        why: &str,
+    ) -> Result<Vec<Message>, String> {
+        let tx = self.write()?;
+        let spent = {
+            let mut select = tx
+                .prepare_cached(
+                    "SELECT id, queue, body, attempts, due, sent FROM message \
+                     WHERE queue = ?1 AND due <= ?2 AND attempts >= ?3 \
+                     AND lease_id IS NOT NULL ORDER BY sent, id",
+                )
+                .map_err(fail)?;
+            let rows = select
+                .query_map(params![queue, now_unix, max_attempts], message_row)
+                .map_err(fail)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(fail)?
+        };
+        for message in &spent {
+            tx.execute(
+                "INSERT OR REPLACE INTO dead (id, queue, body, attempts, due, sent, why, buried) \
+                 SELECT id, queue, body, attempts, due, sent, ?2, ?3 FROM message WHERE id = ?1",
+                params![message.id, why, now_unix],
+            )
+            .map_err(fail)?;
+            tx.execute("DELETE FROM message WHERE id = ?1", [message.id])
+                .map_err(fail)?;
+        }
+        tx.commit().map_err(fail)?;
+        Ok(spent)
     }
 
     /// Moves it to the dead-letter table, with the reason, if `lease_id` is
@@ -858,7 +956,7 @@ mod tests {
     fn send_lease_done_goes_round_once() {
         let q = Queues::in_memory().unwrap();
         let id = send(&q, "mail", "hello", T);
-        let got = q.lease(T, 10, 30).unwrap();
+        let got = q.lease(None, T, 10, 30).unwrap();
         assert_eq!(
             got,
             vec![Message {
@@ -872,7 +970,7 @@ mod tests {
             }]
         );
         assert!(q.done(id, lease_of(&got, id)).unwrap());
-        assert!(q.lease(T + 1000, 10, 30).unwrap().is_empty());
+        assert!(q.lease(None, T + 1000, 10, 30).unwrap().is_empty());
         assert_eq!(q.depths().unwrap(), vec![]);
     }
 
@@ -880,11 +978,11 @@ mod tests {
     fn lease_holds_back_what_is_not_due_and_what_is_leased() {
         let q = Queues::in_memory().unwrap();
         let id = send(&q, "a", "x", T);
-        assert!(q.lease(T - 1, 10, 30).unwrap().is_empty());
-        assert_eq!(ids(&q.lease(T, 10, 30).unwrap()), [id]);
+        assert!(q.lease(None, T - 1, 10, 30).unwrap().is_empty());
+        assert_eq!(ids(&q.lease(None, T, 10, 30).unwrap()), [id]);
         // Leased: not handed out again while the lease runs.
-        assert!(q.lease(T + 29, 10, 30).unwrap().is_empty());
-        let again = q.lease(T + 30, 10, 30).unwrap();
+        assert!(q.lease(None, T + 29, 10, 30).unwrap().is_empty());
+        let again = q.lease(None, T + 30, 10, 30).unwrap();
         assert_eq!(ids(&again), [id]);
         assert_eq!(again[0].attempts, 2);
         assert_eq!(again[0].due_unix, T + 60);
@@ -896,23 +994,23 @@ mod tests {
         let c = send(&q, "a", "c", T + 3);
         let a = send(&q, "a", "a", T + 1);
         let b = send(&q, "b", "b", T + 2);
-        assert_eq!(ids(&q.lease(T + 10, 2, 60).unwrap()), [a, b]);
-        assert_eq!(ids(&q.lease(T + 10, 2, 60).unwrap()), [c]);
+        assert_eq!(ids(&q.lease(None, T + 10, 2, 60).unwrap()), [a, b]);
+        assert_eq!(ids(&q.lease(None, T + 10, 2, 60).unwrap()), [c]);
         // A limit of 0 is held to 1.
         let d = send(&q, "a", "d", T + 11);
         let e = send(&q, "a", "e", T + 12);
-        assert_eq!(ids(&q.lease(T + 20, 0, 60).unwrap()), [d]);
-        assert_eq!(ids(&q.lease(T + 20, 5, 60).unwrap()), [e]);
+        assert_eq!(ids(&q.lease(None, T + 20, 0, 60).unwrap()), [d]);
+        assert_eq!(ids(&q.lease(None, T + 20, 5, 60).unwrap()), [e]);
     }
 
     #[test]
     fn retry_moves_due_and_the_message_comes_back_in_time() {
         let q = Queues::in_memory().unwrap();
         let id = send(&q, "a", "x", T);
-        let taken = q.lease(T, 1, 30).unwrap();
+        let taken = q.lease(None, T, 1, 30).unwrap();
         assert!(q.retry(id, lease_of(&taken, id), T + 5, 100).unwrap());
-        assert!(q.lease(T + 104, 1, 30).unwrap().is_empty());
-        let got = q.lease(T + 105, 1, 30).unwrap();
+        assert!(q.lease(None, T + 104, 1, 30).unwrap().is_empty());
+        let got = q.lease(None, T + 105, 1, 30).unwrap();
         assert_eq!(ids(&got), [id]);
         assert_eq!(got[0].attempts, 2);
     }
@@ -921,9 +1019,9 @@ mod tests {
     fn bury_moves_to_dead_and_revive_brings_it_back() {
         let q = Queues::in_memory().unwrap();
         let id = send(&q, "a", "x", T);
-        let taken = q.lease(T, 1, 30).unwrap();
+        let taken = q.lease(None, T, 1, 30).unwrap();
         assert!(q.bury(id, lease_of(&taken, id), T + 1, "gave up").unwrap());
-        assert!(q.lease(T + 1000, 10, 30).unwrap().is_empty());
+        assert!(q.lease(None, T + 1000, 10, 30).unwrap().is_empty());
         let dead = q.dead(None, 10).unwrap();
         assert_eq!(dead.len(), 1);
         assert_eq!(dead[0].1, "gave up");
@@ -933,7 +1031,7 @@ mod tests {
 
         assert!(q.revive(id, T + 50).unwrap());
         assert!(q.dead(None, 10).unwrap().is_empty());
-        let got = q.lease(T + 50, 10, 30).unwrap();
+        let got = q.lease(None, T + 50, 10, 30).unwrap();
         assert_eq!(ids(&got), [id]);
         // Counted afresh, then once for this lease.
         assert_eq!(got[0].attempts, 1);
@@ -975,9 +1073,9 @@ mod tests {
     fn a_message_sent_for_later_is_held_until_it_is_due() {
         let q = Queues::in_memory().unwrap();
         let id = q.send("a", "later", T, T + 60, BODY, DEPTH).unwrap();
-        assert!(q.lease(T, 10, 30).unwrap().is_empty());
-        assert!(q.lease(T + 59, 10, 30).unwrap().is_empty());
-        let got = q.lease(T + 60, 10, 30).unwrap();
+        assert!(q.lease(None, T, 10, 30).unwrap().is_empty());
+        assert!(q.lease(None, T + 59, 10, 30).unwrap().is_empty());
+        let got = q.lease(None, T + 60, 10, 30).unwrap();
         assert_eq!(ids(&got), [id]);
         // It still says when it was asked for, not when it came due.
         assert_eq!(got[0].sent_unix, T);
@@ -1013,7 +1111,7 @@ mod tests {
         // Bytes, not characters.
         assert!(q.send("b", "ééé", T, T, 4, 2).is_err());
         // Room opens when a message is done.
-        let taken = q.lease(T, 1, 10).unwrap();
+        let taken = q.lease(None, T, 1, 10).unwrap();
         assert!(q.done(taken[0].id, taken[0].lease_id).unwrap());
         q.send("a", "3", T, T, 4, 2).unwrap();
     }
@@ -1049,7 +1147,7 @@ mod tests {
         assert_eq!(q.dead(None, 10).unwrap().len(), 2);
         assert_eq!(q.prune_dead(T + 100).unwrap(), 2);
         assert_eq!(q.prune_dead(T + 100).unwrap(), 0);
-        assert_eq!(ids(&q.lease(T, 10, 10).unwrap()), [live]);
+        assert_eq!(ids(&q.lease(None, T, 10, 10).unwrap()), [live]);
     }
 
     #[test]
@@ -1062,7 +1160,7 @@ mod tests {
             send(&q, "a", "kept", T)
         };
         let q = Queues::open(&path).unwrap();
-        assert_eq!(ids(&q.lease(T, 10, 10).unwrap()), [id]);
+        assert_eq!(ids(&q.lease(None, T, 10, 10).unwrap()), [id]);
         let _ = std::fs::remove_dir_all(&dir);
 
         // A path that cannot be a database: the error must not name it.
@@ -1119,8 +1217,8 @@ mod tests {
     /// holds the message now.
     fn handed_on(q: &Queues) -> (i64, Option<i64>, Option<i64>) {
         let id = send(q, "a", "x", T);
-        let stale = lease_of(&q.lease(T, 1, 30).unwrap(), id);
-        let current = lease_of(&q.lease(T + 30, 1, 30).unwrap(), id);
+        let stale = lease_of(&q.lease(None, T, 1, 30).unwrap(), id);
+        let current = lease_of(&q.lease(None, T + 30, 1, 30).unwrap(), id);
         assert_ne!(stale, current);
         (id, stale, current)
     }
@@ -1157,13 +1255,14 @@ mod tests {
                 lease_id: current
             }
         );
-        assert!(q.lease(T + 59, 10, 30).unwrap().is_empty());
+        assert!(q.lease(None, T + 59, 10, 30).unwrap().is_empty());
+        // The holder's retry moves it, and ends the lease.
         assert!(q.retry(id, current, T + 40, 5).unwrap());
         assert_eq!(
             row(&q, id),
             Row::Waiting {
                 due: T + 45,
-                lease_id: current
+                lease_id: None
             }
         );
     }
@@ -1190,18 +1289,109 @@ mod tests {
     fn a_lease_from_before_a_revive_does_not_settle_the_revived_message() {
         let q = Queues::in_memory().unwrap();
         let id = send(&q, "a", "x", T);
-        let before = lease_of(&q.lease(T, 1, 30).unwrap(), id);
+        let before = lease_of(&q.lease(None, T, 1, 30).unwrap(), id);
         assert!(q.bury(id, before, T + 1, "gave up").unwrap());
         assert!(q.revive(id, T + 2).unwrap());
         // Revived, it has no lease, and its attempts start again from 0, so
         // a token made of `attempts` would match here.
         assert!(!q.done(id, before).unwrap());
         assert!(!q.retry(id, before, T + 2, 100).unwrap());
-        let after = lease_of(&q.lease(T + 2, 1, 30).unwrap(), id);
+        let after = lease_of(&q.lease(None, T + 2, 1, 30).unwrap(), id);
         assert!(!q.done(id, before).unwrap());
         assert!(!q.bury(id, before, T + 3, "late").unwrap());
         assert!(q.done(id, after).unwrap());
         assert_eq!(row(&q, id), Row::Gone);
+    }
+
+    #[test]
+    fn a_lease_that_runs_out_on_the_last_attempt_is_a_dead_letter() {
+        let q = Queues::in_memory().unwrap();
+        let id = send(&q, "a", "x", T);
+        let why = "no answer within the lease";
+        // Two attempts allowed; each delivery outlives its lease.
+        assert_eq!(ids(&q.lease(Some("a"), T, 1, 30).unwrap()), [id]);
+        assert!(q.bury_spent("a", 2, T + 30, why).unwrap().is_empty());
+        assert_eq!(ids(&q.lease(Some("a"), T + 30, 1, 30).unwrap()), [id]);
+        // Not while the second lease runs.
+        assert!(q.bury_spent("a", 2, T + 59, why).unwrap().is_empty());
+        let spent = q.bury_spent("a", 2, T + 60, why).unwrap();
+        assert_eq!((ids(&spent), spent[0].attempts), (vec![id], 2));
+        assert_eq!(row(&q, id), Row::Dead);
+        assert_eq!(q.dead(None, 10).unwrap()[0].1, why);
+        assert!(q.lease(Some("a"), T + 1000, 10, 30).unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_a_lease_that_ran_out_is_spent() {
+        let q = Queues::in_memory().unwrap();
+        // Retried after its last allowed attempt (a `max_attempts` lowered
+        // since): the retry ended its lease, so it is tried once more.
+        let retried = send(&q, "a", "retried", T);
+        let taken = q.lease(Some("a"), T, 1, 30).unwrap();
+        assert!(q.retry(retried, lease_of(&taken, retried), T, 0).unwrap());
+        // Revived: no attempts and no lease.
+        let revived = send(&q, "a", "revived", T + 1);
+        assert!(q.bury(revived, None, T + 1, "gave up").unwrap());
+        assert!(q.revive(revived, T + 1).unwrap());
+        // Sent and never tried.
+        send(&q, "a", "fresh", T + 2);
+        // Another queue's spent message is that queue's to bury.
+        let other = send(&q, "b", "other", T + 3);
+        q.lease(Some("b"), T + 3, 1, 1).unwrap();
+        assert!(q.bury_spent("a", 1, T + 100, "spent").unwrap().is_empty());
+        assert!(q.bury_spent("a", 0, T + 100, "spent").unwrap().is_empty());
+        assert_eq!(
+            ids(&q.bury_spent("b", 1, T + 100, "spent").unwrap()),
+            [other]
+        );
+    }
+
+    #[test]
+    fn a_delivery_the_host_turned_away_is_given_back_without_its_attempt() {
+        let q = Queues::in_memory().unwrap();
+        let id = send(&q, "a", "x", T);
+        // A busy host, ten times over, with one attempt allowed: never a
+        // dead letter, since the consumer was never asked.
+        for n in 0..10 {
+            let at = T + n * 10;
+            let taken = q.lease(Some("a"), at, 1, 30).unwrap();
+            assert_eq!(taken[0].attempts, 1);
+            assert!(q.give_back(id, lease_of(&taken, id), at, 5).unwrap());
+            assert_eq!(
+                row(&q, id),
+                Row::Waiting {
+                    due: at + 5,
+                    lease_id: None
+                }
+            );
+            assert!(q.bury_spent("a", 1, at + 5, "spent").unwrap().is_empty());
+        }
+        // A stale delivery cannot give back what another holds.
+        let (id, stale, current) = handed_on(&q);
+        assert!(!q.give_back(id, stale, T + 31, 0).unwrap());
+        assert_eq!(
+            row(&q, id),
+            Row::Waiting {
+                due: T + 60,
+                lease_id: current
+            }
+        );
+    }
+
+    #[test]
+    fn a_lease_of_one_queue_takes_nothing_of_another() {
+        let q = Queues::in_memory().unwrap();
+        let a = send(&q, "a", "a", T);
+        let b = send(&q, "b", "b", T + 1);
+        assert_eq!(ids(&q.lease(Some("b"), T + 10, 10, 30).unwrap()), [b]);
+        assert_eq!(
+            row(&q, a),
+            Row::Waiting {
+                due: T,
+                lease_id: None
+            }
+        );
+        assert_eq!(ids(&q.lease(Some("a"), T + 10, 10, 30).unwrap()), [a]);
     }
 
     #[test]
@@ -1228,7 +1418,7 @@ mod tests {
             .unwrap();
         }
         let q = Queues::open(&path).unwrap();
-        let taken = q.lease(T + 30, 10, 30).unwrap();
+        let taken = q.lease(None, T + 30, 10, 30).unwrap();
         assert_eq!(ids(&taken), [1]);
         assert_eq!(taken[0].attempts, 2);
         assert!(q.done(1, lease_of(&taken, 1)).unwrap());
@@ -1238,7 +1428,7 @@ mod tests {
         let q = Queues::open(&path).unwrap();
         let id = send(&q, "a", "new", T);
         assert!(id > 1);
-        let taken = q.lease(T, 10, 30).unwrap();
+        let taken = q.lease(None, T, 10, 30).unwrap();
         assert!(q.bury(id, lease_of(&taken, id), T, "why").unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1323,10 +1513,10 @@ mod tests {
                     for step in order {
                         let before = row(&q, id);
                         match step {
-                            ALease => a = Some(lease_of(&q.lease(now, 1, 30).unwrap(), id)),
+                            ALease => a = Some(lease_of(&q.lease(None, now, 1, 30).unwrap(), id)),
                             Expire => now = T + 30,
                             BLease => {
-                                let taken = q.lease(now, 1, 30).unwrap();
+                                let taken = q.lease(None, now, 1, 30).unwrap();
                                 b = taken.first().map(|m| lease_of(&taken, m.id));
                             }
                             ASettle => {
@@ -1393,7 +1583,7 @@ mod tests {
             send(&q, "other", "third", T + 2);
             // Leased: `due` is pushed out to the end of the lease, which is
             // the only mark a delivery in flight leaves.
-            q.lease(T + 3, 1, 30).unwrap();
+            q.lease(None, T + 3, 1, 30).unwrap();
         }
         let found = peek_waiting(&path, T + 3, 10).unwrap();
         assert_eq!(bodies(&found), ["second", "third", "first"]);
@@ -1438,7 +1628,7 @@ mod tests {
             assert_eq!(peek_waiting(&path, T, 10).unwrap().len(), 1);
             assert_eq!(peek_depths(&path, T).unwrap()[0].due, 1);
         }
-        let taken = q.lease(T, 10, 30).unwrap();
+        let taken = q.lease(None, T, 10, 30).unwrap();
         assert_eq!(ids(&taken), [id]);
         // The first try, as it would have been had nobody looked.
         assert_eq!(taken[0].attempts, 1);
@@ -1457,7 +1647,7 @@ mod tests {
         let path = dir.join("queue.sqlite3");
         let q = Queues::open(&path).unwrap();
         let id = send(&q, "mail", "again", T);
-        let taken = q.lease(T, 1, 30).unwrap();
+        let taken = q.lease(None, T, 1, 30).unwrap();
         q.retry(id, lease_of(&taken, id), T + 5, 100).unwrap();
         let found = peek_waiting(&path, T + 5, 10).unwrap();
         assert_eq!(states(&found), ["held"]);
@@ -1473,7 +1663,7 @@ mod tests {
         let q = Queues::open(&path).unwrap();
         let first = send(&q, "mail", "one", T);
         let second = send(&q, "mail", "two", T);
-        let taken = q.lease(T, 2, 30).unwrap();
+        let taken = q.lease(None, T, 2, 30).unwrap();
         q.bury(first, lease_of(&taken, first), T + 10, "500 no")
             .unwrap();
         q.bury(second, lease_of(&taken, second), T + 20, "no answer")
@@ -1509,7 +1699,7 @@ mod tests {
         let q = Queues::open(&path).unwrap();
         let waiting = send(&q, "mail", "still here", T);
         let buried = send(&q, "mail", "gave up", T);
-        let taken = q.lease(T, 2, 30).unwrap();
+        let taken = q.lease(None, T, 2, 30).unwrap();
         q.bury(buried, lease_of(&taken, buried), T + 5, "500 no")
             .unwrap();
 

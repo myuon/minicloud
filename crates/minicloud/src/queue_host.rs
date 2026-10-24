@@ -33,7 +33,12 @@
 //! "Leases, not deletes"): a run that outlived its lease cannot delete the
 //! message from under the delivery that has it now, move that one's lease,
 //! or bury it while it is being taken. Its answer is said in the app's log
-//! and counted as nothing.
+//! and counted as nothing. A lease that runs out counts as the attempt it
+//! was, so a consumer that is always slower than `lease` does not have its
+//! message go round for ever: when the lease of the last attempt runs out,
+//! the message is a dead letter ("no answer within the lease") instead of
+//! a next try. A delivery the host turns away before the app sees it is
+//! not an attempt, and gives back the one its lease counted.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -224,6 +229,11 @@ fn now() -> i64 {
 /// `SELECT` per app that has a queue.
 const EVERY: Duration = Duration::from_secs(1);
 
+/// The reason a message is buried with when its lease ran out on its last
+/// attempt: that delivery did not answer in time, and may still be running,
+/// so "no answer" alone would say less than is known.
+const OUTLIVED: &str = "no answer within the lease";
+
 /// Delivers what apps have put on their queues, for as long as the host
 /// runs.
 ///
@@ -246,6 +256,36 @@ pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
                 continue;
             };
             for policy in &app.queues {
+                // Before anything is leased: a message whose lease ran out
+                // on its last attempt is a dead letter, not a next try.
+                let spent = {
+                    let store = store.lock().unwrap_or_else(|p| p.into_inner());
+                    store.bury_spent(
+                        &policy.name,
+                        i64::from(policy.max_attempts),
+                        now(),
+                        OUTLIVED,
+                    )
+                };
+                match spent {
+                    Ok(spent) => {
+                        for message in spent {
+                            app.counters.queue_buried.fetch_add(1, Ordering::Relaxed);
+                            app.logs.push(
+                                "host",
+                                &format!(
+                                    "queue `{}`: message {} is a dead letter after {} \
+                                     attempt(s): {OUTLIVED}",
+                                    policy.name, message.id, message.attempts
+                                ),
+                            );
+                        }
+                    }
+                    Err(why) => {
+                        app.logs
+                            .push("host", &format!("queue `{}`: {why}", policy.name));
+                    }
+                }
                 let in_flight = app.counters.queue_in_flight.load(Ordering::Relaxed);
                 let room = (policy.batch as u64).saturating_sub(in_flight);
                 if room == 0 {
@@ -253,7 +293,12 @@ pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
                 }
                 let leased = {
                     let store = store.lock().unwrap_or_else(|p| p.into_inner());
-                    store.lease(now(), room as usize, policy.lease.as_secs() as i64)
+                    store.lease(
+                        Some(&policy.name),
+                        now(),
+                        room as usize,
+                        policy.lease.as_secs() as i64,
+                    )
                 };
                 let leased = match leased {
                     Ok(leased) => leased,
@@ -264,9 +309,6 @@ pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
                     }
                 };
                 for message in leased {
-                    if message.queue != policy.name {
-                        continue;
-                    }
                     app.counters.queue_in_flight.fetch_add(1, Ordering::Relaxed);
                     start(&front, &slot, &app, policy, message, Arc::clone(&store));
                 }
@@ -316,14 +358,16 @@ fn start(
     let answer = match answer {
         Ok(answer) => answer,
         // The queue was full or the host was busy: give the message back
-        // to be tried again rather than counting it as a failed delivery.
-        // The lease is still asked about: it has not had time to run out,
-        // but a retry that did not ask would be the one settle here that
-        // could move another delivery's lease.
+        // to be tried again, with the attempt `lease` counted taken back,
+        // rather than counting it as a failed delivery — or a busy host
+        // could spend a message's attempts without its consumer ever being
+        // asked. The lease is still asked about: it has not had time to
+        // run out, but a give-back that did not ask would be the one
+        // settle here that could move another delivery's lease.
         Err(_) => {
             counters.queue_in_flight.fetch_sub(1, Ordering::Relaxed);
             let store = store.lock().unwrap_or_else(|p| p.into_inner());
-            if let Ok(false) = store.retry(
+            if let Ok(false) = store.give_back(
                 message.id,
                 message.lease_id,
                 now(),

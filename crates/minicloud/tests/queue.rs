@@ -172,6 +172,35 @@ fn a_delivery_that_outlives_its_lease_does_not_settle_the_message() {
     assert_eq!(get(host.addr, "/post/depth").body.trim(), "0");
 }
 
+/// A consumer that is always slower than the lease never settles its
+/// message, so the message must not go round for ever: once its lease runs
+/// out on the last attempt it is a dead letter, and the deliveries that
+/// finish after that settle nothing.
+#[test]
+fn a_message_whose_every_delivery_outlives_its_lease_is_a_dead_letter() {
+    let apps = post(
+        "[limits]\ndeadline = \"10s\"\n\n\
+         [[queues]]\nname = \"mail\"\nlease = \"1s\"\nmax_attempts = 2\nretry = \"3600s\"\n",
+    );
+    let host = start(&apps, 2);
+    assert_eq!(get(host.addr, "/post/send?body=slower").status, 202);
+    let logs = || get(host.addr, "/_host/apps/post/logs?n=50").body;
+    wait_until("both deliveries to finish", || {
+        logs().matches("delivery outlived its lease").count() == 2
+    });
+    let said = logs();
+    assert!(
+        said.contains("is a dead letter after 2 attempt(s): no answer within the lease"),
+        "{said}"
+    );
+    // Asked twice, never a third time, and counted as buried, not taken.
+    assert_eq!(taken(&host), "slower;slower;");
+    assert_eq!(count(&host, "post", "queue_buried"), 1);
+    assert_eq!(count(&host, "post", "queue_delivered"), 0);
+    assert_eq!(count(&host, "post", "queue_retried"), 0);
+    assert_eq!(get(host.addr, "/post/depth").body.trim(), "0");
+}
+
 #[test]
 fn a_queue_the_app_does_not_declare_is_the_apps_err() {
     let apps = post(TWICE);
