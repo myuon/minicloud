@@ -44,6 +44,8 @@ module queue {
     MAX_RACE: int,
     ATOMIC_ANSWER: bool,
     TRACK: Set[str],
+    IMPL2: bool,
+    MAX_STALL: int,
   }
   const C: Cfg
 
@@ -82,6 +84,13 @@ module queue {
   // keeps the state space to what the property can see. Ghosts never guard
   // a step, so leaving one out removes no behaviour.
   val TRACK = C.TRACK
+  // The code on fix/queue-contract (see README): with the FIX_* flags it
+  // implements, one clock reading per tick, burial of undeclared queues,
+  // held settles skipped by lease and bury_spent, revive unchecked for an
+  // undeclared queue, and D1: a lease runs out under a live delivery only
+  // in a host stall.
+  val IMPL2 = C.IMPL2
+  val MAX_STALL = C.MAX_STALL
 
   type Pol = { decl: int -> bool, m: int -> int, d: int -> int, batch: int -> int }
   // `message` row: `tok` 0 is lease_id NULL.
@@ -125,12 +134,13 @@ module queue {
   var revives: int
   var clockbacks: int
   var races: int           // how often a lease ran out inside the tick's bury_spent..lease window
+  var stalls: int          // IMPL2: host stalls (a lease running out under a live delivery)
   var gh: int -> Ghost
   var mmax: int -> int      // the highest M each queue has had
   var bad: Set[str]         // monitors: the action properties broken so far
 
   val vars = (msg, dead, nextId, inflight, dels, tpc, tqi, tpol, pol, prevPol, oldRuns,
-              crashes, redeploys, revives, clockbacks, races, gh, mmax, bad)
+              crashes, redeploys, revives, clockbacks, races, stalls, gh, mmax, bad)
 
   // ---------------------------------------------------------- helpers
   pure def imax(a: int, b: int): int = if (a > b) a else b
@@ -164,7 +174,8 @@ module queue {
   // The holder of message i's current lease has its answer and has not
   // written the settle yet (answered, or FIX_S7's pending).
   def answerHeld(i: int): bool =
-    dels.exists(d => d.id == i and d.tok == msg.get(i).tok and (d.stage == "answered" or d.stage == "pending"))
+    dels.exists(d => d.id == i and d.tok == msg.get(i).tok and
+                     ((d.stage == "answered" and not(IMPL2)) or d.stage == "pending"))
   def unstarted(i: int): int =
     dels.filter(d => d.id == i and d.life == gh.get(i).life and not(d.started)).size()
   // L3a: the hypothesis no longer holds for these messages
@@ -194,7 +205,7 @@ module queue {
   action keepStore = all { msg' = msg, dead' = dead, nextId' = nextId }
   action keepTick = all { tpc' = tpc, tqi' = tqi, tpol' = tpol }
   action keepApp = all { pol' = pol, prevPol' = prevPol, oldRuns' = oldRuns }
-  action keepEnv = all { crashes' = crashes, redeploys' = redeploys, revives' = revives, clockbacks' = clockbacks, races' = races }
+  action keepEnv = all { crashes' = crashes, redeploys' = redeploys, revives' = revives, clockbacks' = clockbacks, races' = races, stalls' = stalls }
 
   // ------------------------------------------------------------ init
   action init = all {
@@ -205,7 +216,7 @@ module queue {
     dels' = Set(),
     tpc' = "idle", tqi' = 0, tpol' = INIT_POL,
     pol' = INIT_POL, prevPol' = INIT_POL, oldRuns' = false,
-    crashes' = 0, redeploys' = 0, revives' = 0, clockbacks' = 0, races' = 0,
+    crashes' = 0, redeploys' = 0, revives' = 0, clockbacks' = 0, races' = 0, stalls' = 0,
     gh' = IDS.mapBy(i => G0),
     mmax' = QS.mapBy(q => INIT_POL.m.get(q)),
     bad' = Set(),
@@ -278,7 +289,7 @@ module queue {
 
   // FIX_S7: the tick begins by trying the settles that failed.
   action tickBeginSettle = all {
-    FIX_S7, tpc == "idle", nextDecl(pol, 0) < NQ,
+    FIX_S7, tpc == "idle", IMPL2 or nextDecl(pol, 0) < NQ,
     dels.exists(d => d.stage == "pending"),
     tpc' = "settle", tqi' = 0, tpol' = pol,
     dels' = dels.map(d => if (d.stage == "pending") { ...d, tried: false } else d),
@@ -294,8 +305,36 @@ module queue {
   action tickSettleEnd = all {
     tpc == "settle", dels.forall(d => d.stage == "pending" implies d.tried),
     val n = nextDecl(tpol, 0)
-    goTo(n),
+    if (IMPL2) all { tpc' = "undecl", tqi' = 0, tpol' = tpol } else goTo(n),
     keepStore, inflight' = inflight, dels' = dels, keepApp, keepEnv, gh' = gh, mmax' = mmax, bad' = bad,
+  }
+
+  // IMPL2 (D6): after the flush, the tick buries every message of a queue
+  // its version does not declare that holds no lease or whose lease ran
+  // out, and is not held. From idle (nothing to flush) the tick begins
+  // here, reading the current version.
+  action tickUndecl = {
+    val begin = tpc == "idle"
+    val p = if (begin) pol else tpol
+    val gone = IDS.filter(i => msg.get(i).on and not(p.decl.get(msg.get(i).q))
+                              and (msg.get(i).tok == 0 or msg.get(i).due)
+                              and not(answerHeld(i)))
+    val n = nextDecl(p, 0)
+    all {
+      IMPL2,
+      tpc == "undecl" or (begin and not(FIX_S7 and dels.exists(d => d.stage == "pending"))),
+      // a tick with nothing to do is no step
+      not(begin) or n < NQ or gone.size() > 0,
+      msg' = IDS.mapBy(i => if (gone.contains(i)) { ...msg.get(i), on: false } else msg.get(i)),
+      dead' = IDS.mapBy(i => if (gone.contains(i))
+                               { on: true, q: msg.get(i).q, att: msg.get(i).att, why: "undeclared" }
+                             else dead.get(i)),
+      nextId' = nextId,
+      dels' = dels.map(d => if (gone.contains(d.id)) { ...d, valid: not(tr("valid")) } else d),
+      if (n < NQ) all { tpc' = "bury", tqi' = n, tpol' = p }
+      else all { tpc' = "idle", tqi' = 0, tpol' = INIT_POL },
+      inflight' = inflight, keepApp, keepEnv, gh' = gh, mmax' = mmax, bad' = bad,
+    }
   }
 
   // bury_spent for one queue. From idle, the tick begins: it reads the
@@ -313,7 +352,7 @@ module queue {
     val lies = spent.filter(i =>
       if (msg.get(i).tok != 0) gh.get(i).answered else not(mmax.get(q) > mq))
     all {
-      begin or tpc == "bury",
+      (begin and not(IMPL2)) or tpc == "bury",
       not(begin and FIX_S7 and dels.exists(d => d.stage == "pending")),
       q < NQ,
       msg' = IDS.mapBy(i => if (spent.contains(i)) { ...msg.get(i), on: false } else msg.get(i)),
@@ -337,7 +376,8 @@ module queue {
     val room = imax(0, p.batch.get(q) - inF)
     val cand = IDS.filter(i => msg.get(i).on and msg.get(i).due
                                and (PRE_167 or msg.get(i).q == q)
-                               and (not(FIX_S5) or msg.get(i).att < p.m.get(q)))
+                               and (not(FIX_S5) or msg.get(i).att < p.m.get(q))
+                               and not(IMPL2 and answerHeld(i)))
     // oldest first: ids are sent in order (see README on clock set back)
     val taken = cand.filter(i => cand.filter(j => j < i).size() < room)
     val tokOf = IDS.mapBy(i => freshTok(i))
@@ -402,6 +442,7 @@ module queue {
     tickBeginSettle,
     tickSettleRetryAny,
     tickSettleEnd,
+    tickUndecl,
     tickBury,
     tickLease,
     admitOkAny,
@@ -455,8 +496,17 @@ module queue {
     // a lease of the queue the tick is at runs out after its bury_spent
     // and before its lease
     val race = tpc == "lease" and m.tok != 0 and m.q == tqi
+    // IMPL2, D1: the lease runs out while the delivery holding it is alive
+    // (not yet settled or held) only if the host stalls
+    val stall = IMPL2 and m.tok != 0 and dels.exists(d => d.tok == m.tok and d.id == i and
+                  (d.stage == "leased" or d.stage == "queued" or d.stage == "running" or d.stage == "answered"))
     all {
       m.on, not(m.due),
+      // IMPL2: the tick reads the clock once, after its flush; time passing
+      // during the rest of the tick is seen by the next tick
+      not(IMPL2) or tpc == "idle" or tpc == "settle",
+      not(stall) or under(stalls, MAX_STALL),
+      stalls' = if (stall) bump(stalls, MAX_STALL) else stalls,
       not(race) or under(races, MAX_RACE),
       not(ATOMIC_ANSWER and dels.exists(d => d.id == i and d.tok == m.tok and d.stage == "answered")),
       races' = if (race) bump(races, MAX_RACE) else races,
@@ -474,7 +524,7 @@ module queue {
     s.forall(i => msg.get(i).on and msg.get(i).due),
     msg' = IDS.mapBy(i => if (s.contains(i)) { ...msg.get(i), due: false } else msg.get(i)),
     gh' = maskAll(breakFor(gh, liveIds)),
-    clockbacks' = bump(clockbacks, MAX_CLOCKBACK), races' = races,
+    clockbacks' = bump(clockbacks, MAX_CLOCKBACK), races' = races, stalls' = stalls,
     dead' = dead, nextId' = nextId, inflight' = inflight, dels' = dels, keepTick, keepApp,
     crashes' = crashes, redeploys' = redeploys, revives' = revives, mmax' = mmax, bad' = bad,
   }
@@ -494,7 +544,7 @@ module queue {
     tpc' = "idle", tqi' = 0, tpol' = INIT_POL,
     oldRuns' = false, pol' = pol, prevPol' = prevPol,
     gh' = maskAll(IDS.mapBy(i => crashGhost(i))),
-    keepStore, redeploys' = redeploys, revives' = revives, clockbacks' = clockbacks, races' = races,
+    keepStore, redeploys' = redeploys, revives' = revives, clockbacks' = clockbacks, races' = races, stalls' = stalls,
     mmax' = mmax, bad' = bad,
   }
   // A new version. Deliveries keep the policy they were started under.
@@ -506,7 +556,7 @@ module queue {
     mmax' = if (TRACK.contains("mmax")) QS.mapBy(q => imax(mmax.get(q), p.m.get(q))) else mmax,
     gh' = maskAll(breakFor(gh, liveIds)),
     keepStore, inflight' = inflight, dels' = dels, keepTick,
-    crashes' = crashes, revives' = revives, clockbacks' = clockbacks, races' = races, bad' = bad,
+    crashes' = crashes, revives' = revives, clockbacks' = clockbacks, races' = races, stalls' = stalls, bad' = bad,
   }
   // The previous version's last run ends.
   action oldDrain = all {
@@ -544,17 +594,23 @@ module queue {
   action revive(i: int): bool = {
     val dl = dead.get(i)
     val g = gh.get(i)
-    val b10 = if (depth(dl.q) >= pol.d.get(dl.q)) Set("S10") else Set()
+    val declared = pol.decl.get(dl.q)
+    // S10 is about the current D; a queue the current version does not
+    // declare has none, and IMPL2's revive does not check it (recorded
+    // apart as S10undecl)
+    val b10 = if (declared and depth(dl.q) >= pol.d.get(dl.q)) Set("S10")
+              else if (not(declared) and depth(dl.q) >= pol.d.get(dl.q)) Set("S10undecl")
+              else Set()
     all {
       under(revives, MAX_REVIVE), dl.on,
-      not(FIX_S10) or depth(dl.q) < pol.d.get(dl.q),
+      not(FIX_S10) or depth(dl.q) < pol.d.get(dl.q) or (IMPL2 and not(declared)),
       revives' = bump(revives, MAX_REVIVE),
       msg' = msg.set(i, { on: true, q: dl.q, att: 0, due: true, tok: 0 }),
       dead' = dead.set(i, NODEAD),
       gh' = maskAll(gh.set(i, { ...G0, life: g.life + 1, acked: g.acked, used: g.used, broken: true })),
       bad' = bad.union(b10),
       nextId' = nextId, inflight' = inflight, dels' = dels, keepTick, keepApp,
-      crashes' = crashes, redeploys' = redeploys, clockbacks' = clockbacks, races' = races, mmax' = mmax,
+      crashes' = crashes, redeploys' = redeploys, clockbacks' = clockbacks, races' = races, stalls' = stalls, mmax' = mmax,
     }
   }
   // Admin: prune a dead letter.
@@ -608,8 +664,23 @@ module queue {
   val S8 = not(bad.contains("S8"))
   val S9 = not(bad.contains("S9"))
   val S10 = not(bad.contains("S10"))
+  // a revive into a queue the current version does not declare, past the
+  // D the model's version map gives it (IMPL2 allows it; see README)
+  val S10undecl = not(bad.contains("S10undecl"))
   val L3a = IDS.forall(i => not(gh.get(i).broken) implies gh.get(i).invAll <= 1)
   val NoOverflow = not(bad.contains("overflow"))
+
+  // Reachability sanity: each of these is expected to FAIL, showing the
+  // behaviour it names can happen in the configuration checked.
+  def neverWhy(w: str): bool = IDS.forall(i => not(dead.get(i).on and dead.get(i).why == w))
+  val NeverFail = neverWhy("fail")
+  val NeverOutlived = neverWhy("outlived")
+  val NeverLowered = neverWhy("lowered")
+  val NeverUndeclared = neverWhy("undeclared")
+  val NeverHeld = dels.forall(d => d.stage != "pending")
+  val NeverSecondAttempt = IDS.forall(i => msg.get(i).att < 2)
+  val NeverDone = IDS.forall(i => not(gh.get(i).legit))
+  val NeverStall = stalls == 0
 
   // ----------------------------------------------- fairness (E2-E5)
   // E3 and E5 are per delivery (message id and token); E4 and E7 per
@@ -661,4 +732,13 @@ module queue {
   temporal L2_live = (Fair and E1) implies L2
   temporal L3b_live = (Fair and E1) implies L3b
   temporal L3b_E7 = (Fair and E7 and E1) implies L3b
+
+  // The contract as fixed (D6): E1 is only "the app is enabled and
+  // loaded", which the model always is; a queue need not stay declared.
+  // L1 and L3b assume E7, L2 does not (E1-E6).
+  temporal L1_fixed = (Fair and E7) implies L1
+  temporal L1_fixed_noE7 = Fair implies L1
+  temporal L1_fixed_nofair = E7 implies L1
+  temporal L2_fixed = Fair implies L2
+  temporal L3b_fixed = (Fair and E7) implies L3b
 }

@@ -36,7 +36,7 @@ module configs {
     ENV_SEND_AFTER: true, ENV_OLD_SENDS: true, ENV_REFUSE: true, ENV_TIMEOUT: true,
     ENV_WRITE_FAIL: true, ENV_PRUNE: true, ENV_OUTCOMES: Set("ok", "fail", "none"),
     FIX_S5: false, FIX_S6: false, FIX_S7: false, FIX_S7_GUARD: false,
-    FIX_S10: false, FIX_L2: false, PRE_167: false, MAX_RACE: 1, ATOMIC_ANSWER: false,
+    FIX_S10: false, FIX_L2: false, PRE_167: false, MAX_RACE: 1, ATOMIC_ANSWER: false, IMPL2: false, MAX_STALL: 0,
     TRACK: ALLGHOSTS,
   }
   pure def allFixes(c: Cfg): Cfg = { ...c, FIX_S5: true, FIX_S6: true, FIX_S7: true,
@@ -157,4 +157,60 @@ module configs {
                           MAX_CRASH: 0, MAX_REDEPLOY: 0, ENV_WRITE_FAIL: false }
   pure val LIVE2_FIX_L2: Cfg = { ...LIVE2, FIX_L2: true }
   pure val LIVE2_FIXED: Cfg = allFixes(LIVE2)
+
+  // ------------------------------------- the code on fix/queue-contract
+  // Every fix flag as implemented, plus IMPL2's departures. Sends from a
+  // previous version no longer exist (N4: a send uses the current
+  // version), and the bury..lease race cannot happen (one clock reading per
+  // tick), so both are off. `st` is the number of host stalls allowed.
+  pure def impl2(c: Cfg, st: int): Cfg = { ...allFixes(c), IMPL2: true, MAX_STALL: st,
+                                           ENV_OLD_SENDS: false, MAX_RACE: 0 }
+  // the same bounds as the first round
+  pure val I2_S5: Cfg = impl2(S5_IMPL, 0)
+  pure val I2_S5_STALL: Cfg = impl2(S5_IMPL, 1)
+  pure val I2_SAFE: Cfg = impl2(SAFE_IMPL, 0)
+  pure val I2_SAFE_STALL: Cfg = impl2(SAFE_IMPL, 1)
+  pure val I2_S3: Cfg = impl2(S3_IMPL, 0)
+  pure val I2_S3_STALL: Cfg = impl2(S3_IMPL, 1)
+  pure val I2_S6: Cfg = impl2(S6_IMPL, 0)
+  pure val I2_S6_STALL: Cfg = impl2(S6_IMPL, 1)
+  pure val I2_S7: Cfg = impl2(S7_IMPL, 0)
+  pure val I2_S7_STALL: Cfg = impl2(S7_IMPL, 1)
+  pure val I2_S9: Cfg = impl2(S9_IMPL, 0)
+  pure val I2_S9_STALL: Cfg = impl2(S9_IMPL, 1)
+  pure val I2_S10: Cfg = impl2({ ...ONE, NID: 2, TRACK: NOGHOST }, 0)
+  pure val I2_S10_STALL: Cfg = impl2({ ...ONE, NID: 2, TRACK: NOGHOST }, 1)
+  pure val I2_L3A: Cfg = impl2(L3A_IMPL, 0)
+  pure val I2_L3A_STALL: Cfg = impl2(L3A_IMPL, 1)
+  pure val I2_LIVE: Cfg = impl2(LIVE, 0)
+  pure val I2_LIVE_STALL: Cfg = impl2(LIVE, 1)
+  pure val I2_LIVE_NOCRASH: Cfg = { ...I2_LIVE, MAX_CRASH: 0 }
+  pure val I2_LIVE_L3B: Cfg = impl2(LIVE_L3B, 0)
+  pure val I2_LIVE_L3B_STALL: Cfg = impl2(LIVE_L3B, 1)
+  pure val I2_LIVE_L3B_NOCRASH: Cfg = { ...I2_LIVE_L3B, MAX_CRASH: 0 }
+  pure val I2_LIVE_L3B_NOCRASH_STALL: Cfg = { ...I2_LIVE_L3B_STALL, MAX_CRASH: 0 }
+  pure val I2_LIVE2: Cfg = impl2(LIVE2, 0)
+  pure val I2_LIVE2_STALL: Cfg = impl2(LIVE2, 1)
+  // Larger than the first round could finish: two message ids with every
+  // fault (B1 with NID 2).
+  pure val I2_SAFE_2ID: Cfg = { ...I2_SAFE, NID: 2 }
+  pure val I2_S6_2ID: Cfg = { ...I2_S6, NID: 2 }
+  pure val I2_S7_2ID: Cfg = { ...I2_S7, NID: 2 }
+  pure val I2_L3A_2ID: Cfg = { ...I2_L3A, NID: 2 }
+  pure val I2_S5_2ID: Cfg = { ...I2_S5, NID: 2 }
+  // S10 with a stall on B10 did not finish (66.5 M states at 33 min, and
+  // the disk was filling); on B2 (two ids, crash, redeploy, revive, prune)
+  // Liveness with every fault at most once (the first round's L left out
+  // revive, clock set back and sendAfter: 6.8 M states at 20 minutes).
+  pure val I2_LIVE_FULL: Cfg = { ...I2_LIVE, MAX_REVIVE: 1, MAX_CLOCKBACK: 1, ENV_SEND_AFTER: true }
+  pure val I2_LIVE_FULL_L3B_KEEP_NOCRASH: Cfg =
+    { ...I2_LIVE_FULL, TRACK: Set("invAll"), REDEPLOY_POLS: POLS1_KEEP, MAX_CRASH: 0 }
+  pure val I2_S10_B2: Cfg = impl2({ ...TWO, TRACK: NOGHOST }, 0)
+  pure val I2_S10_B2_STALL: Cfg = impl2({ ...TWO, TRACK: NOGHOST }, 1)
+  // L3b when no redeploy removes the queue (D6 buries a removed queue's
+  // messages, never invoked).
+  pure val POLS1_KEEP: Set[Pol] = POLS1.filter(p => p.decl.get(0))
+  pure val I2_LIVE_L3B_KEEP: Cfg = { ...I2_LIVE_L3B, REDEPLOY_POLS: POLS1_KEEP }
+  pure val I2_LIVE_L3B_KEEP_NOCRASH: Cfg = { ...I2_LIVE_L3B_KEEP, MAX_CRASH: 0 }
+  pure val I2_LIVE_L3B_KEEP_NOCRASH_STALL: Cfg = { ...I2_LIVE_L3B_KEEP_NOCRASH, MAX_STALL: 1 }
 }

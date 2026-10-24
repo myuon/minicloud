@@ -22,4 +22,10 @@ expect fails "model: L1 without fairness" \
   tools/check.sh sanity_l1_nofair LIVE --tlc-config=tlc-all.json --invariant=NoOverflow --temporal=L1_nofair
 expect holds "model: L1 with fairness" \
   tools/check.sh sanity_l1_fair LIVE --tlc-config=tlc-all.json --invariant=NoOverflow --temporal=L1_live
+expect fails "model, fixed code: L1 without fairness" \
+  tools/check.sh sanity_i2_l1_nofair I2_LIVE --tlc-config=tlc-all.json --invariant=NoOverflow --temporal=L1_fixed_nofair
+expect fails "model, fixed code: L1 without E7" \
+  tools/check.sh sanity_i2_l1_noE7 I2_LIVE --tlc-config=tlc-all.json --invariant=NoOverflow --temporal=L1_fixed_noE7
+expect holds "model, fixed code: L1 with E2-E5 and E7" \
+  tools/check.sh sanity_i2_l1 I2_LIVE --tlc-config=tlc-all.json --invariant=NoOverflow --temporal=L1_fixed
 exit $fail

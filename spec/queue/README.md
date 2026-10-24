@@ -16,7 +16,9 @@ with TLC against the contract in [`docs/queue-properties.md`](../../docs/queue-p
 - `tools/safety.sh`, `tools/liveness.sh` — every check of the table, in
   turn (`tools/safety.sh 's7_'` runs only the matching ones);
   `tools/show.sh <name>...` prints verdicts and traces.
-- `sanity/toy.qnt` — the backend's sanity checks.
+- `tools/impl2.sh` — round 2: every check on the fixed code (`IMPL2`);
+  `tools/reach.sh` — its reachability sanity; `tools/sanity.sh` — the
+  backend sanity checks.- `sanity/toy.qnt` — the backend's sanity checks.
 
 ## Running
 
@@ -28,6 +30,8 @@ npm run sanity       # the backend's sanity checks
 npm run s5           # S5's checks; npm run <property> for the others
 npm run safety       # all safety checks (hours)
 npm run liveness     # all liveness checks (about an hour)
+npm run impl2        # round 2: every check on the fixed code (about two hours)
+npm run reach        # round 2: reachability sanity
 ```
 
 Java 21 is needed. TLC is the one inside the Apalache 0.62.1 jar Quint
@@ -51,6 +55,140 @@ those bounds did not cut the search. A check that does not end within
 
 All results below are TLC on the model; none is from Apalache or `quint
 run`.
+
+## Round 2: the code on `fix/queue-contract`
+
+The fixes of `git log origin/qa/queue-properties..origin/fix/queue-contract`
+are modelled by setting every `FIX_*` flag and `IMPL2` (configs:
+`impl2(c, stalls)` in `configs.qnt`; checks: `tools/impl2.sh`, log in
+`out/impl2.log`). Where the implementation differs from the fix proposed
+in round 1, the model follows the implementation:
+
+| implemented (commit) | in the model |
+|---|---|
+| `lease` takes M, leases only `attempts < M` (`818e6fc`) | `FIX_S5` |
+| `bury_spent` buries due `attempts >= M` whatever its lease; reason by whether a lease is held (`818e6fc`) | `FIX_S5` ("outlived" / "lowered") |
+| one clock reading per tick (`818e6fc`, N2) | `IMPL2`: no time passes from the tick's reading (after its flush) to its end; time that passes meanwhile is seen by the next tick. Sound: only the tick reads `due` |
+| "current M" is the tick's version (D4) | as in round 1 (`S5`, not `S5strict`) |
+| settles name a token (`1e0d0fd`, N1) | settles were already by token |
+| replies carry an origin; never-started → give back; host reply after start → no answer (`b505fac`) | `FIX_S6`; outcome "none" |
+| failed settles held in memory, flushed first at the next tick; `bury_spent`, `bury_undeclared` and **`lease`** skip a message whose current lease has a held settle; a crash loses them (`2d99362`) | `FIX_S7` + `FIX_S7_GUARD`; with `IMPL2` the guard is the *held* settle only (not the window between the run's reply and the lock), and `lease` skips held messages too |
+| `revive` refuses at the current D (`15bbd3b`) | `FIX_S10`; with `IMPL2` **not for a queue the current version does not declare**, which the code lets through |
+| in flight per queue (`db61025`) | `FIX_L2` |
+| `send`/`sendAfter`/`depth` use the current version; undeclared → `Err` (`2537946`, N4) | no sends from a previous version (`ENV_OLD_SENDS` off) |
+| D1: `lease ≥ deadline + 1 s` (`70c2dea`) | `IMPL2`: a lease runs out while the delivery holding it is alive (leased, queued, running, or answered and not yet holding its settle) **only as a host stall**, a bounded fault (`MAX_STALL`). A held settle's lease and a crashed delivery's lease run out freely |
+| due times in ms (`09e0122`, F4) | out of the model's scope, as before |
+| D3: `synchronous = FULL` (`eb238f8`, F8) | power loss not modelled, as before |
+| D6: messages of a queue the tick's version does not declare are buried at the tick, unless their lease still runs or their settle is held (`e7b4d6a`) | `IMPL2`: `tickUndecl`, after the flush, before the first queue; reason "undeclared". E1 no longer asks for the queue to be declared (`L1_fixed`, `L2_fixed`, `L3b_fixed`) |
+| shutdown writes nothing (`815f400`, N6) | a crash, as before (the queue cannot tell them apart) |
+| E7 in the contract | `E7` in `L1_fixed` and `L3b_fixed` |
+
+The bury..lease race (`MAX_RACE`) and sends from a previous version cannot
+happen in the code any more and are off. Bounds are the first round's
+(B1, B2, B2q, B10, L, L2q), each run with no host stall and with at most
+one. Searches may take 60 minutes. Nothing was shrunk to make a search
+finish: every search of round 1 that did not finish now finishes at the
+same bounds, because the fixed code has far fewer reachable states (no
+lease runs out under a live delivery without a stall, one clock reading
+per tick). No symmetry or step merging was added.
+
+**Sanity for round 2.** `tools/reach.sh`: each "never" invariant
+(`NeverFail`, `NeverOutlived`, `NeverLowered`, `NeverUndeclared`,
+`NeverHeld`, `NeverSecondAttempt`, `NeverDone`, `NeverStall`) fails on
+`I2_SAFE_STALL`, so every kind of burial, a held settle, a second attempt,
+a `done` and a stall are reachable and the passes below are not vacuous.
+The fairness constructs are the round-1 ones (`weakFair`, `strongFair`);
+`i2_l1_nofair` fails (stutters) where `i2_l1` holds, and `i2_l1_noE7`
+fails where `i2_l1` holds, so E7 changes the verdict as well.
+
+### Results on the implementation
+
+"Excl.?" says whether a counterexample falls within the contract's stated
+exclusions (crash/shutdown, host stall, power loss) or is a gap.
+
+| prop. | assumptions | bounds | complete? | result | cex length | excl.? |
+|---|---|---|---|---|---|---|
+| S1, S2, S4, S8 | crash only (no power loss) | B1 | yes: 34,412 states, 10 s | holds | — | — |
+| ″ | + host stall | B1 | yes: 550,870, 21 s | holds | — | — |
+| ″ | | B1, 2 ids | yes: 3,150,898, 80 s | holds | — | — |
+| S3 | | B2 | yes: 85,283 / with stall 863,788 | holds | — | — |
+| S5 | M of the tick's version (D4) | B1 | yes: 34,330 / with stall 579,960; 2 ids 3,052,952 | holds | — | — |
+| S6 (1)(2)(3) | | B1 | yes: 48,738; 2 ids 10,138,314 (289 s) | holds | — | — |
+| ″ | + host stall | B1 | yes (cex) | (3) **violated** | 11 | **yes**: host stall (N5) |
+| S7 | an answer lost in a crash is none | B1 | yes: 47,452; 2 ids 6,032,105 (148 s) | holds | — | — |
+| ″ | + host stall | B1 | yes (cex) | **violated** ("outlived" though the app answered) | 11 | **yes**: host stall (N3 residual) |
+| S9 | one app | B2q | yes: 1,151,209 / with stall 11,776,826 (227 s) | holds | — | — |
+| S10 | declared queues | B10 | yes: 3,052,952, 68 s | holds | — | — |
+| ″ | + host stall | B10 | **no**: 66.5 M states at 33 min, stopped (disk nearly full) | nothing found | — | — |
+| ″ | ± host stall | B2 | yes: 85,283 / 863,788 | holds | — | — |
+| S10, undeclared queue | `revive` into a queue the current version does not declare | B10 | yes (cex) | the queue grows past the D its old declaration had | 9 | **departure**: the code allows it; the contract has no D for an undeclared queue (and D6 buries it again at the next tick) |
+| L3a | | B1 | yes: 49,162 / with stall 825,617; 2 ids 7,041,618 (184 s) | holds | — | — |
+| L1 | E1 (app enabled), E2–E5, E7, E6 as bounds | L | yes: 8,835 states, 57 s | holds | — | — |
+| ″ | + host stall | L | yes: 72,140, 1007 s | holds | — | — |
+| ″ | | L2q | yes: 2,038 / with stall 1,171 s | holds | — | — |
+| ″ | every fault once (+ revive, clock back, sendAfter) | L | yes: 35,226 states, 249 s | holds | — | — |
+| ″ | without E7 | L | yes (cex) | **violated**: 503 → give back → lease → 503 for ever | lasso | outside the assumptions (E7) |
+| ″ | without fairness | L | yes (cex) | **violated** (stutter) | lasso | sanity |
+| L2 | E1–E6 | L; L2q | yes: L ± stall (236 s), L2q ± stall (122 s) | holds | — | — |
+| ″ | every fault once | L | yes: 35,226, 69 s | holds | — | — |
+| L3b | E1–E7; redeploys that keep the queue; no crash | L | yes: 2,189 | holds | — | — |
+| ″ | + host stall | L | yes (cex) | **violated**: lease runs out while the last attempt's run waits in the scheduler | lasso | **yes**: host stall |
+| ″ | + a crash | L | yes (cex) | **violated**: crash after `lease` of the last attempt, before the start | lasso | **yes**: the contract's crash exclusion |
+| ″ | + a redeploy that removes the queue, no crash | L | yes (cex) | **violated**: D6 buries the message "undeclared", never invoked | lasso | **gap in the statement**: L3b's exclusions do not name it (see below) |
+| ″ | every fault once, keep, no crash | L | yes: 8,693, 16 s | holds | — | — |
+
+Traces (all one-worker BFS, shortest; `tools/show.sh <name>`):
+
+- **S6.3 with a stall** (`i2_s6_stall_bfs1`, 11 steps): lease (attempts 1),
+  admit; the scheduler answers 503 (the run never started); **the host
+  stalls** and the lease runs out before the delivery takes the lock;
+  the next tick leases the message again (attempts 2); the 503's
+  `give_back` names the old token and matches nothing. Attempts 2,
+  invocations 0, no crash: N5, closed by D1 only without a stall.
+- **S7 with a stall** (`i2_s7_stall_bfs1`, 11 steps): M lowered to 1;
+  lease, admit, the app starts and answers 2xx; **the host stalls** before
+  the delivery takes the lock, the lease runs out, the tick's `bury_spent`
+  buries it "no answer within the lease". This is the N3 window the
+  contract leaves open; it needs the stall.
+- **S10, undeclared** (`i2_s10u_bfs1`, 9 steps): message 1 leased and
+  admitted, message 2 sent (depth 2 under D = 2); a redeploy removes the
+  queue (its last D was 1 in the version map); the tick buries message 2
+  "undeclared" (message 1's lease still runs, so it stays); the admin
+  revives message 2: the queue holds 2. The code lets a revive into an
+  undeclared queue through; the next tick buries it again.
+- **L3b, queue removed** (`i2_l3b_nocrash`): send; a redeploy removes the
+  queue; the tick buries the message "undeclared"; it is never invoked.
+  L3b's statement (E1–E7, no crash or shutdown on the last attempt
+  before the start) does not exclude it now that E1 no longer asks for
+  the queue to stay declared. A **gap in the contract's statement**, not
+  in the code: L3b needs "the queue stays declared" (or a revive after
+  it is declared again).
+
+### The known residuals
+
+- **N3 is closed except under a host stall: confirmed.** S7 holds on B1
+  and on two ids without a stall; the only S7 counterexample with a stall
+  is N3's window (11 steps).
+- **L3b is not promised when a crash spends the last attempt before the
+  run starts: confirmed** — that is the crash counterexample. Without a
+  crash (and with the queue kept) L3b holds; with a stall it fails the
+  same way as a crash would (lease runs out before the start), which the
+  coordinator lists as an exclusion; the contract's L3b text names only
+  crash and shutdown and should name the stall too.
+
+### Bounded or unfinished in round 2
+
+- S10 with a host stall on B10 (two ids, every fault): stopped at 66.5 M
+  states after 33 minutes because the disk was nearly full; nothing found.
+  The same property with a stall on B2 is complete and holds.
+- Everything else in the table is complete at its bounds. The bounds
+  themselves (one or two message ids, one or two queues, M ≤ 2, each fault
+  at most once) are the limit of what is checked; the larger behaviours
+  are not covered.
+
+# Round 1: the code at `e39f40e`
+
+Everything below is the first round, kept as it was found.
 
 ## Backend sanity checks
 

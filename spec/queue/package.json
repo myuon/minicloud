@@ -16,6 +16,8 @@
     "sanity:live-fair": "quint verify --backend=tlc --temporal=reach3Fair sanity/toy.qnt",
     "sanity:live-false": "quint verify --backend=tlc --temporal=reach4Fair sanity/toy.qnt",
 
+    "impl2": "tools/impl2.sh",
+    "reach": "tools/reach.sh",
     "safety": "tools/safety.sh",
     "liveness": "tools/liveness.sh",
 
