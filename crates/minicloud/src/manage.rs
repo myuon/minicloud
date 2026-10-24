@@ -927,6 +927,7 @@ impl Front {
         let lineage = Lineage {
             counters: Arc::clone(&slot.counters),
             logs: Arc::clone(&slot.logs),
+            queues: Arc::clone(&slot.current_queues),
             number: slot.next_version(),
         };
         let load = self.load.clone();
@@ -1166,6 +1167,7 @@ impl Front {
         let lineage = Lineage {
             counters: Arc::clone(&slot.counters),
             logs: Arc::clone(&slot.logs),
+            queues: Arc::clone(&slot.current_queues),
             number: slot.next_version(),
         };
         let dir = self.options.apps.join(name);

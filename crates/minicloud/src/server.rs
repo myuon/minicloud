@@ -1458,6 +1458,7 @@ impl Front {
             Some(slot) => Lineage {
                 counters: Arc::clone(&slot.counters),
                 logs: Arc::clone(&slot.logs),
+                queues: Arc::clone(&slot.current_queues),
                 number: slot.next_version(),
             },
             None => Lineage::first(),

@@ -138,6 +138,7 @@ impl HostModule for QueueModule {
         Ok(Box::new(QueueHost {
             store,
             queues: app.queues.clone(),
+            current: Arc::clone(&app.current_queues),
             counters: Arc::clone(&app.counters),
         }))
     }
@@ -145,7 +146,10 @@ impl HostModule for QueueModule {
 
 struct QueueHost {
     store: Option<Arc<Mutex<Queues>>>,
+    /// This version's `[[queues]]`, for an app no host has installed.
     queues: Vec<QueuePolicy>,
+    /// The current version's, which a send is held to once there is one.
+    current: Arc<crate::apps::CurrentQueues>,
     counters: Arc<crate::stats::AppCounters>,
 }
 
@@ -159,14 +163,18 @@ impl HostApi for QueueHost {
         let Some(store) = &self.store else {
             return Err(RuntimeError::new("queue: this app has no queue store"));
         };
-        let Some(policy) = self.queues.iter().find(|queue| queue.name == name) else {
+        // The current version's word, not this run's version's: a run that
+        // outlived a redeploy sends to the queues the new version delivers,
+        // under the bounds it sets.
+        let current = self.current.get();
+        let queues = current.as_deref().unwrap_or(&self.queues);
+        let Some(policy) = queues.iter().find(|queue| queue.name == name) else {
             return Ok(Value::err(Value::error(format!(
                 "queue.{op}: this app declares no queue `{}`; the ones it declares are {}",
                 name.chars().take(64).collect::<String>(),
-                match self.queues.is_empty() {
+                match queues.is_empty() {
                     true => "none".to_string(),
-                    false => self
-                        .queues
+                    false => queues
                         .iter()
                         .map(|queue| format!("`{}`", queue.name))
                         .collect::<Vec<_>>()
@@ -727,6 +735,76 @@ fn outlived(logs: &LogRing, queue: &str, id: i64) {
              another delivery holds it now"
         ),
     );
+}
+
+#[cfg(test)]
+mod sends {
+    use super::*;
+
+    /// A `queue` module for a run of a version that declared `mine`, after
+    /// a redeploy whose version declares `current`.
+    fn host_of(mine: &str, current: &str) -> (QueueHost, Arc<Mutex<Queues>>) {
+        let store = Arc::new(Mutex::new(Queues::in_memory().unwrap()));
+        let now = Arc::new(crate::apps::CurrentQueues::default());
+        now.set(&harness::policies(current));
+        let host = QueueHost {
+            store: Some(Arc::clone(&store)),
+            queues: harness::policies(mine),
+            current: now,
+            counters: Arc::default(),
+        };
+        (host, store)
+    }
+
+    fn send(host: &QueueHost, queue: &str) -> Value {
+        host.call("send", vec![Value::string(queue), Value::string("x")])
+            .unwrap()
+    }
+
+    /// N4: a run of the version a redeploy replaced sends under the current
+    /// version's `max_depth`, not its own.
+    #[test]
+    fn a_run_of_an_old_version_sends_under_the_current_max_depth() {
+        let (host, store) = host_of(
+            "[[queues]]\nname = \"mail\"\nmax_depth = 5\n",
+            "[[queues]]\nname = \"mail\"\nmax_depth = 1\n",
+        );
+        assert!(send(&host, "mail").is_ok());
+        let refused = send(&host, "mail");
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(
+            format!("{refused:?}").contains("max_depth of 1"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            store.lock().unwrap().depths().unwrap(),
+            vec![("mail".to_string(), 1, 0)]
+        );
+    }
+
+    /// N4: a run of the version a redeploy replaced cannot send to a queue
+    /// the current version no longer declares, where nothing would deliver
+    /// it; and it can send to one the current version added.
+    #[test]
+    fn a_run_of_an_old_version_sends_only_to_queues_the_current_version_declares() {
+        let (host, store) = host_of(
+            "[[queues]]\nname = \"old\"\n",
+            "[[queues]]\nname = \"new\"\n",
+        );
+        let refused = send(&host, "old");
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(
+            format!("{refused:?}").contains("declares no queue `old`"),
+            "{refused:?}"
+        );
+        assert!(send(&host, "new").is_ok());
+        assert_eq!(
+            store.lock().unwrap().depths().unwrap(),
+            vec![("new".to_string(), 1, 0)]
+        );
+        let depth = host.call("depth", vec![Value::string("old")]).unwrap();
+        assert!(depth.is_err(), "{depth:?}");
+    }
 }
 
 #[cfg(test)]

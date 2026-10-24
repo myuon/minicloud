@@ -380,6 +380,7 @@ pub struct Slot {
     history: Mutex<Vec<VersionRecord>>,
     pub counters: Arc<AppCounters>,
     pub logs: Arc<LogRing>,
+    pub current_queues: Arc<crate::apps::CurrentQueues>,
     /// The number the next version of this app is given.
     next_version: AtomicU64,
     /// Whether new requests are routed to the app. A disabled app keeps its
@@ -568,6 +569,7 @@ impl Engine {
                     history: Mutex::new(Vec::new()),
                     counters: Arc::clone(&app.counters),
                     logs: Arc::clone(&app.logs),
+                    current_queues: Arc::clone(&app.current_queues),
                     next_version: AtomicU64::new(1),
                     enabled: AtomicBool::new(true),
                 });
@@ -579,6 +581,9 @@ impl Engine {
         slot.next_version
             .fetch_max(app.number + 1, Ordering::Relaxed);
         self.queue.set_limits(slot.index, &app.limits);
+        // From here a run of any version of the app sends under this
+        // version's `[[queues]]`, as the delivery loop delivers them.
+        slot.current_queues.set(&app.queues);
         slot.history.lock().unwrap().push(record);
         let previous = slot
             .current

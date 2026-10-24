@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use cove_diag::{render, Diagnostic, Severity, SourceMap};
@@ -150,6 +150,9 @@ pub struct App {
     pub counters: Arc<AppCounters>,
     /// The app's recent log lines: its `log.*` and the host's lines about it.
     pub logs: Arc<LogRing>,
+    /// The queues the app's current version declares, which every version
+    /// of the app shares ([`CurrentQueues`]).
+    pub current_queues: Arc<CurrentQueues>,
     pub state: AppState,
 }
 
@@ -243,6 +246,7 @@ impl App {
             defer: self.defer.clone(),
             defer_to: defer_to.cloned(),
             queues: self.queues.clone(),
+            current_queues: Arc::clone(&self.current_queues),
             max_response_bytes: self.limits.max_response_bytes,
             fetch: self.fetch.clone(),
             secrets: self.secrets.clone(),
@@ -354,12 +358,40 @@ pub fn describe(name: &str, dir: &Path, source: &SecretSource) -> (App, Option<A
     )
 }
 
+/// The `[[queues]]` of an app's current version, in one cell that every
+/// version of the app shares.
+///
+/// A run keeps the version it was admitted to, policy and all, and a run of
+/// the version a redeploy replaced may still be running. What it sends
+/// lands on the queue the current version delivers, so it is held to the
+/// current version's word: its `max_depth`, and whether the queue is
+/// declared at all. Its own version's would let it fill a queue past the
+/// bound the new version set, or put messages on a queue nobody delivers.
+/// [`crate::sched::Engine::install`] sets it when a version becomes the one
+/// new requests go to; empty until then, for an app that never runs in a
+/// host (`minicloud test`), and the caller falls back on its own version.
+#[derive(Default)]
+pub struct CurrentQueues(RwLock<Option<Arc<Vec<QueuePolicy>>>>);
+
+impl CurrentQueues {
+    /// The current version's queues, once a version has been installed.
+    pub fn get(&self) -> Option<Arc<Vec<QueuePolicy>>> {
+        self.0.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Says that `queues` are the current version's.
+    pub fn set(&self, queues: &[QueuePolicy]) {
+        *self.0.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(queues.to_vec()));
+    }
+}
+
 /// What a version of an app inherits from the versions before it: its
-/// counters and its log, which belong to the app rather than a version, and
-/// its number.
+/// counters, its log and its current queues, which belong to the app
+/// rather than a version, and its number.
 pub struct Lineage {
     pub counters: Arc<AppCounters>,
     pub logs: Arc<LogRing>,
+    pub queues: Arc<CurrentQueues>,
     pub number: u64,
 }
 
@@ -369,6 +401,7 @@ impl Lineage {
         Lineage {
             counters: Arc::new(AppCounters::default()),
             logs: Arc::new(LogRing::default()),
+            queues: Arc::default(),
             number: 1,
         }
     }
@@ -410,6 +443,7 @@ pub fn describe_as(
         overridden: over.filter(|over| over.changes_config()).cloned(),
         counters: lineage.counters,
         logs: lineage.logs,
+        current_queues: lineage.queues,
         state: AppState::Refused(String::new()),
     };
     if let Err(why) = valid_name(name) {
