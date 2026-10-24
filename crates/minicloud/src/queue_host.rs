@@ -626,3 +626,9 @@ fn outlived(logs: &LogRing, queue: &str, id: i64) {
         ),
     );
 }
+
+#[cfg(test)]
+mod harness;
+
+#[cfg(test)]
+mod properties;

@@ -263,3 +263,87 @@ fn a_queue_that_cannot_be_read_refuses_that_app_alone() {
         assert_eq!(get(host.addr, "/hello/").status, 200, "{bad}");
     }
 }
+
+/// F2 end to end (`docs/queue-properties.md`, S6 and S7): a delivery whose
+/// run waits for a worker past its deadline is answered 503 by the
+/// scheduler and never started. The host can see that, so the attempt is
+/// given back and a message on its last attempt is not buried.
+///
+/// One worker, no time slice, and four other apps (`crunch`, some 16 ms of
+/// CPU a run natively) each with two requests always waiting: the
+/// delivery, due a second or two after the send, waits its round-robin
+/// turn behind runs of the others for longer than `post`'s 20 ms
+/// deadline. The send itself is made before the load starts.
+#[test]
+#[ignore = "F2: the scheduler's QueueTimeout 503 is taken for the app's 5xx, so the last attempt buries a message the app never saw"]
+fn a_delivery_that_timed_out_waiting_for_a_worker_is_given_back() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let config = "grant = [\"queue\", \"kv\", \"log\", \"timer\"]\n\
+                  [limits]\ndeadline = \"20ms\"\n\n\
+                  [[queues]]\nname = \"mail\"\nmax_attempts = 1\nretry = \"3600s\"\n";
+    let apps = apps(&[
+        AppSpec {
+            name: "post",
+            from: fixtures().join("post"),
+            config: Some(config),
+        },
+        sample("crunch"),
+        AppSpec {
+            name: "crunch2",
+            ..sample("crunch")
+        },
+        AppSpec {
+            name: "crunch3",
+            ..sample("crunch")
+        },
+        AppSpec {
+            name: "crunch4",
+            ..sample("crunch")
+        },
+    ]);
+    let mut options = options(&apps, 1);
+    options.slice = None;
+    let host = minicloud::Host::start(options).expect("the host starts");
+    let addr = host.addr;
+    // Whether the delivery's turn comes after the 20 ms is up depends on
+    // where the round robin stands when it is admitted, so a trial whose
+    // delivery got a worker in time (and was taken) is made again.
+    let mut trials = 0;
+    while count(&host, "post", "errors.queue_timeout") == 0 {
+        trials += 1;
+        assert!(trials <= 20, "no delivery waited past its deadline");
+        let delivered = count(&host, "post", "queue_delivered");
+        assert_eq!(get(addr, "/post/send-after?body=never&secs=2").status, 202);
+        let stop = Arc::new(AtomicBool::new(false));
+        let load: Vec<_> = ["crunch", "crunch2", "crunch3", "crunch4"]
+            .iter()
+            .flat_map(|app| [app, app])
+            .map(|app| {
+                let stop = Arc::clone(&stop);
+                let path = format!("/{app}/?n=200000");
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        get(addr, &path);
+                    }
+                })
+            })
+            .collect();
+        wait_until("the delivery to time out or be taken", || {
+            count(&host, "post", "errors.queue_timeout") >= 1
+                || count(&host, "post", "queue_delivered") > delivered
+        });
+        stop.store(true, Ordering::Relaxed);
+        for load in load {
+            load.join().unwrap();
+        }
+    }
+    let logs = get(addr, "/_host/apps/post/logs?n=50").body;
+    assert_eq!(count(&host, "post", "queue_buried"), 0, "{logs}");
+    assert_eq!(
+        get(addr, "/post/depth").body.trim(),
+        "1",
+        "given back: {logs}"
+    );
+}
