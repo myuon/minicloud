@@ -27,6 +27,31 @@
 //! Only [`Queues::done`] or [`Queues::bury`] ends a message's life on the
 //! queue.
 //!
+//! **Only the delivery holding the current lease settles a message.** A run
+//! may take longer than its lease: nothing holds a queue's `lease` to the
+//! app's deadline, and a run that is still going when the lease runs out is,
+//! as far as `lease` can tell, a delivery that was lost. The message is
+//! handed out again, and two deliveries now have it. If the first one could
+//! still settle it by id, it would settle the second's: its `done` would
+//! delete a message somebody else is working on, its `retry` would move the
+//! due time of the second's lease (and so let a third delivery take it), and
+//! its `bury` would make a dead letter of a message that is being taken. So
+//! every lease writes a fresh `lease_id` beside the message, the delivery
+//! carries it ([`Message::lease_id`]), and [`Queues::done`],
+//! [`Queues::retry`] and [`Queues::bury`] act only where it still matches,
+//! answering whether it did. A delivery that outlived its lease changes
+//! nothing; the one that holds the lease now settles the message as if the
+//! first had never been. `attempts` cannot be the token: [`Queues::revive`]
+//! counts it afresh from 0, so a number from before the revive could come
+//! round again.
+//!
+//! A lease id comes from a counter in the process, started at the clock's
+//! nanoseconds when it is first used (`next_lease_id`): unique within the
+//! process, and in practice across restarts, since a restart begins
+//! further on than the last process could have counted. A message that has
+//! never been leased, or has been revived, has none, and only a settle
+//! that says so (`None`) matches it.
+//!
 //! # Retention
 //!
 //! This layer never discards a dead letter by itself: how long they are kept
@@ -63,7 +88,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -88,6 +115,10 @@ pub struct Message {
     pub due_unix: i64,
     /// When it was first put on the queue.
     pub sent_unix: i64,
+    /// The lease this copy of the message was handed out under, which
+    /// settling it has to name; `None` for a message read rather than
+    /// leased, or one no delivery has taken.
+    pub lease_id: Option<i64>,
 }
 
 /// Why a message left the queue for good.
@@ -122,7 +153,27 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         attempts: row.get(3)?,
         due_unix: row.get(4)?,
         sent_unix: row.get(5)?,
+        lease_id: None,
     })
+}
+
+/// A lease id no lease of this process has had.
+///
+/// The counter starts at the clock's nanoseconds since the epoch the first
+/// time it is asked and goes up by one a lease, so a process that starts
+/// after another has stopped begins past every id the last one handed out:
+/// the clock gains a billion a second, and no process leases that fast. Only
+/// a clock set back could bring an old id round again, and then only one
+/// whose message is still on the queue with that very lease would matter.
+fn next_lease_id() -> i64 {
+    static NEXT: OnceLock<AtomicI64> = OnceLock::new();
+    NEXT.get_or_init(|| {
+        let since = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        AtomicI64::new(i64::try_from(since).unwrap_or(i64::MAX / 2))
+    })
+    .fetch_add(1, Ordering::Relaxed)
 }
 
 impl Queues {
@@ -172,6 +223,18 @@ impl Queues {
             CREATE INDEX IF NOT EXISTS dead_buried ON dead (buried);",
         )
         .map_err(fail)?;
+        // `lease_id` came after the table did, and `CREATE TABLE IF NOT
+        // EXISTS` leaves a store made before it as it was. Its messages
+        // have no lease id, which is right: the deliveries that leased them
+        // were the last process's, and they are gone.
+        let has_lease_id = conn
+            .prepare("SELECT 1 FROM pragma_table_info('message') WHERE name = 'lease_id'")
+            .and_then(|mut found| found.exists([]))
+            .map_err(fail)?;
+        if !has_lease_id {
+            conn.execute_batch("ALTER TABLE message ADD COLUMN lease_id INTEGER")
+                .map_err(fail)?;
+        }
         Ok(Queues { conn })
     }
 
@@ -241,6 +304,10 @@ impl Queues {
     ///
     /// `limit` is held to 1 through [`MAX_LEASE`]. The choosing and the
     /// marking are one transaction: no message is missed or handed out twice.
+    ///
+    /// Each message taken is given a lease id of its own, which replaces
+    /// whatever lease it had: the delivery that held that one, if it is
+    /// still running, can no longer settle it.
     pub fn lease(
         &self,
         now_unix: i64,
@@ -265,50 +332,90 @@ impl Queues {
         {
             let mut mark = tx
                 .prepare_cached(
-                    "UPDATE message SET attempts = attempts + 1, due = ?2 WHERE id = ?1",
+                    "UPDATE message SET attempts = attempts + 1, due = ?2, lease_id = ?3 \
+                     WHERE id = ?1",
                 )
                 .map_err(fail)?;
             for message in &mut taken {
-                mark.execute(params![message.id, until]).map_err(fail)?;
+                let lease_id = next_lease_id();
+                mark.execute(params![message.id, until, lease_id])
+                    .map_err(fail)?;
                 message.attempts += 1;
                 message.due_unix = until;
+                message.lease_id = Some(lease_id);
             }
         }
         tx.commit().map_err(fail)?;
         Ok(taken)
     }
 
-    /// Takes the message off the queue for good.
-    pub fn done(&self, id: i64) -> Result<(), String> {
-        self.conn
-            .execute("DELETE FROM message WHERE id = ?1", [id])
-            .map_err(fail)?;
-        Ok(())
-    }
-
-    /// Puts it back, due `delay_secs` from `now_unix`, for another try.
-    pub fn retry(&self, id: i64, now_unix: i64, delay_secs: i64) -> Result<(), String> {
-        self.conn
+    /// Takes the message off the queue for good, if `lease_id` is still
+    /// its lease; answers whether it was.
+    ///
+    /// `lease_id` is the one [`Queues::lease`] handed out with the message
+    /// ([`Message::lease_id`]), or `None` for a message no delivery has
+    /// taken. A `false` is a delivery that outlived its lease: another has
+    /// the message now, and it is that one's to settle.
+    pub fn done(&self, id: i64, lease_id: Option<i64>) -> Result<bool, String> {
+        let gone = self
+            .conn
             .execute(
-                "UPDATE message SET due = ?2 WHERE id = ?1",
-                params![id, now_unix.saturating_add(delay_secs)],
+                "DELETE FROM message WHERE id = ?1 AND lease_id IS ?2",
+                params![id, lease_id],
             )
             .map_err(fail)?;
-        Ok(())
+        Ok(gone > 0)
     }
 
-    /// Moves it to the dead-letter table, with the reason.
-    pub fn bury(&self, id: i64, now_unix: i64, why: &str) -> Result<(), String> {
+    /// Puts it back, due `delay_secs` from `now_unix`, for another try, if
+    /// `lease_id` is still its lease; answers whether it was, as
+    /// [`Queues::done`] does.
+    pub fn retry(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        delay_secs: i64,
+    ) -> Result<bool, String> {
+        let moved = self
+            .conn
+            .execute(
+                "UPDATE message SET due = ?2 WHERE id = ?1 AND lease_id IS ?3",
+                params![id, now_unix.saturating_add(delay_secs), lease_id],
+            )
+            .map_err(fail)?;
+        Ok(moved > 0)
+    }
+
+    /// Moves it to the dead-letter table, with the reason, if `lease_id` is
+    /// still its lease; answers whether it was, as [`Queues::done`] does.
+    ///
+    /// The lease is asked about by both statements, inside one write
+    /// transaction, so a message is never copied to `dead` and then left on
+    /// the queue for whoever holds it now.
+    pub fn bury(
+        &self,
+        id: i64,
+        lease_id: Option<i64>,
+        now_unix: i64,
+        why: &str,
+    ) -> Result<bool, String> {
         let tx = self.write()?;
+        let buried = tx
+            .execute(
+                "INSERT OR REPLACE INTO dead (id, queue, body, attempts, due, sent, why, buried) \
+                 SELECT id, queue, body, attempts, due, sent, ?2, ?3 FROM message \
+                 WHERE id = ?1 AND lease_id IS ?4",
+                params![id, why, now_unix, lease_id],
+            )
+            .map_err(fail)?;
         tx.execute(
-            "INSERT OR REPLACE INTO dead (id, queue, body, attempts, due, sent, why, buried) \
-             SELECT id, queue, body, attempts, due, sent, ?2, ?3 FROM message WHERE id = ?1",
-            params![id, why, now_unix],
+            "DELETE FROM message WHERE id = ?1 AND lease_id IS ?2",
+            params![id, lease_id],
         )
         .map_err(fail)?;
-        tx.execute("DELETE FROM message WHERE id = ?1", [id])
-            .map_err(fail)?;
-        tx.commit().map_err(fail)
+        tx.commit().map_err(fail)?;
+        Ok(buried > 0)
     }
 
     /// The dead letters of `queue` (or all, for `None`), newest first, at
@@ -335,7 +442,8 @@ impl Queues {
     }
 
     /// Puts a dead letter back on its queue, due now, with its attempts
-    /// counted afresh; answers whether there was one with that id.
+    /// counted afresh and no lease, so no delivery from before it was
+    /// buried can settle it; answers whether there was one with that id.
     pub fn revive(&self, id: i64, now_unix: i64) -> Result<bool, String> {
         let tx = self.write()?;
         let moved = tx
@@ -739,6 +847,13 @@ mod tests {
         messages.iter().map(|m| m.id).collect()
     }
 
+    /// The lease `id` was handed out under in `taken`.
+    fn lease_of(taken: &[Message], id: i64) -> Option<i64> {
+        let lease = taken.iter().find(|m| m.id == id).unwrap().lease_id;
+        assert!(lease.is_some(), "a leased message carries its lease");
+        lease
+    }
+
     #[test]
     fn send_lease_done_goes_round_once() {
         let q = Queues::in_memory().unwrap();
@@ -753,9 +868,10 @@ mod tests {
                 attempts: 1,
                 due_unix: T + 30,
                 sent_unix: T,
+                lease_id: lease_of(&got, id),
             }]
         );
-        q.done(id).unwrap();
+        assert!(q.done(id, lease_of(&got, id)).unwrap());
         assert!(q.lease(T + 1000, 10, 30).unwrap().is_empty());
         assert_eq!(q.depths().unwrap(), vec![]);
     }
@@ -793,8 +909,8 @@ mod tests {
     fn retry_moves_due_and_the_message_comes_back_in_time() {
         let q = Queues::in_memory().unwrap();
         let id = send(&q, "a", "x", T);
-        q.lease(T, 1, 30).unwrap();
-        q.retry(id, T + 5, 100).unwrap();
+        let taken = q.lease(T, 1, 30).unwrap();
+        assert!(q.retry(id, lease_of(&taken, id), T + 5, 100).unwrap());
         assert!(q.lease(T + 104, 1, 30).unwrap().is_empty());
         let got = q.lease(T + 105, 1, 30).unwrap();
         assert_eq!(ids(&got), [id]);
@@ -805,8 +921,8 @@ mod tests {
     fn bury_moves_to_dead_and_revive_brings_it_back() {
         let q = Queues::in_memory().unwrap();
         let id = send(&q, "a", "x", T);
-        q.lease(T, 1, 30).unwrap();
-        q.bury(id, T + 1, "gave up").unwrap();
+        let taken = q.lease(T, 1, 30).unwrap();
+        assert!(q.bury(id, lease_of(&taken, id), T + 1, "gave up").unwrap());
         assert!(q.lease(T + 1000, 10, 30).unwrap().is_empty());
         let dead = q.dead(None, 10).unwrap();
         assert_eq!(dead.len(), 1);
@@ -830,11 +946,11 @@ mod tests {
     fn dead_comes_newest_first_and_ids_are_not_reused() {
         let q = Queues::in_memory().unwrap();
         let a = send(&q, "a", "a", T);
-        q.bury(a, T + 1, "first").unwrap();
+        q.bury(a, None, T + 1, "first").unwrap();
         // The queue is empty, but the buried id must not be handed out again.
         let b = send(&q, "a", "b", T + 2);
         assert!(b > a);
-        q.bury(b, T + 3, "second").unwrap();
+        q.bury(b, None, T + 3, "second").unwrap();
         let dead = q.dead(None, 10).unwrap();
         assert_eq!(
             dead.iter().map(|(_, why)| why.as_str()).collect::<Vec<_>>(),
@@ -897,8 +1013,8 @@ mod tests {
         // Bytes, not characters.
         assert!(q.send("b", "ééé", T, T, 4, 2).is_err());
         // Room opens when a message is done.
-        let first = q.lease(T, 1, 10).unwrap()[0].id;
-        q.done(first).unwrap();
+        let taken = q.lease(T, 1, 10).unwrap();
+        assert!(q.done(taken[0].id, taken[0].lease_id).unwrap());
         q.send("a", "3", T, T, 4, 2).unwrap();
     }
 
@@ -909,8 +1025,8 @@ mod tests {
         let a1 = send(&q, "alpha", "1", T);
         send(&q, "alpha", "2", T);
         let only_dead = send(&q, "mid", "1", T);
-        q.bury(a1, T, "x").unwrap();
-        q.bury(only_dead, T, "y").unwrap();
+        q.bury(a1, None, T, "x").unwrap();
+        q.bury(only_dead, None, T, "y").unwrap();
         assert_eq!(
             q.depths().unwrap(),
             vec![
@@ -926,7 +1042,7 @@ mod tests {
         let q = Queues::in_memory().unwrap();
         for (i, at) in [T, T + 10, T + 20].into_iter().enumerate() {
             let id = send(&q, "a", &i.to_string(), T);
-            q.bury(id, at, "why").unwrap();
+            q.bury(id, None, at, "why").unwrap();
         }
         let live = send(&q, "a", "live", T);
         assert_eq!(q.prune_dead(T + 10).unwrap(), 1);
@@ -961,6 +1077,290 @@ mod tests {
             "{why}"
         );
         let _ = std::fs::remove_file(&blocker);
+    }
+
+    // ---------------------------------------- who may settle a message
+
+    /// A message's row as the settles can change it: on the queue (with
+    /// its due time and lease), among the dead, or neither.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Row {
+        Waiting { due: i64, lease_id: Option<i64> },
+        Dead,
+        Gone,
+    }
+
+    fn row(q: &Queues, id: i64) -> Row {
+        let waiting = q
+            .conn
+            .query_row(
+                "SELECT due, lease_id FROM message WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        let dead = q
+            .conn
+            .query_row("SELECT 1 FROM dead WHERE id = ?1", [id], |_| Ok(()))
+            .optional()
+            .unwrap()
+            .is_some();
+        match (waiting, dead) {
+            (Some((due, lease_id)), false) => Row::Waiting { due, lease_id },
+            (None, true) => Row::Dead,
+            (None, false) => Row::Gone,
+            (Some(_), true) => panic!("message {id} is on the queue and among the dead"),
+        }
+    }
+
+    /// A delivery that ran past its lease, and the one that took the
+    /// message when the lease ran out: the first is `stale`, the second
+    /// holds the message now.
+    fn handed_on(q: &Queues) -> (i64, Option<i64>, Option<i64>) {
+        let id = send(q, "a", "x", T);
+        let stale = lease_of(&q.lease(T, 1, 30).unwrap(), id);
+        let current = lease_of(&q.lease(T + 30, 1, 30).unwrap(), id);
+        assert_ne!(stale, current);
+        (id, stale, current)
+    }
+
+    #[test]
+    fn a_delivery_that_outlived_its_lease_cannot_take_the_message_away() {
+        let q = Queues::in_memory().unwrap();
+        let (id, stale, current) = handed_on(&q);
+        assert!(!q.done(id, stale).unwrap());
+        assert_eq!(
+            row(&q, id),
+            Row::Waiting {
+                due: T + 60,
+                lease_id: current
+            }
+        );
+        assert!(q.done(id, current).unwrap());
+        assert_eq!(row(&q, id), Row::Gone);
+        // Settling what is gone is not an error, and not a success either.
+        assert!(!q.done(id, current).unwrap());
+    }
+
+    #[test]
+    fn a_delivery_that_outlived_its_lease_cannot_move_the_current_one() {
+        let q = Queues::in_memory().unwrap();
+        let (id, stale, current) = handed_on(&q);
+        // Had it moved `due` to T + 31, a third delivery could take the
+        // message while the second still has it.
+        assert!(!q.retry(id, stale, T + 31, 0).unwrap());
+        assert_eq!(
+            row(&q, id),
+            Row::Waiting {
+                due: T + 60,
+                lease_id: current
+            }
+        );
+        assert!(q.lease(T + 59, 10, 30).unwrap().is_empty());
+        assert!(q.retry(id, current, T + 40, 5).unwrap());
+        assert_eq!(
+            row(&q, id),
+            Row::Waiting {
+                due: T + 45,
+                lease_id: current
+            }
+        );
+    }
+
+    #[test]
+    fn a_delivery_that_outlived_its_lease_cannot_bury_the_message() {
+        let q = Queues::in_memory().unwrap();
+        let (id, stale, current) = handed_on(&q);
+        assert!(!q.bury(id, stale, T + 31, "500 late").unwrap());
+        assert_eq!(
+            row(&q, id),
+            Row::Waiting {
+                due: T + 60,
+                lease_id: current
+            }
+        );
+        assert!(q.dead(None, 10).unwrap().is_empty());
+        assert!(q.bury(id, current, T + 40, "500 now").unwrap());
+        assert_eq!(row(&q, id), Row::Dead);
+        assert_eq!(q.dead(None, 10).unwrap()[0].1, "500 now");
+    }
+
+    #[test]
+    fn a_lease_from_before_a_revive_does_not_settle_the_revived_message() {
+        let q = Queues::in_memory().unwrap();
+        let id = send(&q, "a", "x", T);
+        let before = lease_of(&q.lease(T, 1, 30).unwrap(), id);
+        assert!(q.bury(id, before, T + 1, "gave up").unwrap());
+        assert!(q.revive(id, T + 2).unwrap());
+        // Revived, it has no lease, and its attempts start again from 0, so
+        // a token made of `attempts` would match here.
+        assert!(!q.done(id, before).unwrap());
+        assert!(!q.retry(id, before, T + 2, 100).unwrap());
+        let after = lease_of(&q.lease(T + 2, 1, 30).unwrap(), id);
+        assert!(!q.done(id, before).unwrap());
+        assert!(!q.bury(id, before, T + 3, "late").unwrap());
+        assert!(q.done(id, after).unwrap());
+        assert_eq!(row(&q, id), Row::Gone);
+    }
+
+    #[test]
+    fn a_store_made_before_lease_ids_is_given_the_column_and_still_settles() {
+        let dir = std::env::temp_dir().join(format!("minicloud-queue-old-{}", std::process::id()));
+        let path = dir.join("queue.sqlite3");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            // The schema as it was, and a message that was leased under it.
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE message (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    queue TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    due INTEGER NOT NULL,
+                    sent INTEGER NOT NULL
+                );
+                INSERT INTO message (queue, body, attempts, due, sent)
+                    VALUES ('a', 'kept', 1, 1000030, 1000000);",
+            )
+            .unwrap();
+        }
+        let q = Queues::open(&path).unwrap();
+        let taken = q.lease(T + 30, 10, 30).unwrap();
+        assert_eq!(ids(&taken), [1]);
+        assert_eq!(taken[0].attempts, 2);
+        assert!(q.done(1, lease_of(&taken, 1)).unwrap());
+        assert_eq!(row(&q, 1), Row::Gone);
+        drop(q);
+        // Opening it again finds the column there and leaves it be.
+        let q = Queues::open(&path).unwrap();
+        let id = send(&q, "a", "new", T);
+        assert!(id > 1);
+        let taken = q.lease(T, 10, 30).unwrap();
+        assert!(q.bury(id, lease_of(&taken, id), T, "why").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every order two deliveries of one message can come in, and every
+    /// answer each can give.
+    ///
+    /// A leases at `T`; its lease runs out at `T + 30`; then B leases what
+    /// is due. A's settle may come at any point after its lease, before or
+    /// after B's, and B's after its own. What must hold is that the message
+    /// is in one place at most, that once B has it A changes nothing, and
+    /// that where it ends is what the last settle with the lease said.
+    #[test]
+    fn two_deliveries_in_any_order_leave_the_message_to_whoever_holds_it() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Step {
+            ALease,
+            Expire,
+            BLease,
+            ASettle,
+            BSettle,
+        }
+        #[derive(Clone, Copy, Debug)]
+        enum Settle {
+            Done,
+            Retry,
+            Bury,
+        }
+        use Step::*;
+        fn orders(left: Vec<Step>, so_far: Vec<Step>, out: &mut Vec<Vec<Step>>) {
+            if left.is_empty() {
+                out.push(so_far);
+                return;
+            }
+            for (i, step) in left.iter().enumerate() {
+                let mut left = left.clone();
+                left.remove(i);
+                let mut so_far = so_far.clone();
+                so_far.push(*step);
+                orders(left, so_far, out);
+            }
+        }
+        let mut all = Vec::new();
+        orders(
+            vec![ALease, Expire, BLease, ASettle, BSettle],
+            vec![],
+            &mut all,
+        );
+        let at = |order: &[Step], step| order.iter().position(|s| *s == step).unwrap();
+        let possible: Vec<_> = all
+            .into_iter()
+            .filter(|o| {
+                at(o, ALease) < at(o, Expire)
+                    && at(o, Expire) < at(o, BLease)
+                    && at(o, ALease) < at(o, ASettle)
+                    && at(o, BLease) < at(o, BSettle)
+            })
+            .collect();
+        // A's settle before the lease runs out, before B's lease, before
+        // B's settle, or after it.
+        assert_eq!(possible.len(), 4);
+
+        let settle = |q: &Queues, id, lease, now, how: Settle| match how {
+            Settle::Done => q.done(id, lease).unwrap(),
+            // No delay, so a retried message is due again at once and B
+            // can take it.
+            Settle::Retry => q.retry(id, lease, now, 0).unwrap(),
+            Settle::Bury => q.bury(id, lease, now, "no").unwrap(),
+        };
+        let answers = [Settle::Done, Settle::Retry, Settle::Bury];
+        for order in &possible {
+            for a_how in answers {
+                for b_how in answers {
+                    let case = format!("{order:?}, A {a_how:?}, B {b_how:?}");
+                    let q = Queues::in_memory().unwrap();
+                    let id = send(&q, "a", "x", T);
+                    let mut now = T;
+                    let mut a = None;
+                    let mut b = None;
+                    // The last settle that took effect.
+                    let mut last = None;
+                    for step in order {
+                        let before = row(&q, id);
+                        match step {
+                            ALease => a = Some(lease_of(&q.lease(now, 1, 30).unwrap(), id)),
+                            Expire => now = T + 30,
+                            BLease => {
+                                let taken = q.lease(now, 1, 30).unwrap();
+                                b = taken.first().map(|m| lease_of(&taken, m.id));
+                            }
+                            ASettle => {
+                                let took = settle(&q, id, a.unwrap(), now, a_how);
+                                // A holds the lease until B takes it.
+                                assert_eq!(took, b.is_none(), "{case}");
+                                if took {
+                                    last = Some(a_how);
+                                } else {
+                                    assert_eq!(row(&q, id), before, "A changed it: {case}");
+                                }
+                            }
+                            BSettle => {
+                                // B got nothing if A had settled it for good.
+                                if let Some(lease) = b {
+                                    assert!(settle(&q, id, lease, now, b_how), "{case}");
+                                    last = Some(b_how);
+                                }
+                            }
+                        }
+                        // `row` panics on a message in both tables.
+                        row(&q, id);
+                    }
+                    let end = row(&q, id);
+                    match last.unwrap() {
+                        Settle::Done => assert_eq!(end, Row::Gone, "{case}"),
+                        Settle::Bury => assert_eq!(end, Row::Dead, "{case}"),
+                        Settle::Retry => {
+                            assert!(matches!(end, Row::Waiting { .. }), "{case}")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---------------------------------------------- the admin's window
@@ -1043,7 +1443,7 @@ mod tests {
         // The first try, as it would have been had nobody looked.
         assert_eq!(taken[0].attempts, 1);
         assert_eq!(taken[0].body, "untouched");
-        q.done(id).unwrap();
+        assert!(q.done(id, lease_of(&taken, id)).unwrap());
         assert!(peek_waiting(&path, T, 10).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1057,8 +1457,8 @@ mod tests {
         let path = dir.join("queue.sqlite3");
         let q = Queues::open(&path).unwrap();
         let id = send(&q, "mail", "again", T);
-        q.lease(T, 1, 30).unwrap();
-        q.retry(id, T + 5, 100).unwrap();
+        let taken = q.lease(T, 1, 30).unwrap();
+        q.retry(id, lease_of(&taken, id), T + 5, 100).unwrap();
         let found = peek_waiting(&path, T + 5, 10).unwrap();
         assert_eq!(states(&found), ["held"]);
         assert_eq!((found[0].attempts, found[0].due_unix), (1, T + 105));
@@ -1073,9 +1473,11 @@ mod tests {
         let q = Queues::open(&path).unwrap();
         let first = send(&q, "mail", "one", T);
         let second = send(&q, "mail", "two", T);
-        q.lease(T, 2, 30).unwrap();
-        q.bury(first, T + 10, "500 no").unwrap();
-        q.bury(second, T + 20, "no answer").unwrap();
+        let taken = q.lease(T, 2, 30).unwrap();
+        q.bury(first, lease_of(&taken, first), T + 10, "500 no")
+            .unwrap();
+        q.bury(second, lease_of(&taken, second), T + 20, "no answer")
+            .unwrap();
         let dead = peek_dead(&path, 10).unwrap();
         // Newest buried first, which is the one somebody came to read.
         assert_eq!(bodies(&dead), ["two", "one"]);
@@ -1107,8 +1509,9 @@ mod tests {
         let q = Queues::open(&path).unwrap();
         let waiting = send(&q, "mail", "still here", T);
         let buried = send(&q, "mail", "gave up", T);
-        q.lease(T, 2, 30).unwrap();
-        q.bury(buried, T + 5, "500 no").unwrap();
+        let taken = q.lease(T, 2, 30).unwrap();
+        q.bury(buried, lease_of(&taken, buried), T + 5, "500 no")
+            .unwrap();
 
         let found = peek_one(&path, waiting, T + 60).unwrap().unwrap();
         assert_eq!((found.body.as_str(), found.state), ("still here", "due"));
@@ -1166,7 +1569,8 @@ mod tests {
         assert_eq!((found[1].body.as_str(), found[1].bytes), ("short", 5));
         // A reason is cut the same way; a 500's first line can be anything.
         let id = found[1].id;
-        q.bury(id, T + 2, &"x".repeat(PEEK_BODY_CHARS + 5)).unwrap();
+        q.bury(id, None, T + 2, &"x".repeat(PEEK_BODY_CHARS + 5))
+            .unwrap();
         let dead = peek_dead(&path, 10).unwrap();
         assert_eq!(dead[0].why.chars().count(), PEEK_BODY_CHARS);
         let _ = std::fs::remove_dir_all(&dir);

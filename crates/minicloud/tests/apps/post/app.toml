@@ -1,7 +1,7 @@
 # The app the queue tests are run on (issue #55). The tests write their own
 # `app.toml` with the `[[queues]]` each of them needs; this one is what
 # `minicloud check` and `test` see.
-grant = ["queue", "kv", "log"]
+grant = ["queue", "kv", "log", "timer"]
 
 [[queues]]
 name = "mail"

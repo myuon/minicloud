@@ -2,6 +2,7 @@ use std.web
 use queue
 use kv
 use log
+use timer
 
 /// Sends to a queue, and takes what the host delivers.
 ///
@@ -9,8 +10,10 @@ use log
 /// one there to be delivered `secs` from now; `/depth` answers how many are
 /// waiting; `/taken` answers what has been delivered, newest last.
 /// `/queue/mail` is where the host delivers, and it refuses anyone but the
-/// host. `?fail=1` on a message's body makes that delivery fail, which is
-/// how the tests see a retry and a dead letter.
+/// host. A body of `fail` makes that delivery fail, which is how the tests
+/// see a retry and a dead letter; one of `slow` makes its first delivery
+/// wait 2.5 seconds before it takes the message, which is how they see a
+/// delivery outlive its lease.
 export fn handle(request: web.Request) -> web.Response {
   if request.path == "/send" {
     return match queue.send("mail", request.query.get("body").unwrapOr("")) {
@@ -59,6 +62,9 @@ export fn handle(request: web.Request) -> web.Response {
     if request.body == "fail" {
       log.warn("refusing {request.body}")
       return answer(500, "this consumer refuses")
+    }
+    if request.body == "slow" && attempt == "1" {
+      timer.sleep(2500)
     }
     let before = kv.get("taken").unwrapOr("")
     return match kv.put("taken", "{before}{request.body};") {

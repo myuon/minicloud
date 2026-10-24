@@ -9,8 +9,9 @@ mod common;
 use common::*;
 
 fn post(queues: &'static str) -> Apps {
-    let config: &'static str =
-        Box::leak(format!("grant = [\"queue\", \"kv\", \"log\"]\n{queues}").into_boxed_str());
+    let config: &'static str = Box::leak(
+        format!("grant = [\"queue\", \"kv\", \"log\", \"timer\"]\n{queues}").into_boxed_str(),
+    );
     apps(&[
         AppSpec {
             name: "post",
@@ -144,6 +145,31 @@ fn a_delivery_says_which_try_it_is_and_how_many_there_will_be() {
         count(&host, "post", "queue_buried") == 1
     });
     assert_eq!(get(host.addr, "/post/tries").body.trim(), "1/2;2/2;");
+}
+
+/// A first delivery that takes longer than the lease is taken to be lost,
+/// and the message goes to a second, which takes it at once. When the
+/// first one finishes, the message is already the second's to settle: its
+/// answer is said in the log and counted as nothing, so the message is
+/// delivered once by the counters though the consumer was asked twice.
+#[test]
+fn a_delivery_that_outlives_its_lease_does_not_settle_the_message() {
+    let apps = post(
+        "[limits]\ndeadline = \"10s\"\n\n\
+         [[queues]]\nname = \"mail\"\nlease = \"1s\"\nretry = \"3600s\"\n",
+    );
+    let host = start(&apps, 2);
+    assert_eq!(get(host.addr, "/post/send?body=slow").status, 202);
+    wait_until("the first delivery to finish", || {
+        get(host.addr, "/_host/apps/post/logs?n=50")
+            .body
+            .contains("delivery outlived its lease")
+    });
+    assert_eq!(taken(&host), "slow;slow;");
+    assert_eq!(count(&host, "post", "queue_delivered"), 1);
+    assert_eq!(count(&host, "post", "queue_retried"), 0);
+    assert_eq!(count(&host, "post", "queue_buried"), 0);
+    assert_eq!(get(host.addr, "/post/depth").body.trim(), "0");
 }
 
 #[test]

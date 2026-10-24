@@ -818,6 +818,18 @@ it: the alternative is losing a message whenever the host stops in the
 wrong moment. A consumer must be able to be asked twice. Saying so is
 better than a guarantee that would be a lie.
 
+**Only the delivery holding the current lease settles the message.**
+Nothing holds a queue's `lease` to the app's `deadline`, so a run can still
+be going when its lease runs out and the message is handed to another. If
+the first run's answer still counted, it would settle the second's message:
+take it off the queue while the second is working on it, move the second's
+lease so a third delivery could take it, or bury it while it is being taken.
+So each lease writes a fresh lease id beside the message, and `done`,
+`retry` and `bury` act only while it still matches. A run that outlived its
+lease changes nothing; the app's log says so, and the counters do not count
+it. `attempts` could not be the token: reviving a dead letter counts it
+afresh from 0.
+
 **A failure is retried with a doubling delay** until `max_attempts`, then
 the message is buried as a dead letter with the reason. Burying rather than
 dropping is the point of the feature: a queue that silently loses what

@@ -36,8 +36,9 @@ fn control() -> AppSpec<'static> {
 /// The `post` fixture with the `[[queues]]` a test needs: `/send` puts a
 /// message on `mail`, and the consumer refuses a body of `fail`.
 fn post(queues: &str) -> AppSpec<'static> {
-    let config: &'static str =
-        Box::leak(format!("grant = [\"queue\", \"kv\", \"log\"]\n{queues}").into_boxed_str());
+    let config: &'static str = Box::leak(
+        format!("grant = [\"queue\", \"kv\", \"log\", \"timer\"]\n{queues}").into_boxed_str(),
+    );
     AppSpec {
         name: "post",
         from: fixtures().join("post"),
@@ -71,11 +72,12 @@ fn put(apps: &Apps, app: &str, queue: &str, body: &str) -> i64 {
 }
 
 /// Buries a message with a reason of the test's own, where a reason the
-/// consumer wrote would not do.
+/// consumer wrote would not do. No delivery has leased it (the tests that
+/// bury have `post` disabled), so there is no lease to name.
 fn bury(apps: &Apps, app: &str, id: i64, why: &str) {
     let store = store(apps, app);
     let store = store.lock().unwrap();
-    store.bury(id, now(), why).unwrap();
+    store.bury(id, None, now(), why).unwrap();
 }
 
 /// One operation of the control fixture.

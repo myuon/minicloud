@@ -136,19 +136,25 @@ so, and what it asserts is counted.
   app's `Err` while the rest of the run goes on; a client that goes away is
   told to the run, which ends; an app not granted `stream` is refused at
   load;
-- queues (`queue.rs`, and `queue.rs`'s 23 unit tests): a message outlives
+- queues (`queue.rs`, and `queue.rs`'s 29 unit tests): a message outlives
   the request that sent it, is delivered as a run, is on disk and is off
   the queue once taken; a client cannot deliver one itself; a delivery that
   is refused is tried again and then buried with its reason in the log, and
   each delivery says which try it is and how many there will be,
-  while the app and its neighbour go on; a queue the app does not declare
+  while the app and its neighbour go on; a delivery that outlives its lease
+  settles nothing, is said in the log and is not counted, while the one
+  that took the message after it is; a queue the app does not declare
   is an `Err` that says which it has; a queue past `max_depth` refuses the
   send; the messages survive a restart; five ways of writing `[[queues]]`
   wrong refuse that app alone. `sendAfter` holds its message back and then
   delivers it, a delay below nothing is no delay and one past a week is the
   app's `Err`. The store's own tests hold the lease, the retry, the burying
   and reviving, the depths, the pruning, and that a message sent for later
-  is held until it is due while still counting towards the depth;
+  is held until it is due while still counting towards the depth; that a
+  delivery whose lease has been handed on cannot delete, retry or bury the
+  message, nor can one from before a revive, in every order two deliveries'
+  leases and settles can come in; and that a store made before lease ids is
+  given the column and still settles;
 - `defer` (`defer.rs`): a query in the path reaches the app as a query; the
   client is answered at once and the work is done after it, as a run of its
   own counted in `served`; a client that sends

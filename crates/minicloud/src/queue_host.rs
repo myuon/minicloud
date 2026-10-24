@@ -27,6 +27,13 @@
 //! retrying — loses a message whenever the host stops mid-delivery, which
 //! is worse. A consumer must be able to be asked twice, which is a
 //! property of the work and not something the host can give it.
+//!
+//! What the first run's answer no longer does is settle the message. Only
+//! the delivery holding the current lease does that ([`crate::queue`]'s
+//! "Leases, not deletes"): a run that outlived its lease cannot delete the
+//! message from under the delivery that has it now, move that one's lease,
+//! or bury it while it is being taken. Its answer is said in the app's log
+//! and counted as nothing.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -310,10 +317,20 @@ fn start(
         Ok(answer) => answer,
         // The queue was full or the host was busy: give the message back
         // to be tried again rather than counting it as a failed delivery.
+        // The lease is still asked about: it has not had time to run out,
+        // but a retry that did not ask would be the one settle here that
+        // could move another delivery's lease.
         Err(_) => {
             counters.queue_in_flight.fetch_sub(1, Ordering::Relaxed);
             let store = store.lock().unwrap_or_else(|p| p.into_inner());
-            let _ = store.retry(message.id, now(), policy.retry.as_secs() as i64);
+            if let Ok(false) = store.retry(
+                message.id,
+                message.lease_id,
+                now(),
+                policy.retry.as_secs() as i64,
+            ) {
+                outlived(&logs, &policy.name, message.id);
+            }
             return;
         }
     };
@@ -323,8 +340,12 @@ fn start(
         let taken = matches!(&outcome, Ok(reply) if reply.status < 500);
         let store = store.lock().unwrap_or_else(|p| p.into_inner());
         if taken {
-            counters.queue_delivered.fetch_add(1, Ordering::Relaxed);
-            let _ = store.done(message.id);
+            match store.done(message.id, message.lease_id) {
+                Ok(false) => outlived(&logs, &policy.name, message.id),
+                _ => {
+                    counters.queue_delivered.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             return;
         }
         let why = match &outcome {
@@ -337,8 +358,11 @@ fn start(
         };
         // `attempts` already counts this one, which `lease` raised.
         if message.attempts >= i64::from(policy.max_attempts) {
+            if let Ok(false) = store.bury(message.id, message.lease_id, now(), &why) {
+                outlived(&logs, &policy.name, message.id);
+                return;
+            }
             counters.queue_buried.fetch_add(1, Ordering::Relaxed);
-            let _ = store.bury(message.id, now(), &why);
             logs.push(
                 "host",
                 &format!(
@@ -348,11 +372,14 @@ fn start(
             );
             return;
         }
-        counters.queue_retried.fetch_add(1, Ordering::Relaxed);
         // Doubling, so a consumer that is down is asked less and less
         // often rather than every `retry` for as long as it is down.
         let delay = policy.retry.as_secs() as i64 * (1 << (message.attempts.min(10) - 1).max(0));
-        let _ = store.retry(message.id, now(), delay);
+        if let Ok(false) = store.retry(message.id, message.lease_id, now(), delay) {
+            outlived(&logs, &policy.name, message.id);
+            return;
+        }
+        counters.queue_retried.fetch_add(1, Ordering::Relaxed);
         logs.push(
             "host",
             &format!(
@@ -361,4 +388,16 @@ fn start(
             ),
         );
     });
+}
+
+/// Says in the app's log that a delivery's answer settled nothing, because
+/// its lease had run out and the message had been handed to another.
+fn outlived(logs: &crate::logs::LogRing, queue: &str, id: i64) {
+    logs.push(
+        "host",
+        &format!(
+            "queue `{queue}`: message {id}'s delivery outlived its lease; \
+             another delivery holds it now"
+        ),
+    );
 }
