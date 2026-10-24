@@ -18,7 +18,7 @@
     "s5:impl": "tools/check.sh s5_impl s5_impl --tlc-config=tlc-bfs1.json --invariant=S5,NoOverflow",
     "s5:race": "tools/check.sh s5_race_impl s5_race_impl --tlc-config=tlc-bfs1.json --invariant=S5,NoOverflow",
     "s5:f1": "tools/check.sh s5_f1_impl s5_f1_impl --tlc-config=tlc-bfs1.json --invariant=S5,NoOverflow",
-    "s5:fixed": "tools/check.sh s5_fixed s5_fixed --tlc-config=tlc.json --invariant=S5,NoOverflow",
+    "s5:fixed": "tools/check.sh s5_fixed s5_fixed --tlc-config=tlc-all.json --invariant=S5,NoOverflow",
     "s5:strict-fixed": "tools/check.sh s5strict_fixed s5_fixed --tlc-config=tlc-bfs1.json --invariant=S5strict,NoOverflow"
   }
 }
