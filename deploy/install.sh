@@ -39,7 +39,10 @@
 #   5. deploys the bundled apps --with-bundled-apps names, from the release,
 #      with `minicloud deploy --into <root>/apps` (each checked again; the
 #      version it replaces is kept in <root>/apps/.previous/<app>); `admin`,
-#      the only one, by default;
+#      the only one, by default. If one of them fails, the ones deployed
+#      before it are put back as they were (and .previous/<app> too) and it
+#      stops, switching nothing; if putting one back fails, it says which and
+#      how to finish by hand;
 #   6. points <root>/current at the release; <root>/data is never touched;
 #   7. keeps the three newest releases, and prints what to run with sudo.
 set -euo pipefail
@@ -56,7 +59,7 @@ while [ $# -gt 0 ]; do
     --with-bundled-apps) BUNDLED="$2"; shift 2 ;;
     --apps) die "--apps is gone: a release no longer replaces the apps; --with-bundled-apps \"${2:-}\" deploys those of the release" ;;
     --root) ROOT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [ -z "$SOURCE" ] || die "one VERSION or TARBALL"; SOURCE="$1"; shift ;;
   esac
@@ -202,11 +205,63 @@ done
 with_env "$bin" check --deployed --apps "$check" --data "$ROOT/data" \
   || die "an app does not check against this release, $ROOT/env and the secret store (see above; a new secret?); nothing switched"
 
-# 5. The bundled apps asked for, deployed as any app is.
-for app in $BUNDLED; do
-  with_env "$bin" deploy "$release/apps/$app" --name "$app" --into "$ROOT/apps" --data "$ROOT/data" >/dev/null \
-    || die "deploying the bundled app \`$app\` failed (see above); nothing switched"
+# 5. The bundled apps asked for, deployed as any app is. A deploy replaces
+# what .previous/<app> held, so that is first moved aside to .install/<app>
+# (a dot-directory, which loading skips; a rename, as deploy's own moves
+# are). If one deploy fails, those before it are undone, newest first:
+# <app> is dropped, .previous/<app> moved back to <app> (unless the app is
+# new) and .install/<app> back to .previous/<app>. A failed deploy changed no
+# file of its own app (deploy --into undoes its own moves).
+aside="$ROOT/apps/.install"
+deployed=""
+# Puts back the .previous/<app> moved aside, if the deploy has not left one.
+unstash() {
+  if [ -e "$aside/$1" ] && [ ! -e "$ROOT/apps/.previous/$1" ]; then
+    mv "$aside/$1" "$ROOT/apps/.previous/$1"
+  fi
+}
+# Undoes the deploy of one app, as `deploy --into` left it: the app is
+# <app>, the version it replaced (if any) .previous/<app>.
+undeploy() {
+  rm -rf -- "${ROOT:?}/apps/$1" || return 1
+  if [ -e "$ROOT/apps/.previous/$1" ]; then
+    mv "$ROOT/apps/.previous/$1" "$ROOT/apps/$1" || return 1
+  fi
+  if [ -e "$aside/$1" ]; then
+    mv "$aside/$1" "$ROOT/apps/.previous/$1" || return 1
+  fi
+}
+# A run that was killed in this step may have left one aside: it goes back
+# if nothing has taken its place.
+for kept in "$aside"/*/; do
+  [ -d "$kept" ] || continue
+  unstash "$(basename "$kept")"
 done
+rm -rf -- "$aside"
+for app in $BUNDLED; do
+  if [ -e "$ROOT/apps/.previous/$app" ]; then
+    mkdir -p "$aside"
+    mv "$ROOT/apps/.previous/$app" "$aside/$app"
+  fi
+  if with_env "$bin" deploy "$release/apps/$app" --name "$app" --into "$ROOT/apps" --data "$ROOT/data" >/dev/null; then
+    deployed="$app $deployed"
+    continue
+  fi
+  left=""
+  unstash "$app" || left="$left $app"
+  for done_app in $deployed; do
+    if ! undeploy "$done_app"; then
+      left="$left $done_app"
+    fi
+  done
+  if [ -n "$left" ]; then
+    die "deploying the bundled app \`$app\` failed (see above), and putting back the bundled apps deployed before it failed for:$left. current is not switched, but $ROOT/apps/<app> may be the new release's copy of those: put each back by hand, in $ROOT/apps: rm -rf <app>; mv .previous/<app> <app> (if there is one: there is none if the app was new); mv .install/<app> .previous/<app> (if there is one)"
+  fi
+  rmdir "$aside" 2>/dev/null || true
+  deployed="${deployed% }"
+  die "deploying the bundled app \`$app\` failed (see above); ${deployed:+the bundled apps deployed before it ($deployed) were put back; }nothing switched"
+done
+rm -rf -- "$aside"
 
 # 6. The switch.
 ln -sfn "releases/$version" "$ROOT/current.tmp"
