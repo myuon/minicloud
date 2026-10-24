@@ -9,11 +9,15 @@
 //! # Storage
 //!
 //! SQLite (bundled, through `rusqlite`), like the other per-app stores: one
-//! file, a format that outlives this program, WAL mode with
-//! `synchronous = NORMAL`. A committed write survives the host process
-//! crashing; a power loss may lose the last transactions but never corrupts
-//! the file. A message that was sent a moment before the power went may be
-//! sent again by the app, which an at-least-once queue has to expect anyway.
+//! file, a format that outlives this program, WAL mode — with
+//! `synchronous = FULL`, where the other stores have `NORMAL`. A committed
+//! write survives the host process crashing and the machine losing power:
+//! each commit waits for the log to reach the disk. Under `NORMAL` a power
+//! loss could undo the last transactions, and for a queue that is a `send`
+//! the app was told succeeded and that is then gone, which the app cannot
+//! know to repeat. The cost is a sync per write (a send, a lease, a
+//! settle), which a queue's rate of writes affords. (A `done` undone would
+//! only repeat a delivery; a lost `send` loses a message.)
 //!
 //! Times (`due`, `sent`, `buried`) are milliseconds since the epoch, so a
 //! `sendAfter` is not due before its time and a lease or retry that is not
@@ -286,7 +290,9 @@ impl Queues {
         let conn = Connection::open(path).map_err(|_| "cannot open the queue store".to_string())?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(fail)?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
+        // FULL, not NORMAL: an acknowledged `send` must survive a power
+        // loss as well as a crash (see "Storage" above).
+        conn.pragma_update(None, "synchronous", "FULL")
             .map_err(fail)?;
         Queues::with(conn)
     }
@@ -1388,6 +1394,27 @@ mod tests {
         assert_eq!(q.prune_dead(T + 100).unwrap(), 2);
         assert_eq!(q.prune_dead(T + 100).unwrap(), 0);
         assert_eq!(ids(&q.lease(None, T, 10, 10, 100).unwrap()), [live]);
+    }
+
+    /// D3: a store on a file commits with `synchronous = FULL`, so an
+    /// acknowledged send survives a power loss and not only a crash.
+    #[test]
+    fn a_store_on_a_file_syncs_every_commit() {
+        let dir = std::env::temp_dir().join(format!("minicloud-queue-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let q = Queues::open(&dir.join("queue.sqlite3")).unwrap();
+        let (journal, synchronous): (String, i64) = (
+            q.conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap(),
+            q.conn
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap(),
+        );
+        // 2 is FULL; NORMAL would be 1.
+        assert_eq!((journal.as_str(), synchronous), ("wal", 2));
+        drop(q);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
