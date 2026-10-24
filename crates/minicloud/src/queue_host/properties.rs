@@ -385,6 +385,48 @@ fn f6_each_queue_has_room_of_its_own() {
     assert!(h.row(second).is_none(), "delivered");
 }
 
+// ------------------------------------------------------------ F7 / L1
+
+/// L1 under E1 as it now reads: a redeploy that drops a queue leaves its
+/// messages on the store, and the next tick makes them dead letters that
+/// say why — counted, logged and shown — rather than leaving them where
+/// nothing delivers them. A delivery running when the queue went is left
+/// to settle.
+#[test]
+fn f7_the_messages_of_a_queue_no_longer_declared_are_dead_letters() {
+    let mut h = Harness::new("f7", policies(TWO_QUEUES));
+    let running = h.send("second", "running");
+    h.tick();
+    h.start_run(running);
+    let waiting = h.send("second", "waiting");
+    let kept = h.send("first", "kept");
+
+    h.queues = policies("[[queues]]\nname = \"first\"\nbatch = 4\n");
+    h.tick();
+    let row = h.row(waiting).expect("a dead letter");
+    assert_eq!(
+        (row.state, row.why.as_str()),
+        ("dead", "queue `second` is no longer declared")
+    );
+    assert_eq!(h.row(running).unwrap().state, "held", "its delivery runs");
+    assert!(h.logs().contains(&format!(
+        "queue `second`: message {waiting} is a dead letter after 0 attempt(s): \
+         queue `second` is no longer declared"
+    )));
+    assert_eq!(h.facts(kept).leases.len(), 1, "a declared queue goes on");
+
+    // The running delivery's answer still settles its message.
+    h.answer(running, 200);
+    h.poll();
+    assert!(h.row(running).is_none());
+    assert_eq!(
+        h.counters()
+            .queue_buried
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
 // ------------------------------------------------------------ in flight
 
 /// Every way a delivery can end gives back the in-flight count it took,

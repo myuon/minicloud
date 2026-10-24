@@ -679,6 +679,61 @@ impl Queues {
         Ok(spent)
     }
 
+    /// Buries the messages of every queue not among `declared`, and answers
+    /// each as it was with the reason it was given.
+    ///
+    /// A redeploy that drops a queue from `[[queues]]` leaves its messages
+    /// on the store, where nothing delivers them and nothing would ever say
+    /// so. As dead letters they are counted, listed with why, and can be
+    /// revived — which is the way back for a queue that is declared again.
+    ///
+    /// A message whose lease is still running is left until it runs out:
+    /// the delivery holding it may still settle it. So is one whose
+    /// delivery has a settle kept for it ([`Queues::hold`]).
+    pub fn bury_undeclared(
+        &self,
+        declared: &[&str],
+        now_ms: i64,
+    ) -> Result<Vec<(Message, String)>, String> {
+        let tx = self.write()?;
+        let undeclared = {
+            let mut select = tx
+                .prepare_cached(
+                    "SELECT id, queue, body, attempts, due, sent, lease_id FROM message \
+                     WHERE lease_id IS NULL OR due <= ?1 ORDER BY sent, id",
+                )
+                .map_err(fail)?;
+            let rows = select
+                .query_map([now_ms], |row| {
+                    Ok((message_row(row)?, row.get::<_, Option<i64>>(6)?))
+                })
+                .map_err(fail)?;
+            let mut undeclared = Vec::new();
+            for row in rows {
+                let (message, lease_id) = row.map_err(fail)?;
+                if declared.contains(&message.queue.as_str()) || self.answered(message.id, lease_id)
+                {
+                    continue;
+                }
+                let why = format!("queue `{}` is no longer declared", message.queue);
+                undeclared.push((message, why));
+            }
+            undeclared
+        };
+        for (message, why) in &undeclared {
+            tx.execute(
+                "INSERT OR REPLACE INTO dead (id, queue, body, attempts, due, sent, why, buried) \
+                 SELECT id, queue, body, attempts, due, sent, ?2, ?3 FROM message WHERE id = ?1",
+                params![message.id, why, now_ms],
+            )
+            .map_err(fail)?;
+            tx.execute("DELETE FROM message WHERE id = ?1", [message.id])
+                .map_err(fail)?;
+        }
+        tx.commit().map_err(fail)?;
+        Ok(undeclared)
+    }
+
     /// Moves it to the dead-letter table, with the reason, if `lease_id` is
     /// still its lease; answers whether it was, as [`Queues::done`] does.
     ///
@@ -1650,6 +1705,66 @@ mod tests {
         q.forget(id, token);
         assert!(q.unwritten().is_empty());
         assert_eq!(ids(&q.lease(Some("a"), T + 30, 1, 30, 2).unwrap()), [id]);
+    }
+
+    /// D6: the messages of a queue no longer declared are buried, saying
+    /// so, except one whose lease still runs or whose settle is kept; a
+    /// declared queue's are left alone. Revived, one goes back on its queue.
+    #[test]
+    fn the_messages_of_a_queue_no_longer_declared_are_buried() {
+        let mut q = Queues::in_memory().unwrap();
+        let waiting = send(&q, "gone", "waiting", T);
+        let leased = send(&q, "gone", "leased", T + 1);
+        let kept = send(&q, "gone", "kept", T + 2);
+        let mine = send(&q, "mail", "mine", T + 3);
+        q.lease(Some("gone"), T + 5, 2, 30, 5).unwrap();
+        // `waiting` and `leased` are on lease now; `kept` waits.
+        let token = lease_of(&q.lease(Some("gone"), T + 5, 1, 30, 5).unwrap(), kept);
+        q.hold(
+            kept,
+            token,
+            Unwritten {
+                queue: "gone".into(),
+                attempts: 1,
+                settle: Settle::Done,
+            },
+        );
+        assert!(q
+            .retry(waiting, lease_of_row(&q, waiting), T + 6, 0)
+            .unwrap());
+
+        let buried = q.bury_undeclared(&["mail"], T + 10).unwrap();
+        assert_eq!(buried.len(), 1);
+        assert_eq!(buried[0].0.id, waiting);
+        assert_eq!(buried[0].1, "queue `gone` is no longer declared");
+        // Its lease runs out; the kept settle still holds `kept`.
+        let buried = q.bury_undeclared(&["mail"], T + 35).unwrap();
+        assert_eq!(
+            ids(&buried.into_iter().map(|(m, _)| m).collect::<Vec<_>>()),
+            [leased]
+        );
+        assert_eq!(
+            row(&q, kept),
+            Row::Waiting {
+                due: T + 35,
+                lease_id: Some(token)
+            }
+        );
+        assert!(matches!(row(&q, mine), Row::Waiting { .. }));
+
+        assert_eq!(q.revive(waiting, T + 40, |_| None), Ok(Revived::Back));
+        assert!(matches!(row(&q, waiting), Row::Waiting { .. }));
+    }
+
+    /// The lease a message holds now, read from its row.
+    fn lease_of_row(q: &Queues, id: i64) -> i64 {
+        match row(q, id) {
+            Row::Waiting {
+                lease_id: Some(lease_id),
+                ..
+            } => lease_id,
+            other => panic!("message {id} holds no lease: {other:?}"),
+        }
     }
 
     #[test]

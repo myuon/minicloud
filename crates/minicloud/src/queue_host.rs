@@ -269,11 +269,18 @@ pub(crate) async fn deliver(front: Arc<crate::server::Front>) {
         };
         for slot in front.engine.slots() {
             let Some(app) = slot.current() else { continue };
-            if app.queues.is_empty() || !slot.enabled() || app.ready().is_none() {
+            if !slot.enabled() || app.ready().is_none() {
                 continue;
             }
-            let Ok(store) = crate::queue::shared(&data.join(&slot.name).join("queue.sqlite3"))
-            else {
+            let path = data.join(&slot.name).join("queue.sqlite3");
+            // An app that declares no queue has nothing to deliver, but if
+            // an earlier version did, its messages are still on the store
+            // and are buried as undeclared. No file, nothing to bury, and
+            // looking must not make one.
+            if app.queues.is_empty() && !path.is_file() {
+                continue;
+            }
+            let Ok(store) = crate::queue::shared(&path) else {
                 continue;
             };
             let deliveries = Deliveries {
@@ -343,6 +350,11 @@ pub(crate) trait Store: Send + 'static {
         max_attempts: i64,
         now_ms: i64,
     ) -> Result<Vec<(Message, String)>, String>;
+    fn bury_undeclared(
+        &self,
+        declared: &[&str],
+        now_ms: i64,
+    ) -> Result<Vec<(Message, String)>, String>;
     fn lease(
         &self,
         queue: Option<&str>,
@@ -369,6 +381,13 @@ impl Store for Queues {
         now_ms: i64,
     ) -> Result<Vec<(Message, String)>, String> {
         Queues::bury_spent(self, queue, max_attempts, now_ms)
+    }
+    fn bury_undeclared(
+        &self,
+        declared: &[&str],
+        now_ms: i64,
+    ) -> Result<Vec<(Message, String)>, String> {
+        Queues::bury_undeclared(self, declared, now_ms)
     }
     fn lease(
         &self,
@@ -454,6 +473,29 @@ impl<S: Store> Deliveries<S> {
         // whose `done` failed is not spent because its lease has run out.
         self.flush();
         let now = (self.now)();
+        // The queues this version no longer declares: nothing would deliver
+        // their messages, so they are dead letters, where they are counted
+        // and shown and can be revived.
+        let declared: Vec<&str> = queues.iter().map(|policy| policy.name.as_str()).collect();
+        let undeclared = {
+            let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+            store.bury_undeclared(&declared, now)
+        };
+        match undeclared {
+            Ok(undeclared) => {
+                for (message, why) in undeclared {
+                    self.counters.queue_buried.fetch_add(1, Ordering::Relaxed);
+                    self.logs.push(
+                        "host",
+                        &format!(
+                            "queue `{}`: message {} is a dead letter after {} attempt(s): {why}",
+                            message.queue, message.id, message.attempts
+                        ),
+                    );
+                }
+            }
+            Err(why) => self.logs.push("host", &format!("queues: {why}")),
+        }
         for policy in queues {
             // Before anything is leased: a message that has had its
             // attempts is a dead letter, not a next try.

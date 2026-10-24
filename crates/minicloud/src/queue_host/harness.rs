@@ -147,6 +147,13 @@ impl Store for Faulty {
         );
         spent
     }
+    fn bury_undeclared(
+        &self,
+        declared: &[&str],
+        now_ms: i64,
+    ) -> Result<Vec<(Message, String)>, String> {
+        self.inner.bury_undeclared(declared, now_ms)
+    }
     fn lease(
         &self,
         queue: Option<&str>,
