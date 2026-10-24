@@ -133,7 +133,11 @@ undone by a process that is gone. What can be promised:
 scheduler that waits past its deadline is answered `503` by the scheduler
 (`sched.rs`, `QueueTimeout`) without the app ever starting, and the
 delivery counts it as a failed attempt — and on the last attempt buries
-the message. The same for a run cancelled before it starts (`499`).
+the message. A run cancelled before it starts is answered `499`, which
+is below 500: the delivery takes it for the app's answer and `done`s
+the message, so the message is lost (S1) though the app never ran. No
+path cancels a queue delivery's run today (its `Cancel` is its own and
+nothing fires it), so this waits for one.
 **Violation by reading**, to be reproduced.
 
 **Proposed fix.** The delivery learns that the run never started (a flag
@@ -280,12 +284,27 @@ action, so a fault can fall between any two.
 
 | # | Property | Finding | Shown by | Fixed |
 |---|---|---|---|---|
-| F1 | S5 | lowering `max_attempts` does not stop a waiting retry; `lease` alone ignores `M` | store PBT, shrunk (`qa/queue-store-pbt`) | |
-| F2 | S6, S7 | a run that never started (scheduler timeout / cancel) spends an attempt and can bury | reading | |
-| F3 | S7 | a failed settle write is ignored; the lease later expires as "no answer" | reading | |
-| F4 | S8, L3a | whole-second truncation: early delivery, short leases, sub-second `lease`/`retry` become 0 | reading | |
-| F5 | S10 | `revive` ignores `max_depth` | store PBT, shrunk | |
-| N1 | S1, S4, S6 | a settle with no token (`None`) matches a message whose lease was *ended* (`retry`/`give_back`), not only one never leased: `done(id, None)` deletes a given-back message | store PBT, shrunk; not reachable from the delivery loop | |
-| F6 | L2 | in-flight counted per app, room per queue: one queue starves another | reading | |
-| F7 | L1 | messages of an undeclared queue are never delivered nor shown | reading | |
+| F1 | S5 | lowering `max_attempts` does not stop a waiting retry; `lease` alone ignores `M` | model (TLC, 10 steps); store PBT, shrunk; loop harness | |
+| F2 | S6, S7, S1 | a run that never started spends an attempt and can bury (scheduler timeout); a cancel's `499` is taken as done and deletes it | model (6 steps); loop harness; timeout also end to end (`tests/queue.rs`) | |
+| F3 | S7, S6 | a failed settle write is ignored; the lease later expires as "no answer"; a failed `give_back` leaves the attempt spent | model (10 / 4 steps); loop harness | |
+| F4 | S8, L3a | whole-second truncation: early delivery, short leases, sub-second `lease`/`retry` become 0 | loop harness | |
+| F5 | S10 | `revive` ignores `max_depth` | model (9 steps); store PBT, shrunk | |
+| F6 | L2, L1 | in-flight counted per app, room per queue: either queue can starve the other | model (TLC lasso); loop harness (a repeating cycle) | |
+| F7 | L1 | messages of an undeclared queue are never delivered nor shown | model (delivery only) | |
 | F8 | S1 | power loss may lose an acknowledged send (`synchronous = NORMAL`) | docs | open question |
+| N1 | S1, S4, S6 | a settle with no token (`None`) matches a message whose lease was *ended* (`retry`/`give_back`), not only one never leased | store PBT, shrunk; not reachable from the delivery loop | |
+| N2 | S5 | the tick reads the clock once for `bury_spent` and again for `lease`; a lease running out between them is leased past `M` with no redeploy | model (TLC, 8 steps, shortest S5 violation) | |
+| N3 | S7 | the lease can run out between the app's 2xx and the `done` write; `bury_spent` then buries it as "no answer within the lease" | model (9 steps) | |
+| N4 | S10, L1 | a run of the previous version still sends with that version's `max_depth`, and to queues the new version removed | model (3 steps) | |
+| N5 | S6.3, L3b | a lease that runs out while its run is still queued in the scheduler: the run's give-back can no longer match | model (with all fixes, 9 steps) | |
+| N6 | S6, S7 | at shutdown the engine drops queued runs before the runtime stops; a settle in between spends the attempt | reading only, unverified | |
+
+Contract notes the model forced (see `spec/queue/README.md`):
+
+- **E7** — L1 and L3b need it once never-started runs are given back: a
+  message admitted infinitely often is eventually started. Without it a
+  scheduler that times the run out every time loops forever.
+- L3b does not follow from L2: L2 promises a lease, not an invocation.
+- "Current `M`" read strictly (the version at the moment of the lease) fails
+  even with the S5 fix, because a redeploy can land in the middle of a tick;
+  the model checks "the version the tick read when it started".
