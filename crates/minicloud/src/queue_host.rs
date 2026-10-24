@@ -57,7 +57,7 @@ use crate::config::QueuePolicy;
 use crate::convert::{Origin, Reply};
 use crate::hosts::{AppContext, HostModule};
 use crate::logs::LogRing;
-use crate::queue::{Message, Queues};
+use crate::queue::{Message, Queues, Settle, Unwritten};
 use crate::stats::{AppCounters, Rejection};
 
 /// The capability that opens this module.
@@ -347,6 +347,9 @@ pub(crate) trait Store: Send + 'static {
         delay_secs: i64,
     ) -> Result<bool, String>;
     fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String>;
+    fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten);
+    fn forget(&mut self, id: i64, lease_id: i64);
+    fn unwritten(&self) -> Vec<(i64, i64, Unwritten)>;
 }
 
 impl Store for Queues {
@@ -392,6 +395,15 @@ impl Store for Queues {
     fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String> {
         Queues::bury(self, id, lease_id, now_unix, why)
     }
+    fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten) {
+        Queues::hold(self, id, lease_id, unwritten)
+    }
+    fn forget(&mut self, id: i64, lease_id: i64) {
+        Queues::forget(self, id, lease_id)
+    }
+    fn unwritten(&self) -> Vec<(i64, i64, Unwritten)> {
+        Queues::unwritten(self)
+    }
 }
 
 /// One app's deliveries: what deciding them needs, and nothing of how a
@@ -435,6 +447,9 @@ impl<S: Store> Deliveries<S> {
         queues: &[QueuePolicy],
         mut start: impl FnMut(&QueuePolicy, Message),
     ) {
+        // What the deliveries said and could not write, first: a message
+        // whose `done` failed is not spent because its lease has run out.
+        self.flush();
         let now = (self.now)();
         for policy in queues {
             // Before anything is leased: a message that has had its
@@ -523,33 +538,31 @@ impl<S: Store> Deliveries<S> {
             // to be tried again, with the attempt `lease` counted taken back,
             // rather than counting it as a failed delivery — or a busy host
             // could spend a message's attempts without its consumer ever being
-            // asked. The lease is still asked about: it has not had time to
-            // run out, but a give-back that did not ask would be the one
-            // settle here that could move another delivery's lease.
+            // asked.
             Err(_) => {
                 self.counters
                     .queue_in_flight
                     .fetch_sub(1, Ordering::Relaxed);
-                self.give_back(policy, message);
+                self.give_back(policy, message, None);
                 None
             }
         }
     }
 
     /// Gives a delivery's message back, with the attempt `lease` counted
-    /// taken back, for a run the app never saw. The lease is still asked
-    /// about: a give-back that did not ask would be the one settle that
-    /// could move another delivery's lease.
-    fn give_back(&self, policy: &QueuePolicy, message: &Message) {
-        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
-        if let Ok(false) = store.give_back(
-            message.id,
-            token(message),
-            (self.now)(),
-            policy.retry.as_secs() as i64,
-        ) {
-            outlived(&self.logs, &policy.name, message.id);
-        }
+    /// taken back, for a run the app never saw; `why` is what to say of it
+    /// in the app's log, if anything. The lease is still asked about: a
+    /// give-back that did not ask would be the one settle that could move
+    /// another delivery's lease.
+    fn give_back(&self, policy: &QueuePolicy, message: &Message, why: Option<String>) {
+        self.keep_and_write(
+            message,
+            Settle::GiveBack {
+                at: (self.now)(),
+                delay_secs: policy.retry.as_secs() as i64,
+                why,
+            },
+        );
     }
 
     /// Settles one admitted delivery on what its run came to: the reply,
@@ -569,80 +582,134 @@ impl<S: Store> Deliveries<S> {
     ///   off at its deadline, cancelled, failed) is no answer, whatever its
     ///   status: an attempt spent, never the message taken.
     pub(crate) fn settle(&self, policy: &QueuePolicy, message: &Message, outcome: Option<Reply>) {
-        let (counters, logs) = (&self.counters, &self.logs);
-        counters.queue_in_flight.fetch_sub(1, Ordering::Relaxed);
-        if let Some(reply) = &outcome {
-            if reply.origin == Origin::NotStarted {
-                logs.push(
-                    "host",
-                    &format!(
-                        "queue `{}`: message {}'s run never started ({} {}); given back",
-                        policy.name,
-                        message.id,
-                        reply.status,
-                        crate::internal::first_line(&reply.body)
-                    ),
-                );
-                self.give_back(policy, message);
-                return;
-            }
-        }
-        let taken =
-            matches!(&outcome, Some(reply) if reply.origin == Origin::Answer && reply.status < 500);
-        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
-        if taken {
-            match store.done(message.id, token(message)) {
-                Ok(false) => outlived(logs, &policy.name, message.id),
-                _ => {
-                    counters.queue_delivered.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            return;
-        }
-        let why = match &outcome {
-            Some(reply) if reply.origin == Origin::Answer => format!(
+        self.counters
+            .queue_in_flight
+            .fetch_sub(1, Ordering::Relaxed);
+        let said = |reply: &Reply| {
+            format!(
                 "{} {}",
                 reply.status,
                 crate::internal::first_line(&reply.body)
-            ),
-            Some(reply) => format!(
-                "no answer: {} {}",
-                reply.status,
-                crate::internal::first_line(&reply.body)
-            ),
-            None => "no answer".to_string(),
+            )
         };
-        // `attempts` already counts this one, which `lease` raised.
-        if message.attempts >= i64::from(policy.max_attempts) {
-            if let Ok(false) = store.bury(message.id, token(message), (self.now)(), &why) {
-                outlived(logs, &policy.name, message.id);
+        let why = match &outcome {
+            Some(reply) if reply.origin == Origin::NotStarted => {
+                let why = format!(
+                    "message {}'s run never started ({})",
+                    message.id,
+                    said(reply)
+                );
+                self.give_back(policy, message, Some(why));
                 return;
             }
-            counters.queue_buried.fetch_add(1, Ordering::Relaxed);
-            logs.push(
-                "host",
-                &format!(
-                    "queue `{}`: message {} is a dead letter after {} attempt(s): {why}",
-                    policy.name, message.id, message.attempts
-                ),
-            );
+            Some(reply) if reply.origin == Origin::Answer && reply.status < 500 => {
+                self.keep_and_write(message, Settle::Done);
+                return;
+            }
+            Some(reply) if reply.origin == Origin::Answer => said(reply),
+            Some(reply) => format!("no answer: {}", said(reply)),
+            None => "no answer".to_string(),
+        };
+        let at = (self.now)();
+        // `attempts` already counts this one, which `lease` raised.
+        let settle = if message.attempts >= i64::from(policy.max_attempts) {
+            Settle::Bury { at, why }
+        } else {
+            // Doubling, so a consumer that is down is asked less and less
+            // often rather than every `retry` for as long as it is down.
+            let delay_secs =
+                policy.retry.as_secs() as i64 * (1 << (message.attempts.min(10) - 1).max(0));
+            Settle::Retry {
+                at,
+                delay_secs,
+                why,
+            }
+        };
+        self.keep_and_write(message, settle);
+    }
+
+    /// Keeps a delivery's settle beside the store, then writes it.
+    ///
+    /// Kept first, so that a write that fails is not a settle dropped: it
+    /// stays kept, the next tick writes it again ([`Deliveries::flush`]),
+    /// and until then the message is its delivery's — not buried as having
+    /// had no answer when its lease runs out, nor handed out again. Before
+    /// this a failed `done` was counted as delivered and its message later
+    /// buried as "no answer within the lease"; a failed `give_back` left
+    /// an attempt spent that the app never saw.
+    fn keep_and_write(&self, message: &Message, settle: Settle) {
+        let token = token(message);
+        let unwritten = Unwritten {
+            queue: message.queue.clone(),
+            attempts: message.attempts,
+            settle,
+        };
+        let mut store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        store.hold(message.id, token, unwritten.clone());
+        self.write(&mut store, message.id, token, &unwritten);
+    }
+
+    /// Writes every settle kept from before, oldest message first: those
+    /// whose write failed. A tick does this before anything else, so that
+    /// what it buries and leases is decided on what the deliveries said.
+    pub(crate) fn flush(&self) {
+        let mut store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        for (id, token, unwritten) in store.unwritten() {
+            self.write(&mut store, id, token, &unwritten);
+        }
+    }
+
+    /// Writes one kept settle. Only a write that took changes a counter or
+    /// says anything in the log: one that failed is still kept, and is
+    /// counted and said when a later one takes.
+    fn write(&self, store: &mut S, id: i64, token: i64, unwritten: &Unwritten) {
+        let queue = &unwritten.queue;
+        let written = match &unwritten.settle {
+            Settle::Done => store.done(id, token),
+            Settle::Retry { at, delay_secs, .. } => store.retry(id, token, *at, *delay_secs),
+            Settle::Bury { at, why } => store.bury(id, token, *at, why),
+            Settle::GiveBack { at, delay_secs, .. } => store.give_back(id, token, *at, *delay_secs),
+        };
+        let Ok(matched) = written else { return };
+        store.forget(id, token);
+        if !matched {
+            outlived(&self.logs, queue, id);
             return;
         }
-        // Doubling, so a consumer that is down is asked less and less
-        // often rather than every `retry` for as long as it is down.
-        let delay = policy.retry.as_secs() as i64 * (1 << (message.attempts.min(10) - 1).max(0));
-        if let Ok(false) = store.retry(message.id, token(message), (self.now)(), delay) {
-            outlived(logs, &policy.name, message.id);
-            return;
+        let counters = &self.counters;
+        match &unwritten.settle {
+            Settle::Done => {
+                counters.queue_delivered.fetch_add(1, Ordering::Relaxed);
+            }
+            Settle::Retry {
+                delay_secs, why, ..
+            } => {
+                counters.queue_retried.fetch_add(1, Ordering::Relaxed);
+                self.logs.push(
+                    "host",
+                    &format!(
+                        "queue `{queue}`: message {id} not taken ({why}); again in {delay_secs}s"
+                    ),
+                );
+            }
+            Settle::Bury { why, .. } => {
+                counters.queue_buried.fetch_add(1, Ordering::Relaxed);
+                self.logs.push(
+                    "host",
+                    &format!(
+                        "queue `{queue}`: message {id} is a dead letter after {} attempt(s): \
+                         {why}",
+                        unwritten.attempts
+                    ),
+                );
+            }
+            Settle::GiveBack { why, .. } => {
+                if let Some(why) = why {
+                    self.logs
+                        .push("host", &format!("queue `{queue}`: {why}; given back"));
+                }
+            }
         }
-        counters.queue_retried.fetch_add(1, Ordering::Relaxed);
-        logs.push(
-            "host",
-            &format!(
-                "queue `{}`: message {} not taken ({why}); again in {delay}s",
-                policy.name, message.id
-            ),
-        );
     }
 }
 

@@ -29,7 +29,7 @@ use super::{Deliveries, Store};
 use crate::config::QueuePolicy;
 use crate::convert::{Origin, Reply};
 use crate::logs::LogRing;
-use crate::queue::{Message, Peeked, Queues};
+use crate::queue::{Message, Peeked, Queues, Unwritten};
 use crate::stats::{AppCounters, Rejection};
 
 /// A settle, by the store operation that writes it.
@@ -190,6 +190,15 @@ impl Store for Faulty {
     }
     fn bury(&self, id: i64, lease_id: i64, now_unix: i64, why: &str) -> Result<bool, String> {
         self.settle(id, Op::Bury, |q| q.bury(id, lease_id, now_unix, why))
+    }
+    fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten) {
+        self.inner.hold(id, lease_id, unwritten)
+    }
+    fn forget(&mut self, id: i64, lease_id: i64) {
+        self.inner.forget(id, lease_id)
+    }
+    fn unwritten(&self) -> Vec<(i64, i64, Unwritten)> {
+        self.inner.unwritten()
     }
 }
 

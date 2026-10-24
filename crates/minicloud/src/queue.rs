@@ -66,6 +66,16 @@
 //! delivery the host turns away before the app sees it is not an attempt,
 //! and [`Queues::give_back`] takes back the one `lease` counted.
 //!
+//! **A settle is kept until it is written.** A delivery's settle is put in
+//! memory beside the store ([`Queues::hold`]) and then written; a write
+//! that fails leaves it there, and the delivery loop writes it again at its
+//! next tick. Until then the message is its delivery's: `bury_spent` does
+//! not bury it and `lease` does not hand it out, though its lease may run
+//! out meanwhile — the app answered, and "no answer within the lease" would
+//! be untrue. The kept settles live as long as the process: a crash takes
+//! them with every delivery, and the message's lease runs out as any
+//! crashed delivery's does.
+//!
 //! # Retention
 //!
 //! This layer never discards a dead letter by itself: how long they are kept
@@ -102,7 +112,7 @@
 //! logs that outsiders may read, and the data directory's layout is not
 //! theirs to learn.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -159,6 +169,46 @@ pub enum Dropped {
 /// An app's queues.
 pub struct Queues {
     conn: Connection,
+    /// Settles a delivery has decided and the file does not have yet, by
+    /// message id and the lease they were decided under. In memory only: a
+    /// crash takes them with every delivery, which is what a crash is.
+    unwritten: BTreeMap<(i64, i64), Unwritten>,
+}
+
+/// What a delivery decided to do with its message.
+///
+/// `at` is when it was decided — when the run answered, or was turned away
+/// — and a settle written later is written as of then: a retry kept over a
+/// failed write is still due `delay_secs` after the answer, not after the
+/// write that finally took.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Settle {
+    /// The app took it ([`Queues::done`]).
+    Done,
+    /// Not taken; tried again `delay_secs` after `at` ([`Queues::retry`]).
+    Retry {
+        at: i64,
+        delay_secs: i64,
+        why: String,
+    },
+    /// Not taken, on its last attempt ([`Queues::bury`]).
+    Bury { at: i64, why: String },
+    /// The app never saw it ([`Queues::give_back`]); `why` is what to say
+    /// in the app's log, if anything.
+    GiveBack {
+        at: i64,
+        delay_secs: i64,
+        why: Option<String>,
+    },
+}
+
+/// A settle decided and not yet written, with what saying it needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unwritten {
+    pub queue: String,
+    /// The attempts the message had when its delivery settled.
+    pub attempts: i64,
+    pub settle: Settle,
 }
 
 fn fail(e: rusqlite::Error) -> String {
@@ -263,7 +313,40 @@ impl Queues {
             conn.execute_batch("ALTER TABLE message ADD COLUMN lease_id INTEGER")
                 .map_err(fail)?;
         }
-        Ok(Queues { conn })
+        Ok(Queues {
+            conn,
+            unwritten: BTreeMap::new(),
+        })
+    }
+
+    /// Keeps the settle a delivery holding lease `lease_id` of message `id`
+    /// has decided, before it is written. Until [`Queues::forget`] it is
+    /// the delivery's answer, and the message is not the tick's:
+    /// [`Queues::bury_spent`] does not bury it, and [`Queues::lease`] does
+    /// not hand it out, though its lease may run out meanwhile. Burying it
+    /// would say "no answer within the lease" of a message whose app
+    /// answered; leasing it would hand out what is as good as settled.
+    pub fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten) {
+        self.unwritten.insert((id, lease_id), unwritten);
+    }
+
+    /// Drops a kept settle: it was written, or found its lease gone.
+    pub fn forget(&mut self, id: i64, lease_id: i64) {
+        self.unwritten.remove(&(id, lease_id));
+    }
+
+    /// Every settle kept and not yet written, oldest message first, as
+    /// `(id, lease id, settle)`.
+    pub fn unwritten(&self) -> Vec<(i64, i64, Unwritten)> {
+        self.unwritten
+            .iter()
+            .map(|((id, lease_id), unwritten)| (*id, *lease_id, unwritten.clone()))
+            .collect()
+    }
+
+    /// Whether the lease a message holds now has a settle kept for it.
+    fn answered(&self, id: i64, lease_id: Option<i64>) -> bool {
+        lease_id.is_some_and(|lease_id| self.unwritten.contains_key(&(id, lease_id)))
     }
 
     /// A write transaction that takes the write lock at once, so that a
@@ -356,21 +439,34 @@ impl Queues {
         lease_secs: i64,
         max_attempts: i64,
     ) -> Result<Vec<Message>, String> {
-        let limit = limit.clamp(1, MAX_LEASE) as i64;
+        let limit = limit.clamp(1, MAX_LEASE);
         let until = now_unix.saturating_add(lease_secs);
         let tx = self.write()?;
         let mut taken = {
+            // As many more as there are settles kept, which are passed over
+            // (`hold`) and must not leave the batch short.
+            let asked = (limit + self.unwritten.len()) as i64;
             let mut select = tx
                 .prepare_cached(
-                    "SELECT id, queue, body, attempts, due, sent FROM message \
+                    "SELECT id, queue, body, attempts, due, sent, lease_id FROM message \
                      WHERE due <= ?1 AND (?3 IS NULL OR queue = ?3) AND attempts < ?4 \
                      ORDER BY sent, id LIMIT ?2",
                 )
                 .map_err(fail)?;
             let rows = select
-                .query_map(params![now_unix, limit, queue, max_attempts], message_row)
+                .query_map(params![now_unix, asked, queue, max_attempts], |row| {
+                    Ok((message_row(row)?, row.get::<_, Option<i64>>(6)?))
+                })
                 .map_err(fail)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(fail)?
+            let mut due = Vec::new();
+            for row in rows {
+                let (message, lease_id) = row.map_err(fail)?;
+                if !self.answered(message.id, lease_id) {
+                    due.push(message);
+                }
+            }
+            due.truncate(limit);
+            due
         };
         {
             let mut mark = tx
@@ -484,6 +580,10 @@ impl Queues {
     ///
     /// Without this a message past its attempts would stay on the queue for
     /// good, neither delivered nor dead, where nobody would look for it.
+    ///
+    /// A message whose lease has a settle kept for it ([`Queues::hold`]) is
+    /// left alone: its delivery answered, and the settle says what becomes
+    /// of it once it is written.
     pub fn bury_spent(
         &self,
         queue: &str,
@@ -494,22 +594,29 @@ impl Queues {
         let spent = {
             let mut select = tx
                 .prepare_cached(
-                    "SELECT id, queue, body, attempts, due, sent, lease_id IS NOT NULL \
+                    "SELECT id, queue, body, attempts, due, sent, lease_id \
                      FROM message WHERE queue = ?1 AND due <= ?2 AND attempts >= ?3 \
                      ORDER BY sent, id",
                 )
                 .map_err(fail)?;
             let rows = select
                 .query_map(params![queue, now_unix, max_attempts], |row| {
-                    let held: bool = row.get(6)?;
-                    let why = match held {
-                        true => OUTLIVED.to_string(),
-                        false => lowered(max_attempts),
-                    };
-                    Ok((message_row(row)?, why))
+                    Ok((message_row(row)?, row.get::<_, Option<i64>>(6)?))
                 })
                 .map_err(fail)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(fail)?
+            let mut spent = Vec::new();
+            for row in rows {
+                let (message, lease_id) = row.map_err(fail)?;
+                if self.answered(message.id, lease_id) {
+                    continue;
+                }
+                let why = match lease_id {
+                    Some(_) => OUTLIVED.to_string(),
+                    None => lowered(max_attempts),
+                };
+                spent.push((message, why));
+            }
+            spent
         };
         for (message, why) in &spent {
             tx.execute(
@@ -1413,6 +1520,32 @@ mod tests {
         let spent = q.bury_spent("b", 1, T + 100).unwrap();
         assert_eq!(spent.len(), 1);
         assert_eq!((spent[0].0.id, spent[0].1.as_str()), (other, OUTLIVED));
+    }
+
+    /// A settle kept for the lease a message holds makes the message its
+    /// delivery's: when the lease runs out it is neither spent nor leased,
+    /// and the batch is filled from behind it. Once forgotten, it is due.
+    #[test]
+    fn a_message_with_a_kept_settle_is_neither_spent_nor_leased() {
+        let mut q = Queues::in_memory().unwrap();
+        let id = send(&q, "a", "x", T);
+        let token = lease_of(&q.lease(Some("a"), T, 1, 30, 1).unwrap(), id);
+        let behind = send(&q, "a", "y", T + 1);
+        let kept = Unwritten {
+            queue: "a".into(),
+            attempts: 1,
+            settle: Settle::Done,
+        };
+        q.hold(id, token, kept.clone());
+        assert_eq!(q.unwritten(), vec![(id, token, kept)]);
+        assert!(q.bury_spent("a", 1, T + 30).unwrap().is_empty());
+        assert_eq!(
+            ids(&q.lease(Some("a"), T + 30, 1, 30, 2).unwrap()),
+            [behind]
+        );
+        q.forget(id, token);
+        assert!(q.unwritten().is_empty());
+        assert_eq!(ids(&q.lease(Some("a"), T + 30, 1, 30, 2).unwrap()), [id]);
     }
 
     #[test]

@@ -204,7 +204,6 @@ fn f2_a_run_cancelled_after_it_started_is_no_answer() {
 /// message is not a dead letter "with no answer within the lease": the app
 /// answered.
 #[test]
-#[ignore = "F3: a failed settle write is dropped and counted as delivered; the lease later runs out and buries it as 'no answer within the lease'"]
 fn f3_a_done_that_fails_to_write_is_kept_not_counted_and_not_buried() {
     let mut h = Harness::new(
         "f3",
@@ -239,7 +238,6 @@ fn f3_a_done_that_fails_to_write_is_kept_not_counted_and_not_buried() {
 /// leaves the lease in place, and the lease of the last attempt then
 /// buries the message as having had no answer, though it had a 500.
 #[test]
-#[ignore = "F3: a failed retry write is dropped; the message keeps its lease and the reason recorded is not the one that happened"]
 fn f3_a_retry_that_fails_to_write_is_kept() {
     let mut h = Harness::new(
         "f3-retry",
@@ -268,32 +266,59 @@ fn f3_a_retry_that_fails_to_write_is_kept() {
     );
 }
 
-/// What the delivery does today on a failed `done`, so that the ignored
-/// test above is seen to fail for the reason it says: counted as
-/// delivered, and later buried as having had no answer.
+/// S7, N3: a kept settle is the delivery's answer for as long as it is
+/// kept. The `done` fails, and fails again at the next tick, after the
+/// lease of the last attempt has run out: the message is neither buried as
+/// having had no answer nor handed out again, and the tick after that
+/// writes the `done`.
 #[test]
-fn f3_today_a_failed_done_is_counted_and_later_buried_as_no_answer() {
+fn n3_a_message_whose_settle_is_kept_is_not_buried_nor_leased_when_its_lease_runs_out() {
     let mut h = Harness::new(
-        "f3-today",
+        "n3",
         vec![policy("mail", |p| {
             p.max_attempts = 1;
             p.lease = std::time::Duration::from_secs(30);
         })],
     );
     let id = leased(&mut h);
-    h.fail_settles(id, 1);
+    h.fail_settles(id, 2);
     h.take(id, 200);
-    assert_eq!(h.delivered(), 1);
     h.advance(31);
     h.tick();
-    let row = h.row(id).unwrap();
-    assert_eq!(
-        (row.state, row.why.as_str()),
-        ("dead", "no answer within the lease")
-    );
-    assert!(h
-        .logs()
-        .contains("is a dead letter after 1 attempt(s): no answer within the lease"));
+    assert_eq!(h.facts(id).failed, vec![Op::Done, Op::Done]);
+    let row = h.row(id).expect("still on the queue");
+    assert_eq!(row.state, "due", "{row:?}");
+    assert_eq!(h.facts(id).leases.len(), 1, "not handed out again");
+    assert_eq!((h.delivered(), h.dead_count()), (0, 0));
+    assert!(!h.logs().contains("dead letter"), "{}", h.logs());
+
+    h.tick();
+    assert!(h.row(id).is_none(), "the done is written");
+    assert_eq!(h.delivered(), 1);
+}
+
+/// S6, F3 on `give_back`: a refusal at admission whose give-back fails to
+/// write is kept and written at the next tick, so the attempt the app never
+/// had is taken back after all.
+#[test]
+fn f3_a_give_back_that_fails_to_write_is_kept() {
+    let mut h = Harness::new("f3-give-back", vec![policy("mail", |p| p.max_attempts = 1)]);
+    h.admits = Box::new(|_| false);
+    let id = h.send("mail", "x");
+    h.fail_settles(id, 1);
+    h.tick();
+    assert_eq!(h.facts(id).failed, vec![Op::GiveBack]);
+    assert_eq!(h.row(id).unwrap().attempts, 1, "not given back yet");
+    h.tick();
+    assert_eq!(h.facts(id).written, vec![(Op::GiveBack, true)]);
+    assert_eq!(h.row(id).unwrap().attempts, 0, "the attempt is taken back");
+    h.check_attempts(id);
+
+    h.admits = Box::new(|_| true);
+    h.advance(30);
+    h.tick();
+    h.take(id, 200);
+    assert!(h.row(id).is_none(), "delivered on its one attempt");
 }
 
 // ------------------------------------------------------------ F6 / L2
