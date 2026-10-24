@@ -7,18 +7,31 @@
   },
   "scripts": {
     "setup": "quint verify --max-steps=1 --invariant=inv_true sanity/toy.qnt",
-    "typecheck": "quint typecheck queue.qnt && quint typecheck checks.qnt",
+    "typecheck": "quint typecheck queue.qnt && quint typecheck configs.qnt",
 
+    "sanity": "tools/sanity.sh",
     "sanity:inv-false": "quint verify --backend=tlc --invariant=inv_false sanity/toy.qnt",
     "sanity:inv-true": "quint verify --backend=tlc --invariant=inv_true sanity/toy.qnt",
     "sanity:live-nofair": "quint verify --backend=tlc --temporal=reach3 sanity/toy.qnt",
     "sanity:live-fair": "quint verify --backend=tlc --temporal=reach3Fair sanity/toy.qnt",
     "sanity:live-false": "quint verify --backend=tlc --temporal=reach4Fair sanity/toy.qnt",
 
-    "s5:impl": "tools/check.sh s5_impl s5_impl --tlc-config=tlc-bfs1.json --invariant=S5,NoOverflow",
-    "s5:race": "tools/check.sh s5_race_impl s5_race_impl --tlc-config=tlc-bfs1.json --invariant=S5,NoOverflow",
-    "s5:f1": "tools/check.sh s5_f1_impl s5_f1_impl --tlc-config=tlc-bfs1.json --invariant=S5,NoOverflow",
-    "s5:fixed": "tools/check.sh s5_fixed s5_fixed --tlc-config=tlc-all.json --invariant=S5,NoOverflow",
-    "s5:strict-fixed": "tools/check.sh s5strict_fixed s5_fixed --tlc-config=tlc-bfs1.json --invariant=S5strict,NoOverflow"
+    "safety": "tools/safety.sh",
+    "liveness": "tools/liveness.sh",
+
+    "s1": "tools/safety.sh '^safe_'",
+    "s2": "tools/safety.sh '^safe_'",
+    "s3": "tools/safety.sh '^s3_'",
+    "s4": "tools/safety.sh '^safe_'",
+    "s5": "tools/safety.sh '^s5'",
+    "s6": "tools/safety.sh '^s6_'",
+    "s7": "tools/safety.sh '^s7_'",
+    "s8": "tools/safety.sh '^safe_'",
+    "s9": "tools/safety.sh '^s9_'",
+    "s10": "tools/safety.sh '^s10_'",
+    "l1": "tools/liveness.sh '^l1_'",
+    "l2": "tools/liveness.sh '^l2_'",
+    "l3a": "tools/safety.sh '^l3a_'",
+    "l3b": "tools/liveness.sh '^l3b_'"
   }
 }

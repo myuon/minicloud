@@ -7,7 +7,7 @@
 // The properties are the contract of `docs/queue-properties.md`. Monitors
 // (the `bad` set) record an action property the moment a step breaks it;
 // everything else is a state invariant or a temporal formula. The checks
-// themselves (bounds, flags) are the modules in `checks.qnt`; how to run
+// themselves (bounds, flags) are the `Cfg`s in `configs.qnt`; how to run
 // them is in `README.md`.
 //
 // Time is abstract: a message is `due` (its due time has come) or not.

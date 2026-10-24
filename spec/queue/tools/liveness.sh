@@ -20,6 +20,7 @@ run l1_fix_s6_e7       LIVE_FIX_S6             L1_E7
 run l1_fixed           LIVE_FIXED              L1_live
 run l1_fixed_e7        LIVE_FIXED              L1_E7
 run l1_2q_impl         LIVE2                   L1_live
+run l1_2q_fix_l2       LIVE2_FIX_L2            L1_live
 run l1_2q_fixed_e7     LIVE2_FIXED             L1_E7
 run l2_impl            LIVE2                   L2_live
 run l2_fix_l2          LIVE2_FIX_L2            L2_live

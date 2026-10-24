@@ -21,9 +21,14 @@ module $name {
   import queue(C = $config).* from "../queue"
 }
 EOF
+# TLC keeps its state queue and fingerprints under the temp dir, gigabytes
+# for the large checks; keep them under out/tmp and remove them after.
+tmp="out/tmp/$name"
+rm -rf "$tmp"; mkdir -p "$tmp"
 start=$(date +%s)
-npx quint verify --backend=tlc --main="$name" "$@" "out/$name.qnt" > "out/$name.txt" 2>&1
+TMPDIR="$PWD/$tmp" npx quint verify --backend=tlc --main="$name" "$@" "out/$name.qnt" > "out/$name.txt" 2>&1
 status=$?
+rm -rf "$tmp"
 end=$(date +%s)
 echo "== $name ($config $*): exit $status, $((end - start)) s"
 grep -E "distinct states found, [0-9]+ states left|depth of the complete|No violation|Found an issue|Model checking completed|error:" "out/$name.txt"
