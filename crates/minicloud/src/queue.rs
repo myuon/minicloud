@@ -1829,3 +1829,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// The store driven by random operations against a model of its contract
+// (`docs/queue-properties.md`), and the cases that model has found.
+#[cfg(test)]
+mod model_tests;
