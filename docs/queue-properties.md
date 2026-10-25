@@ -381,6 +381,14 @@ scheduler, app start, app answer (2xx–4xx / 5xx / none), settle write
 redeploy (changing `M`, `L`, `D`, removing a queue). Each step is its own
 action, so a fault can fall between any two.
 
+The implementation is held to the model as well: traces the model of the
+code generates (`spec/queue`, `npm run traces`, committed under
+`crates/minicloud/tests/queue_traces/`) are replayed against the delivery
+loop under its harness (`queue_host::mbt`), and after every step the
+store's rows, the settles held, the in-flight and settle counters, the
+deliveries and the ghost counts are compared with the model's state
+(`spec/queue/README.md`, "Traces for the implementation").
+
 ## Findings and status
 
 | # | Property | Finding | Shown by | Fixed |

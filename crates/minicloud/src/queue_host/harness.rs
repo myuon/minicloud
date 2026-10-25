@@ -18,7 +18,7 @@
 //! handed out under, the invocations (a run's entry starting), the settles
 //! written and the ones that failed, and the deliveries a crash took.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,7 @@ use super::{Deliveries, Store};
 use crate::config::QueuePolicy;
 use crate::convert::{Origin, Reply};
 use crate::logs::LogRing;
-use crate::queue::{Message, Peeked, Queues, Unwritten};
+use crate::queue::{Message, Peeked, Queues, Settle, Unwritten};
 use crate::stats::{AppCounters, Rejection};
 
 /// A settle, by the store operation that writes it.
@@ -75,8 +75,9 @@ impl Facts {
 
 type Ghost = Arc<Mutex<BTreeMap<i64, Facts>>>;
 
-/// Settles to fail, per message, before the next one is written.
-type FailPlan = Arc<Mutex<BTreeMap<i64, u32>>>;
+/// How the next settles of each message are to go, in order: `false`
+/// fails one, `true` lets one be written. Past the plan, each is written.
+type FailPlan = Arc<Mutex<BTreeMap<i64, VecDeque<bool>>>>;
 
 /// Every `lease` the loop asked for, as (tick, queue, room).
 type LeasesAsked = Arc<Mutex<Vec<(u32, String, usize)>>>;
@@ -105,8 +106,8 @@ impl Faulty {
         write: impl FnOnce(&Queues) -> Result<bool, String>,
     ) -> Result<bool, String> {
         let mut fail = self.fail.lock().unwrap();
-        if let Some(left) = fail.get_mut(&id).filter(|left| **left > 0) {
-            *left -= 1;
+        let takes = fail.get_mut(&id).and_then(VecDeque::pop_front);
+        if takes == Some(false) {
             self.ghost
                 .lock()
                 .unwrap()
@@ -590,6 +591,30 @@ impl Harness {
         self.check();
     }
 
+    /// Settles message `id`'s delivery alone, as its task would once its
+    /// run has answered or gone; the others are left as they are.
+    pub fn settle_one(&mut self, id: i64) {
+        let deliveries = self.deliveries.clone();
+        let at = self
+            .pending
+            .iter()
+            .position(|pending| pending.message.id == id)
+            .unwrap_or_else(|| panic!("message {id} has no delivery in flight"));
+        let mut delivery = self.pending.remove(at);
+        let Stage::Admitted { answer, .. } = &mut delivery.stage else {
+            panic!("message {id}'s delivery is not admitted");
+        };
+        let outcome = match answer.try_recv() {
+            Ok(reply) => Some(reply),
+            Err(oneshot::error::TryRecvError::Closed) => None,
+            Err(oneshot::error::TryRecvError::Empty) => {
+                panic!("message {id}'s run has not answered")
+            }
+        };
+        deliveries.settle(&delivery.policy, &delivery.message, outcome);
+        self.check();
+    }
+
     /// Starts, answers and settles message `id`'s delivery.
     pub fn take(&mut self, id: i64, status: u16) {
         self.start_run(id);
@@ -602,6 +627,15 @@ impl Harness {
     /// its file. Answers the deliveries it took, as (id, lease id).
     pub fn crash(&mut self) -> Vec<(i64, i64)> {
         let lost: Vec<_> = std::mem::take(&mut self.pending);
+        // A give-back held because its write failed is a delivery that
+        // never started, lost with the process like those in flight.
+        let held: Vec<i64> = self
+            .store()
+            .unwritten()
+            .into_iter()
+            .filter(|(_, _, unwritten)| matches!(unwritten.settle, Settle::GiveBack { .. }))
+            .map(|(id, _, _)| id)
+            .collect();
         {
             let mut ghost = self.ghost.lock().unwrap();
             for pending in &lost {
@@ -610,6 +644,9 @@ impl Harness {
                     Stage::Admitted { started: true, .. } => facts.crashed_started += 1,
                     _ => facts.crashed_unstarted += 1,
                 }
+            }
+            for id in held {
+                ghost.entry(id).or_default().crashed_unstarted += 1;
             }
         }
         let taken = lost
@@ -675,7 +712,23 @@ impl Harness {
 
     /// Fails the next `n` settles of message `id`.
     pub fn fail_settles(&mut self, id: i64, n: u32) {
-        *self.fail.lock().unwrap().entry(id).or_default() += n;
+        self.plan_settles(id, &vec![false; n as usize]);
+    }
+
+    /// The next settles of message `id`, after those already planned: each
+    /// `false` fails, each `true` is written.
+    pub fn plan_settles(&mut self, id: i64, outcomes: &[bool]) {
+        self.fail
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_default()
+            .extend(outcomes);
+    }
+
+    /// Planned settles no write has come to yet.
+    pub fn planned_left(&self) -> usize {
+        self.fail.lock().unwrap().values().map(VecDeque::len).sum()
     }
 
     // ------------------------------------------------------- reading
@@ -704,6 +757,11 @@ impl Harness {
     /// How many dead letters the store holds.
     pub fn dead_count(&self) -> usize {
         crate::queue::peek_dead(&self.path, 1000).unwrap().len()
+    }
+
+    /// The store's file, for a test that reads its rows itself.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn facts(&self, id: i64) -> Facts {

@@ -36,7 +36,7 @@ module configs {
     ENV_SEND_AFTER: true, ENV_OLD_SENDS: true, ENV_REFUSE: true, ENV_TIMEOUT: true,
     ENV_WRITE_FAIL: true, ENV_PRUNE: true, ENV_OUTCOMES: Set("ok", "fail", "none"),
     FIX_S5: false, FIX_S6: false, FIX_S7: false, FIX_S7_GUARD: false,
-    FIX_S10: false, FIX_L2: false, PRE_167: false, MAX_RACE: 1, ATOMIC_ANSWER: false, IMPL2: false, MAX_STALL: 0,
+    FIX_S10: false, FIX_L2: false, PRE_167: false, MAX_RACE: 1, ATOMIC_ANSWER: false, IMPL2: false, MAX_STALL: 0, MBT: false,
     TRACK: ALLGHOSTS,
   }
   pure def allFixes(c: Cfg): Cfg = { ...c, FIX_S5: true, FIX_S6: true, FIX_S7: true,
@@ -213,4 +213,26 @@ module configs {
   pure val I2_LIVE_L3B_KEEP: Cfg = { ...I2_LIVE_L3B, REDEPLOY_POLS: POLS1_KEEP }
   pure val I2_LIVE_L3B_KEEP_NOCRASH: Cfg = { ...I2_LIVE_L3B_KEEP, MAX_CRASH: 0 }
   pure val I2_LIVE_L3B_KEEP_NOCRASH_STALL: Cfg = { ...I2_LIVE_L3B_KEEP_NOCRASH, MAX_STALL: 1 }
+
+  // S6.3 under a stall with batch 2: with the in-flight count held to the
+  // settle, batch 1 leaves no room to lease the message again.
+  pure val I2_S6_STALL_B2: Cfg = { ...I2_S6_STALL, INIT_POL: { ...POL1, batch: Map(0 -> 2) },
+                                   REDEPLOY_POLS: POLS1.map(p => { ...p, batch: Map(0 -> 2) }) }
+
+  // ------------------------------- traces for the implementation (MBT)
+  // `quint run --step mbtStep` on these makes the traces the Rust replay
+  // drives the delivery loop with (README, "Traces for the implementation").
+  // Two queues, a with batch 2 and b with batch 1, M = 2 and D = 2 each;
+  // four message ids; at most two crashes; admission refused, failing
+  // writes, all three answers. No redeploy, revive, prune, sendAfter,
+  // scheduler timeout, clock set back or stall: the first slice.
+  pure val MBT_POL: Pol = { decl: Map(0 -> true, 1 -> true), m: Map(0 -> 2, 1 -> 2),
+                            d: Map(0 -> 2, 1 -> 2), batch: Map(0 -> 2, 1 -> 1) }
+  pure val MBT_MIN: Cfg = { ...impl2({ ...IMPL, NQ: 2, NID: 4, NTOK: 3,
+      INIT_POL: MBT_POL, REDEPLOY_POLS: Set(MBT_POL),
+      MAX_CRASH: 2, MAX_REDEPLOY: 0, MAX_REVIVE: 0, MAX_CLOCKBACK: 0,
+      ENV_SEND_AFTER: false, ENV_TIMEOUT: false, ENV_PRUNE: false,
+      TRACK: Set("invoc", "net", "gap", "life", "valid", "acked", "legit", "counts") }, 0), MBT: true }
+  // The same with one queue and one id, for the reachability witnesses.
+  pure val MBT_ONE: Cfg = { ...MBT_MIN, NQ: 1, NID: 1, INIT_POL: POL1, REDEPLOY_POLS: Set(POL1) }
 }

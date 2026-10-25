@@ -22,11 +22,12 @@ module $name {
 }
 EOF
 # TLC keeps its state queue and fingerprints under the temp dir, gigabytes
-# for the large checks; keep them under out/tmp and remove them after.
-tmp="out/tmp/$name"
+# for the large checks; keep them under out/tmp (or $TLC_TMP, to keep
+# them off the checkout) and remove them after.
+tmp="${TLC_TMP:-$PWD/out/tmp}/$name"
 rm -rf "$tmp"; mkdir -p "$tmp"
 start=$(date +%s)
-TMPDIR="$PWD/$tmp" npx quint verify --backend=tlc --main="$name" "$@" "out/$name.qnt" > "out/$name.txt" 2>&1
+TMPDIR="$tmp" npx quint verify --backend=tlc --main="$name" "$@" "out/$name.qnt" > "out/$name.txt" 2>&1
 status=$?
 rm -rf "$tmp"
 end=$(date +%s)
