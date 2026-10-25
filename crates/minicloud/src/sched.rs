@@ -63,7 +63,7 @@ use tokio::sync::oneshot;
 
 use crate::apps::App;
 use crate::config::AppLimits;
-use crate::convert::{request_value, response_of, AppRequest, BadResponse, Reply};
+use crate::convert::{request_value, response_of, AppRequest, BadResponse, Origin, Reply};
 use crate::hosts::PendingWork;
 use crate::logs::LogRing;
 use crate::stats::AppCounters;
@@ -380,6 +380,7 @@ pub struct Slot {
     history: Mutex<Vec<VersionRecord>>,
     pub counters: Arc<AppCounters>,
     pub logs: Arc<LogRing>,
+    pub current_queues: Arc<crate::apps::CurrentQueues>,
     /// The number the next version of this app is given.
     next_version: AtomicU64,
     /// Whether new requests are routed to the app. A disabled app keeps its
@@ -568,6 +569,7 @@ impl Engine {
                     history: Mutex::new(Vec::new()),
                     counters: Arc::clone(&app.counters),
                     logs: Arc::clone(&app.logs),
+                    current_queues: Arc::clone(&app.current_queues),
                     next_version: AtomicU64::new(1),
                     enabled: AtomicBool::new(true),
                 });
@@ -579,6 +581,9 @@ impl Engine {
         slot.next_version
             .fetch_max(app.number + 1, Ordering::Relaxed);
         self.queue.set_limits(slot.index, &app.limits);
+        // From here a run of any version of the app sends under this
+        // version's `[[queues]]`, as the delivery loop delivers them.
+        slot.current_queues.set(&app.queues);
         slot.history.lock().unwrap().push(record);
         let previous = slot
             .current
@@ -667,6 +672,12 @@ impl Engine {
     /// 503 on the HTTP side; a run on a worker finishes its step.
     pub fn close(&self) {
         self.queue.close();
+    }
+
+    /// Whether [`Engine::close`] has been called: a run whose answer never
+    /// came was dropped by the host stopping, not lost by the run.
+    pub fn is_closed(&self) -> bool {
+        self.queue.is_closed()
     }
 
     fn run_worker(self: &Arc<Self>, worker: usize) {
@@ -835,9 +846,12 @@ impl Engine {
         (step, ended)
     }
 
-    /// Answers `flight` with `reply`, counted as `kind`.
+    /// Answers `flight` with `reply`, counted as `kind`, for a run whose
+    /// entry never started. The reply says so ([`Origin::NotStarted`]): a
+    /// queue's delivery gives such a run's attempt back rather than taking
+    /// the host's 503 or 499 for the app's answer.
     fn fail(&self, flight: Flight, kind: ErrorKind, reply: Reply) {
-        self.fail_metered(flight, kind, reply, None);
+        self.fail_metered(flight, kind, reply.made_by(Origin::NotStarted), None);
     }
 
     /// [`Engine::fail`], for a run that got as far as running: its meter.
@@ -951,7 +965,7 @@ impl Engine {
                         self.fail_metered(
                             flight,
                             kind,
-                            Reply::text(kind.status(), body),
+                            Reply::text(kind.status(), body).made_by(Origin::Stopped),
                             Some(meter),
                         );
                     }

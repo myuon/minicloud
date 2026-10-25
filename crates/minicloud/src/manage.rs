@@ -232,12 +232,14 @@ fn sql_why(error: crate::sql::SqlError) -> String {
     }
 }
 
-/// Now, in seconds since the epoch, as the queue store keeps a `due` and a
-/// `sent`: whether a message is due is a comparison with this.
-fn now_unix() -> i64 {
+/// Now, in milliseconds since the epoch, as the queue store keeps a `due`
+/// and a `sent`: whether a message is due is a comparison with this.
+fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs() as i64)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// One queue of an app, as the admin app sees it: what it holds now, and
@@ -600,7 +602,7 @@ impl Front {
             return Ok(Vec::new());
         };
         let depths = match self.queue_path(app) {
-            Some(path) => crate::queue::peek_depths(&path, now_unix())?,
+            Some(path) => crate::queue::peek_depths(&path, now_ms())?,
             None => Vec::new(),
         };
         // What the store holds for a queue by that name; nothing at all for
@@ -666,7 +668,7 @@ impl Front {
         let Some(path) = self.queue_path(app) else {
             return Ok(Vec::new());
         };
-        crate::queue::peek_waiting(&path, now_unix(), limit)
+        crate::queue::peek_waiting(&path, now_ms(), limit)
     }
 
     /// The dead letters of `app`'s queues, newest buried first, at most
@@ -693,7 +695,7 @@ impl Front {
         let Some(path) = self.queue_path(app) else {
             return Ok(None);
         };
-        crate::queue::peek_one(&path, id, now_unix())
+        crate::queue::peek_one(&path, id, now_ms())
     }
 
     /// The last `n` lines of `app`'s log, oldest first; empty for an app the
@@ -927,6 +929,7 @@ impl Front {
         let lineage = Lineage {
             counters: Arc::clone(&slot.counters),
             logs: Arc::clone(&slot.logs),
+            queues: Arc::clone(&slot.current_queues),
             number: slot.next_version(),
         };
         let load = self.load.clone();
@@ -1166,6 +1169,7 @@ impl Front {
         let lineage = Lineage {
             counters: Arc::clone(&slot.counters),
             logs: Arc::clone(&slot.logs),
+            queues: Arc::clone(&slot.current_queues),
             number: slot.next_version(),
         };
         let dir = self.options.apps.join(name);

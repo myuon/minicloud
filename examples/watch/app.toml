@@ -31,6 +31,9 @@ name = "notify"
 path = "/queue/notify"
 max_attempts = 4
 retry = "20s"
+# A lease outlasts the longest run the deadline above allows, and a second
+# more, or a delivery still running would be handed out again.
+lease = "61s"
 
 # A target that is down is asked again in half a minute rather than at the
 # next minute: a message that is not delivered until then (`sendAfter`),
@@ -42,6 +45,7 @@ name = "recheck"
 path = "/queue/recheck"
 max_attempts = 2
 retry = "10s"
+lease = "61s"
 
 [sql]
 max_bytes = 16777216

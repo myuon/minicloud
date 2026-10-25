@@ -65,6 +65,9 @@ pub struct AppContext {
     pub defer: crate::config::DeferLimits,
     /// `[[queues]]`: the queues the app may send to.
     pub queues: Vec<crate::config::QueuePolicy>,
+    /// The queues the app's current version declares, which a run of
+    /// any version sends under ([`crate::apps::CurrentQueues`]).
+    pub current_queues: Arc<crate::apps::CurrentQueues>,
     /// The largest one chunk of a streamed answer may be, which is the
     /// largest a whole one may be ([`crate::stream`]).
     pub max_response_bytes: usize,

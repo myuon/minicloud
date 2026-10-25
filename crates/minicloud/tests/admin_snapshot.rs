@@ -392,22 +392,34 @@ fn check_history(host: &Host) {
     }
 }
 
-/// Puts a message on `post`'s queue at fixed times, as its own `queue.send`
-/// would, and answers its id.
+/// Puts a message on `post`'s queue at fixed times (seconds, which the store
+/// keeps as milliseconds), as its own `queue.send` would, and answers its id.
 fn put(apps: &Apps, queue: &str, body: &str, sent: i64, due: i64) -> i64 {
     let store = minicloud::queue::shared(&apps.data.join("post").join("queue.sqlite3")).unwrap();
     let store = store.lock().unwrap();
     store
-        .send(queue, body, sent, due, 64 << 10, 1 << 20)
+        .send(queue, body, sent * 1000, due * 1000, 64 << 10, 1 << 20)
         .unwrap()
 }
 
-/// Buries a message nothing has leased (`post` is disabled), so with no
-/// lease to name.
+/// Buries a message nothing has leased (`post` is disabled). The store
+/// settles only what a delivery holds, so the row is moved here, in one
+/// transaction, as `Queues::bury` would, with the attempts it has.
 fn bury(apps: &Apps, id: i64, at: i64, why: &str) {
-    let store = minicloud::queue::shared(&apps.data.join("post").join("queue.sqlite3")).unwrap();
-    let store = store.lock().unwrap();
-    store.bury(id, None, at, why).unwrap();
+    let mut conn =
+        rusqlite::Connection::open(apps.data.join("post").join("queue.sqlite3")).unwrap();
+    let tx = conn.transaction().unwrap();
+    let moved = tx
+        .execute(
+            "INSERT INTO dead (id, queue, body, attempts, due, sent, why, buried) \
+             SELECT id, queue, body, attempts, due, sent, ?2, ?3 FROM message WHERE id = ?1",
+            rusqlite::params![id, why, at * 1000],
+        )
+        .unwrap();
+    assert_eq!(moved, 1, "message {id} is on the queue");
+    tx.execute("DELETE FROM message WHERE id = ?1", [id])
+        .unwrap();
+    tx.commit().unwrap();
 }
 
 #[test]

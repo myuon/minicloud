@@ -136,30 +136,52 @@ so, and what it asserts is counted.
   app's `Err` while the rest of the run goes on; a client that goes away is
   told to the run, which ends; an app not granted `stream` is refused at
   load;
-- queues (`queue.rs`, and `queue.rs`'s 33 unit tests): a message outlives
-  the request that sent it, is delivered as a run, is on disk and is off
-  the queue once taken; a client cannot deliver one itself; a delivery that
-  is refused is tried again and then buried with its reason in the log, and
-  each delivery says which try it is and how many there will be,
-  while the app and its neighbour go on; a delivery that outlives its lease
-  settles nothing, is said in the log and is not counted, while the one
-  that took the message after it is, and a message whose every delivery
-  outlives its lease is a dead letter after `max_attempts` rather than
-  delivered for ever; a queue the app does not declare
-  is an `Err` that says which it has; a queue past `max_depth` refuses the
-  send; the messages survive a restart; five ways of writing `[[queues]]`
-  wrong refuse that app alone. `sendAfter` holds its message back and then
-  delivers it, a delay below nothing is no delay and one past a week is the
-  app's `Err`. The store's own tests hold the lease, the retry, the burying
-  and reviving, the depths, the pruning, and that a message sent for later
-  is held until it is due while still counting towards the depth; that a
+- queues (`queue.rs`, and the unit tests of `queue.rs` and
+  `queue_host.rs`): a message outlives the request that sent it, is
+  delivered as a run, is on disk and is off the queue once taken; a client
+  cannot deliver one itself; a delivery that is refused is tried again and
+  then buried with its reason in the log, and each delivery says which try
+  it is and how many there will be, while the app and its neighbour go
+  on; a delivery that waits for a worker past its deadline is answered by
+  the scheduler, never started, and given back rather than buried; a
+  queue the app does not declare is an `Err` that says which it has; a
+  queue past `max_depth` refuses the send, and the admin refuses to revive
+  into it (409); the messages survive a restart; seven ways of writing
+  `[[queues]]` wrong — a lease a run could outlast among them — refuse that
+  app alone. `sendAfter` holds its message back and then delivers it, a
+  delay below nothing is no delay and one past a week is the app's `Err`.
+  The store's own tests hold the lease, the retry, the burying and
+  reviving, the depths, the pruning, and that a message sent for later is
+  held until it is due while still counting towards the depth; that a
   delivery whose lease has been handed on cannot delete, retry or bury the
-  message, nor can one from before a revive, in every order two deliveries'
-  leases and settles can come in; and that a store made before lease ids is
-  given the column and still settles; that a lease that runs out on the
-  last attempt makes a dead letter while a retried, revived or fresh
-  message does not, that a delivery the host turned away gives its attempt
-  back, and that leasing one queue takes nothing of another;
+  message, nor can one from before a revive, in every order two
+  deliveries' leases and settles can come in; that a store made before
+  lease ids is given the column and still settles, and one whose times are
+  seconds is given milliseconds once; that the store syncs every commit;
+  that `lease` hands out nothing at `max_attempts` and the tick buries what
+  is due at it, saying whether its lease ran out or `max_attempts` was
+  lowered; that a message with a settle kept is neither buried nor leased;
+  that a queue no longer declared has its messages buried; that a delivery
+  the host turned away gives its attempt back, and that leasing one queue
+  takes nothing of another. A run of an old version sends under the
+  current version's `[[queues]]` (`queue_host.rs`'s `sends`);
+- the queue's contract ([`queue-properties.md`](queue-properties.md)),
+  three ways. **The store property test** (`queue/model_tests.rs`) drives
+  a real store on a file with random sequences — sends, ticks, leases,
+  settles with current and stale tokens, revives, prunes, the clock moved
+  either way, redeploys, crashes, and every write made under another
+  connection's lock — and after each step compares every row and every
+  read with a model written from the contract, and checks S1–S10 as far
+  as a store can show them; its regressions are the cases it found, cut
+  down. `PROPTEST_CASES` sets how many sequences (64 by default; a run of
+  20 000 is the deep one). **The loop harness** (`queue_host/harness.rs`,
+  `properties.rs`) drives the delivery loop a step at a time — tick,
+  admission, the run's start, its answer (or the scheduler's, or none),
+  the settle's write (or its failure), a crash, a shutdown — with the
+  clock in a test's hand, and checks S6 against ghost facts the store
+  cannot hold, the in-flight counts after every step, and each finding's
+  case. **The model** (`spec/queue/`) is checked with TLC; its results
+  are in `spec/queue/README.md`;
 - `defer` (`defer.rs`): a query in the path reaches the app as a query; the
   client is answered at once and the work is done after it, as a run of its
   own counted in `served`; a client that sends

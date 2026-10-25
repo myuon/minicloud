@@ -177,8 +177,9 @@ pub(crate) struct Front {
     /// put one there ([`Host::set_load_status`]).
     pub(crate) load_status_source: std::sync::RwLock<Option<crate::load::Status>>,
     pub(crate) admin_token: String,
-    /// Set by [`Host::shutdown`]: new requests are answered 503.
-    draining: AtomicBool,
+    /// Set by [`Host::shutdown`]: new requests are answered 503, and the
+    /// queues' delivery loop starts no new delivery.
+    pub(crate) draining: AtomicBool,
     /// What the public listener accepts with, when it terminates TLS.
     pub(crate) certificates: Option<Arc<crate::tls::Certificates>>,
 }
@@ -1143,6 +1144,7 @@ impl Front {
                 )],
                 body: Bytes::from(ops::metrics(&self.ops(), &self.platform_now())),
                 stream: None,
+                origin: crate::convert::Origin::Answer,
             };
         }
         if path == "/_host/series" {
@@ -1220,6 +1222,7 @@ impl Front {
                 headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
                 body: Bytes::from(ops::page(&self.ops())),
                 stream: None,
+                origin: crate::convert::Origin::Answer,
             };
         }
         if let Some(name) = path
@@ -1456,6 +1459,7 @@ impl Front {
             Some(slot) => Lineage {
                 counters: Arc::clone(&slot.counters),
                 logs: Arc::clone(&slot.logs),
+                queues: Arc::clone(&slot.current_queues),
                 number: slot.next_version(),
             },
             None => Lineage::first(),
@@ -1597,6 +1601,7 @@ pub(crate) fn json_reply(value: &Json) -> Reply {
         headers: vec![("content-type".into(), "application/json".into())],
         body: Bytes::from(body),
         stream: None,
+        origin: crate::convert::Origin::Answer,
     }
 }
 
@@ -1642,6 +1647,7 @@ fn asset_reply(asset: &crate::assets::Asset, if_none_match: Option<&str>, app: &
         ],
         body: Bytes::new(),
         stream: None,
+        origin: crate::convert::Origin::Answer,
     };
     if modified {
         reply

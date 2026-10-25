@@ -147,60 +147,6 @@ fn a_delivery_says_which_try_it_is_and_how_many_there_will_be() {
     assert_eq!(get(host.addr, "/post/tries").body.trim(), "1/2;2/2;");
 }
 
-/// A first delivery that takes longer than the lease is taken to be lost,
-/// and the message goes to a second, which takes it at once. When the
-/// first one finishes, the message is already the second's to settle: its
-/// answer is said in the log and counted as nothing, so the message is
-/// delivered once by the counters though the consumer was asked twice.
-#[test]
-fn a_delivery_that_outlives_its_lease_does_not_settle_the_message() {
-    let apps = post(
-        "[limits]\ndeadline = \"10s\"\n\n\
-         [[queues]]\nname = \"mail\"\nlease = \"1s\"\nretry = \"3600s\"\n",
-    );
-    let host = start(&apps, 2);
-    assert_eq!(get(host.addr, "/post/send?body=slow").status, 202);
-    wait_until("the first delivery to finish", || {
-        get(host.addr, "/_host/apps/post/logs?n=50")
-            .body
-            .contains("delivery outlived its lease")
-    });
-    assert_eq!(taken(&host), "slow;slow;");
-    assert_eq!(count(&host, "post", "queue_delivered"), 1);
-    assert_eq!(count(&host, "post", "queue_retried"), 0);
-    assert_eq!(count(&host, "post", "queue_buried"), 0);
-    assert_eq!(get(host.addr, "/post/depth").body.trim(), "0");
-}
-
-/// A consumer that is always slower than the lease never settles its
-/// message, so the message must not go round for ever: once its lease runs
-/// out on the last attempt it is a dead letter, and the deliveries that
-/// finish after that settle nothing.
-#[test]
-fn a_message_whose_every_delivery_outlives_its_lease_is_a_dead_letter() {
-    let apps = post(
-        "[limits]\ndeadline = \"10s\"\n\n\
-         [[queues]]\nname = \"mail\"\nlease = \"1s\"\nmax_attempts = 2\nretry = \"3600s\"\n",
-    );
-    let host = start(&apps, 2);
-    assert_eq!(get(host.addr, "/post/send?body=slower").status, 202);
-    let logs = || get(host.addr, "/_host/apps/post/logs?n=50").body;
-    wait_until("both deliveries to finish", || {
-        logs().matches("delivery outlived its lease").count() == 2
-    });
-    let said = logs();
-    assert!(
-        said.contains("is a dead letter after 2 attempt(s): no answer within the lease"),
-        "{said}"
-    );
-    // Asked twice, never a third time, and counted as buried, not taken.
-    assert_eq!(taken(&host), "slower;slower;");
-    assert_eq!(count(&host, "post", "queue_buried"), 1);
-    assert_eq!(count(&host, "post", "queue_delivered"), 0);
-    assert_eq!(count(&host, "post", "queue_retried"), 0);
-    assert_eq!(get(host.addr, "/post/depth").body.trim(), "0");
-}
-
 #[test]
 fn a_queue_the_app_does_not_declare_is_the_apps_err() {
     let apps = post(TWICE);
@@ -256,10 +202,136 @@ fn a_queue_that_cannot_be_read_refuses_that_app_alone() {
         "[[queues]]\nname = \"mail\"\nretry = \"soon\"\n",
         "[[queues]]\nname = \"mail\"\npath = \"queue\"\n",
         "[[queues]]\nname = \"mail\"\n[[queues]]\nname = \"mail\"\n",
+        // A lease a run could outlast: the delivery would be handed out
+        // again while it still runs.
+        "[limits]\ndeadline = \"10s\"\n\n[[queues]]\nname = \"mail\"\nlease = \"1s\"\n",
+        "[limits]\ndeadline = \"60s\"\n\n[[queues]]\nname = \"mail\"\n",
     ] {
         let apps = post(bad);
         let host = start(&apps, 1);
         assert_eq!(get(host.addr, "/post/depth").status, 503, "{bad}");
         assert_eq!(get(host.addr, "/hello/").status, 200, "{bad}");
     }
+}
+
+/// F2 end to end (`docs/queue-properties.md`, S6 and S7): a delivery whose
+/// run waits for a worker past its deadline is answered 503 by the
+/// scheduler and never started. The host can see that, so the attempt is
+/// given back and a message on its last attempt is not buried.
+///
+/// One worker, no time slice, and four other apps (`crunch`, some 16 ms of
+/// CPU a run natively) each with two requests always waiting: the
+/// delivery, due a second or two after the send, waits its round-robin
+/// turn behind runs of the others for longer than `post`'s 20 ms
+/// deadline. The send itself is made before the load starts.
+#[test]
+fn a_delivery_that_timed_out_waiting_for_a_worker_is_given_back() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let config = "grant = [\"queue\", \"kv\", \"log\", \"timer\"]\n\
+                  [limits]\ndeadline = \"20ms\"\n\n\
+                  [[queues]]\nname = \"mail\"\nmax_attempts = 1\nretry = \"3600s\"\n";
+    let apps = apps(&[
+        AppSpec {
+            name: "post",
+            from: fixtures().join("post"),
+            config: Some(config),
+        },
+        sample("crunch"),
+        AppSpec {
+            name: "crunch2",
+            ..sample("crunch")
+        },
+        AppSpec {
+            name: "crunch3",
+            ..sample("crunch")
+        },
+        AppSpec {
+            name: "crunch4",
+            ..sample("crunch")
+        },
+    ]);
+    let mut options = options(&apps, 1);
+    options.slice = None;
+    let host = minicloud::Host::start(options).expect("the host starts");
+    let addr = host.addr;
+    // Whether the delivery's turn comes after the 20 ms is up depends on
+    // where the round robin stands when it is admitted, so a trial whose
+    // delivery got a worker in time (and was taken) is made again.
+    let mut trials = 0;
+    while count(&host, "post", "errors.queue_timeout") == 0 {
+        trials += 1;
+        assert!(trials <= 20, "no delivery waited past its deadline");
+        let delivered = count(&host, "post", "queue_delivered");
+        assert_eq!(get(addr, "/post/send-after?body=never&secs=2").status, 202);
+        let stop = Arc::new(AtomicBool::new(false));
+        let load: Vec<_> = ["crunch", "crunch2", "crunch3", "crunch4"]
+            .iter()
+            .flat_map(|app| [app, app])
+            .map(|app| {
+                let stop = Arc::clone(&stop);
+                let path = format!("/{app}/?n=200000");
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        get(addr, &path);
+                    }
+                })
+            })
+            .collect();
+        wait_until("the delivery to time out or be taken", || {
+            count(&host, "post", "errors.queue_timeout") >= 1
+                || count(&host, "post", "queue_delivered") > delivered
+        });
+        stop.store(true, Ordering::Relaxed);
+        for load in load {
+            load.join().unwrap();
+        }
+    }
+    let logs = get(addr, "/_host/apps/post/logs?n=50").body;
+    assert_eq!(count(&host, "post", "queue_buried"), 0, "{logs}");
+    assert_eq!(
+        get(addr, "/post/depth").body.trim(),
+        "1",
+        "given back: {logs}"
+    );
+}
+
+/// S10 (F5): a revive adds a waiting message as a send does, so it is
+/// refused as a send is when the queue holds its `max_depth`: the admin
+/// answers 409 and says why, and the dead letter stays dead.
+#[test]
+fn reviving_into_a_full_queue_is_refused() {
+    let apps = post("[[queues]]\nname = \"mail\"\nmax_depth = 2\nmax_attempts = 1\n");
+    let host = start(&apps, 2);
+    let dead: i64 = get(host.addr, "/post/send?body=fail")
+        .body
+        .trim()
+        .parse()
+        .unwrap();
+    wait_until("the dead letter", || {
+        count(&host, "post", "queue_buried") == 1
+    });
+    for _ in 0..2 {
+        assert_eq!(
+            get(host.addr, "/post/send-after?body=later&secs=3600").status,
+            202
+        );
+    }
+    let refused = send_raw(
+        host.admin_addr.expect("an admin listener"),
+        format!(
+            "POST /apps/post/queues/revive/{dead} HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: close\r\nAuthorization: Bearer {ADMIN_TOKEN}\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(
+        refused.body.contains("max_depth of 2") && refused.body.contains("holds 2"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(get(host.addr, "/post/depth").body.trim(), "2");
 }

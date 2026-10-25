@@ -66,6 +66,8 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 brotli = "8"
 rand = "0.8"
 rsa = "0.9"
+# The queue store against a model of its contract (`queue/model_tests.rs`).
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Peak resident memory, for the compression-bomb test.
 [target.'cfg(unix)'.dev-dependencies]

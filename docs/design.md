@@ -804,7 +804,20 @@ wrong one for anything that must happen. A queue is the other trade.
 **The message is on disk when `send` answers.** The store is the app's own
 SQLite file (`queue.rs`), beside its `kv` and its `sql`, and sending is one
 insert — no delivery, no waiting, nothing that can fail after the app has
-been told the message is taken.
+been told the message is taken. Unlike the other stores it commits with
+`synchronous = FULL`: under `NORMAL` a power loss can undo the last
+commits, and an undone `send` is a message the app was told is safe and
+that is gone. Its times are milliseconds since the epoch, so a
+`sendAfter` is not delivered before its time and a `lease` or `retry` of
+`"1500ms"` is as long as it says (stores from before, in seconds, are
+converted once when opened).
+
+**What the queue promises is written down** in
+[`queue-properties.md`](queue-properties.md): S1–S10, L1–L3 and the
+assumptions they rest on, with how each is checked — a store property
+test, a delivery-loop harness, and a model checked with TLC
+(`spec/queue/`) — and the findings that work turned up and how each was
+fixed.
 
 **Delivery is a run of the app** ([a run the host asks for](#a-run-the-host-asks-for)),
 which is what makes a consumer an ordinary path with ordinary limits rather
@@ -818,9 +831,21 @@ it: the alternative is losing a message whenever the host stops in the
 wrong moment. A consumer must be able to be asked twice. Saying so is
 better than a guarantee that would be a lie.
 
+**A lease outlasts the run.** A queue's `lease` must be at least a second
+longer than the app's `limits.deadline`, and an app that declares
+`[[queues]]` must have a deadline; otherwise the app is refused, with a
+message naming both values. The deadline bounds a run, its wait for a
+worker included, so a delivery whose app answers at all answers before its
+lease runs out, and the second on top covers the settle being written. The
+defaults (a lease of 60 s, a deadline of 10 s) keep it. **This is a
+breaking change**: an `app.toml` whose lease was not past its deadline by
+a second — a `deadline = "60s"` with the default lease, say — loaded
+before and is refused now; give its queues a longer `lease` (the `watch`
+example sets `lease = "61s"` beside its 60 s deadline).
+
 **Only the delivery holding the current lease settles the message.**
-Nothing holds a queue's `lease` to the app's `deadline`, so a run can still
-be going when its lease runs out and the message is handed to another. If
+A run can still be going when its lease runs out — a host stalled past the
+second, a clock set forward — and then the message is handed to another. If
 the first run's answer still counted, it would settle the second's message:
 take it off the queue while the second is working on it, move the second's
 lease so a third delivery could take it, or bury it while it is being taken.
@@ -831,16 +856,35 @@ it. `attempts` could not be the token: reviving a dead letter counts it
 afresh from 0.
 
 That took away what used to end a consumer that is always too slow: its own
-late `done`. So **a lease that runs out on the last attempt makes a dead
-letter** ("no answer within the lease"). Before it leases a queue, the
-delivery loop buries what is due, has used `max_attempts` and still holds a
-lease — which can only be a last delivery that did not answer in time,
-because every settle either ends the lease (`retry`) or takes the message
-away (`done`, `bury`). A delivery the host turns away before the app sees
-it (the app's queue full, the host busy) is not an attempt: it gives the
-message back with the attempt its lease counted taken back, so a busy host
-cannot spend a message's attempts. And a lease takes from one queue at a
+late `done`. So **no lease is issued at `max_attempts`, and a message that
+has had its attempts is a dead letter.** `lease` takes the queue's current
+`max_attempts` and hands out only what has been tried fewer times. Before
+it leases a queue, at the same instant, the delivery loop buries what is
+due and has had its attempts, and says why: "no answer within the lease"
+when it still holds a lease — a last delivery that did not answer in time,
+because every settle either ends the lease or takes the message away — and
+"max_attempts lowered to M" when it holds none, a retry that was waiting
+when a redeploy lowered the bound. "Current" is the version the tick read
+when it began.
+
+**Only the app's answer is an answer.** A reply says who made it: the app,
+or the host in its place. A run the host never started — turned away at
+admission, timed out waiting for a worker, cancelled while it waited — is
+not an attempt: the message is given back with the attempt its lease
+counted taken back, so a busy host cannot spend a message's attempts (nor,
+taking the scheduler's `499` for an answer below 500, delete it). A reply
+the host made after the run started — cut off at its deadline, cancelled —
+is no answer, whatever its status. And a lease takes from one queue at a
 time, so one queue's loop never counts an attempt on another's message.
+
+**A settle is kept until it is written.** What a delivery decided is put
+in memory beside the store, then written; a write that fails stays there
+and the next tick writes it again, before it buries or leases anything.
+Until then the message is that delivery's — not buried as having had no
+answer when its lease runs out, not handed out again — and only a write
+that took is counted or logged. A crash loses what is kept, as it loses
+every delivery; so does a shutdown, which drops the runs still waiting and
+writes nothing for them rather than calling them unanswered.
 
 **A failure is retried with a doubling delay** until `max_attempts`, then
 the message is buried as a dead letter with the reason. Burying rather than
@@ -848,11 +892,22 @@ dropping is the point of the feature: a queue that silently loses what
 nobody could take is a queue that cannot be debugged. `minicloud queues`
 reads them and puts one back, and the admin app has a page of what is on
 each queue ([Seeing what is on an app's queues](#seeing-what-is-on-an-apps-queues)).
+Putting one back is refused (409) when its queue already holds its
+`max_depth`, as a send would be.
 
-`batch` bounds how many of a queue are in flight at once, counted on the
-app's counters, so a slow consumer cannot be given the whole queue at once;
-the host looks for due messages once a second, which is one indexed
-`SELECT` per app that has a queue.
+**The current version's queues are the ones that count.** A redeploy may
+drop a queue or change its bounds while runs of the old version are still
+going. What such a run sends is held to the current version's
+`[[queues]]` — its `max_depth`, and whether the queue is declared at all —
+since that is the version that delivers it. The messages of a queue the
+current version no longer declares become dead letters at the next tick
+("queue `x` is no longer declared"), where they are counted, listed and
+can be revived, rather than lying where nothing delivers them.
+
+`batch` bounds how many of a queue are in flight at once, counted per
+queue, so a slow consumer cannot be given the whole queue at once and a
+busy queue cannot take another's room; the host looks for due messages
+once a second, which is one indexed `SELECT` per app that has a queue.
 
 **Work that should happen later is `queue.sendAfter`**: a send with a delay,
 which is delivered no sooner than that many seconds from now. It is the same

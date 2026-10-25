@@ -35,6 +35,29 @@ pub struct Reply {
     /// the channel is the end of the answer. `None` for an answer that is
     /// whole, which every answer but a streamed one is.
     pub stream: Option<tokio::sync::mpsc::Receiver<Bytes>>,
+    /// Whether this is a run's own answer or the host's word on a run
+    /// that did not answer. A status cannot say which: a run may answer
+    /// 503 itself, and the host answers 499 for a client that left.
+    pub origin: Origin,
+}
+
+/// Who made a [`Reply`], for a caller that must tell an app's answer from
+/// the host answering in its place: a queue's delivery
+/// ([`crate::queue_host`]), which counts an attempt only for a run that
+/// started and settles a message only on the app's own answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// What the run answered, or a reply with no run behind it at all (a
+    /// static file, an operations page).
+    #[default]
+    Answer,
+    /// The host answered for a run whose entry never started: it waited
+    /// for a worker past its deadline, or was cancelled while it waited.
+    NotStarted,
+    /// The host answered for a run that started and did not answer: cut
+    /// off at its deadline or by a cancel, failed, or answered something
+    /// that is not a response.
+    Stopped,
 }
 
 impl Reply {
@@ -48,6 +71,7 @@ impl Reply {
             )],
             body: Bytes::from(body.into()),
             stream: None,
+            origin: Origin::Answer,
         }
     }
 
@@ -58,7 +82,14 @@ impl Reply {
             headers,
             body,
             stream: None,
+            origin: Origin::Answer,
         }
+    }
+
+    /// This reply, said to be made by `origin`.
+    pub fn made_by(mut self, origin: Origin) -> Reply {
+        self.origin = origin;
+        self
     }
 
     /// This reply with one more header.
@@ -261,5 +292,6 @@ pub fn response_of(value: &Value, max_bytes: usize) -> Result<Reply, BadResponse
         headers,
         body: Bytes::from(body.to_string()),
         stream: None,
+        origin: Origin::Answer,
     })
 }
