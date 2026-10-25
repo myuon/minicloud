@@ -18,7 +18,11 @@ with TLC against the contract in [`docs/queue-properties.md`](../../docs/queue-p
   `tools/show.sh <name>...` prints verdicts and traces.
 - `tools/impl2.sh` — round 2: every check on the fixed code (`IMPL2`);
   `tools/reach.sh` — its reachability sanity; `tools/sanity.sh` — the
-  backend sanity checks.- `sanity/toy.qnt` — the backend's sanity checks.
+  backend sanity checks.
+- `tools/traces.sh` — the traces the Rust replay drives the delivery loop
+  with (below, "Traces for the implementation"); `tools/itf-pack.py`
+  packs each one.
+- `sanity/toy.qnt` — the backend's sanity checks.
 
 ## Running
 
@@ -32,6 +36,7 @@ npm run safety       # all safety checks (hours)
 npm run liveness     # all liveness checks (about an hour)
 npm run impl2        # round 2: every check on the fixed code (about two hours)
 npm run reach        # round 2: reachability sanity
+npm run traces       # the corpus the Rust replay uses (about a minute)
 ```
 
 Java 21 is needed. TLC is the one inside the Apalache 0.62.1 jar Quint
@@ -55,6 +60,164 @@ those bounds did not cut the search. A check that does not end within
 
 All results below are TLC on the model; none is from Apalache or `quint
 run`.
+
+## Traces for the implementation (model-based testing)
+
+`npm run traces` (`tools/traces.sh`) has the simulator draw traces from
+the model of the code and writes them, gzipped, to
+`crates/minicloud/tests/queue_traces/`, which is committed: the Rust test
+`queue_host::mbt` replays each against the real delivery loop under the
+loop harness and compares the states after every step, so CI needs
+neither Node nor Quint. The seed is fixed and the simulator runs on one
+thread, and `tools/itf-pack.py` drops the time of making from each trace,
+so the same model gives the same bytes.
+
+- **Configurations** (`configs.qnt`): `MBT_MIN`, IMPL2 with two queues (a
+  with batch 2, b with batch 1; M = 2, D = 2 each), four message ids, at
+  most two crashes, admission refused, failing settle writes, answers
+  2xx–4xx / 5xx / none; `MBT_ONE`, the same with one queue and one id.
+  `MBT_FULL` (and `MBT_FULL_ONE`) adds at most two redeploys (either
+  queue removed or kept, its M and D 1 or 2), two revives, two clock set
+  backs and one host stall, `sendAfter` and scheduler timeouts.
+- **Actions** (`mbtStep`): send and `sendAfter`, a send the depth refuses,
+  the tick (`bury_undeclared`, `bury_spent`, room and `lease`, the flush
+  of held settles), admission accepted or refused, the run's start, its
+  answer, the scheduler's 503, the settle's write (ok or failing), a
+  crash, time passing (a lease running out under a live delivery is the
+  stall), the clock set back, a redeploy, a revive and a revive the depth
+  refuses. Not prune (the admin prunes by age, not one id), cancelled runs
+  (unreachable for a delivery), nor sends from a previous version (not in
+  the code any more).
+- **Corpus**: 200 runs of 100 steps on `MBT_MIN` (`min_NNN`), 150 on
+  `MBT_FULL` (`full_NNN`), and one witness for each reachability
+  invariant (`witness_*`, below): 360 files, about 1.8 MB.
+
+### What the model needed for it
+
+All behind the `MBT` flag or a ghost a configuration tracks, so that
+every other check sees the model unchanged, except the last item, which
+corrects IMPL2.
+
+1. **Time in delays** (`MBT`). The model's time was a flag per message
+   (due or not, in any order), which real due times cannot always follow:
+   two leases of the same length taken one after the other run out in
+   that order. With `MBT`, every lease and retry is one unit of time
+   (`DELAY_MS` in the replay: `lease` = `retry`, and M = 2 keeps the retry
+   from doubling); `clk` is the time and a message not due has a `dueAt`;
+   `timePasses(i)` moves `clk` to `i`'s `dueAt` and makes every message
+   due at or before it due as well, which is what moving a clock does. A
+   held settle remembers when it was decided (`Del.at`), because its write
+   is as of then: a flushed retry may be due at once.
+2. **The tick in one go** (`mbtStep`). The code's tick is one call: it
+   flushes, buries and leases at one reading of the clock and admits as
+   it goes. The model's tick is several steps; `mbtStep` lets nothing else
+   happen between them once a tick has begun, and draws each nondet only
+   from where its action is enabled (so a trace does not end early on a
+   pick that leads nowhere). `step` and every TLC check are as before.
+3. **Counters** (ghost `counts`, tracked as `"counts"`): delivered,
+   retried and buried, moved only by a write that took and set back to
+   nothing by a crash. The contract says "counters and the log move only
+   when a write takes"; without them in the model a code that counted a
+   failed write could not be told apart.
+4. **Witness invariants** `NeverHeldPastLease` (F3's setting on the code:
+   a held settle whose lease has run out) and `NeverAllQueuesBusy` (F6's:
+   both queues with a delivery in flight).
+5. **Clock set back, oldest first** (`MBT`). `clockBackTo(t)` sets `clk`
+   back to `t`, and a message is due again only if its `dueAt` is at or
+   before `t`; so a sent or revived message has `dueAt` too (when it was
+   sent), and `sendAfter` is one unit. `lease` takes the oldest first by
+   the time sent and then id (`older`), as the code's `ORDER BY sent, id`
+   does: with the clock set back a later id can be older. Without `MBT`
+   it is by id, as before.
+6. **Refusals in the trace** (`sendRefused`, `reviveRefused`): a send or
+   revive the queue's depth refuses changes nothing, so the model had no
+   step for it and the replay never asked the code. Each is a step that
+   changes nothing, so that the code is asked and must refuse too.
+7. **IMPL2's in-flight count comes down at the settle** (a fix of the
+   model, found by the replay). The model lowered `inflight` when the run
+   ended; the code lowers it in `Deliveries::settle`, when the delivery's
+   task takes the reply. Between the two a tick has less room in the code
+   than in the model. With `IMPL2` the model now lowers it in `settle`.
+
+`tools/check.sh` also takes `TLC_TMP`, a directory for TLC's states off
+the checkout.
+
+**The checks after these changes.** With 1–4 only, every IMPL2 safety
+check that finished before ran to the same state count as in the table
+below (`i2_safe` 34,412; `i2_s5` 34,330; `i2_s3` 85,283; `i2_s6` 48,738;
+`i2_s7` 47,452; `i2_s9` 1,151,209; `i2_s10` 3,052,952; `i2_l3a` 49,162;
+with a stall `i2_safe` 550,870, `i2_s5` 579,960, `i2_s3` 863,788) and the
+same counterexamples (`i2_s10u` 9 steps, `i2_s6_stall` and `i2_s7_stall`
+11). With 7 as well, `npm run sanity` and `npm run reach` end as before
+(every check `ok`), and every IMPL2 check of `tools/impl2.sh` but S10 with
+a stall on B10 (which did not finish before either) was run again; the
+table below has the new counts. Every verdict is the one before, but one:
+**S6.3 with a stall now holds on B1**, where it failed in 11 steps. Its
+counterexample had the next tick lease the message again while the 503's
+settle was still to be written, which batch 1 leaves no room for once the
+in-flight count waits for the settle. With batch 2 (`I2_S6_STALL_B2`) it
+fails as before, in 11 steps: the residual (N5 under a stall) stands. The
+safety searches are smaller (fewer interleavings of a run's end and its
+settle with a tick); the liveness ones are as before but L1 with a stall
+(33,149 states, was 72,140). 5 and 6 are behind `MBT`; the IMPL2 safety
+checks on B1/B2/B2q/B10 (with and without a stall), L1, L2 on two queues
+and L3b were run once more after them, to the same counts.
+
+### The replay
+
+`crates/minicloud/src/queue_host/mbt.rs`. It parses the ITF itself
+(`serde_json`, `#bigint`/`#set`/`#map`), drives each step through the
+harness from `mbt::actionTaken` and `mbt::nondetPicks`, and compares, after
+every step, a state read only from the implementation with one read only
+from the trace; the comparison is of states, not of either side's rules.
+
+- **Compared**: the clock; each message on the queue (queue, attempts,
+  due or the time it is due at, the lease it holds by the model's token);
+  each dead letter (queue, attempts, why: `fail`, `outlived`, `lowered`,
+  `undeclared`); the in-flight count per queue; each delivery (queue,
+  attempts, M, leased / queued / running / answered, started) and each
+  held settle (queue, attempts, the op and when it was decided); the
+  delivered / retried / buried counters; per message the invocations,
+  leases less written give-backs and unstarted deliveries lost to a crash
+  (the harness's ghost facts against the model's `invoc`, `net`, `gap`).
+- **Names**: model ids and (id, token) are bound to the store's ids and
+  lease ids as they appear. An id or lease id the store gives twice fails
+  the replay (S3, S4). A delivery is driven by its lease, since after a
+  stall a message has two.
+- **Lives**: the model's ghosts start again at a revive; the harness's
+  facts are per message, so the replay counts them from the revive on
+  (by the leases issued since, and the runs and losses of those leases).
+- **Time**: "message m becomes due" moves the clock to m's due time in the
+  store; that the model has m not due before, and that every other
+  message is due or not as the model says after, is checked.
+- **The tick** is replayed as one call. The model's picks inside it are
+  set up first (which held settle's write fails, by its lease, which
+  admission is refused and whether its give-back is written); after it, the writes the
+  model made must all have been tried, the admissions asked in the model's
+  order, and the leases issued exactly the model's.
+- Not compared: states inside a tick (the code has none to show), a
+  delivery's answer before its settle (inside the run's channel), the
+  `valid` ghost, the M of a held settle.
+
+**What the replay found.** Besides the in-flight count (7 above, the
+model's), the harness's ghost facts did not count a give-back held over a
+failed write as an unstarted delivery lost when the process crashes,
+which the model (and S6.3) does; `Harness::crash` now does.
+
+**Traces from TLC.** Quint 0.33's TLC backend writes no ITF (`quint verify
+--backend=tlc --out-itf` leaves no file), and its traces carry no action
+names. The reachability invariants of `npm run reach` that the slice can
+break were checked again on the MBT configurations with TLC, for their
+shortest witnesses, and the simulator drew a witness of each, checked
+only between ticks (TLC's length; the corpus's): on `MBT_ONE`
+`NeverHeld` (5; 7), `NeverHeldPastLease` (6; 11), `NeverDone` (8; 13),
+`NeverSecondAttempt` (10; 18), `NeverFail` (14; 24), `NeverOutlived` (15;
+24); on `MBT_MIN` `NeverAllQueuesBusy` (9; 16); on `MBT_FULL_ONE`
+`NeverLowered` (12; 25), `NeverUndeclared` (3; 5), `NeverStall` (6; 9).
+The round-1 counterexamples are on the code before the fixes, and not
+traces of this model; their settings on the fixed code are what the
+witnesses are: F3 on `done` and `give_back` (`NeverHeld*`), F1 (`NeverLowered`),
+F7 (`NeverUndeclared`), F6 (`NeverAllQueuesBusy`), N5 and N3 (`NeverStall`).
 
 ## Round 2: the code on `fix/queue-contract`
 
@@ -109,22 +272,23 @@ exclusions (crash/shutdown, host stall, power loss) or is a gap.
 | prop. | assumptions | bounds | complete? | result | cex length | excl.? |
 |---|---|---|---|---|---|---|
 | S1, S2, S4, S8 | crash only (no power loss) | B1 | yes: 34,412 states, 10 s | holds | — | — |
-| ″ | + host stall | B1 | yes: 550,870, 21 s | holds | — | — |
-| ″ | | B1, 2 ids | yes: 3,150,898, 80 s | holds | — | — |
-| S3 | | B2 | yes: 85,283 / with stall 863,788 | holds | — | — |
-| S5 | M of the tick's version (D4) | B1 | yes: 34,330 / with stall 579,960; 2 ids 3,052,952 | holds | — | — |
-| S6 (1)(2)(3) | | B1 | yes: 48,738; 2 ids 10,138,314 (289 s) | holds | — | — |
-| ″ | + host stall | B1 | yes (cex) | (3) **violated** | 11 | **yes**: host stall (N5) |
-| S7 | an answer lost in a crash is none | B1 | yes: 47,452; 2 ids 6,032,105 (148 s) | holds | — | — |
+| ″ | + host stall | B1 | yes: 251,778, 17 s | holds | — | — |
+| ″ | | B1, 2 ids | yes: 2,994,112, 160 s | holds | — | — |
+| S3 | | B2 | yes: 57,386 / with stall 291,637 | holds | — | — |
+| S5 | M of the tick's version (D4) | B1 | yes: 34,330 / with stall 270,604; 2 ids 2,896,166 | holds | — | — |
+| S6 (1)(2)(3) | | B1 | yes: 48,738; 2 ids 9,702,820 (292 s) | holds | — | — |
+| ″ | + host stall | B1 | yes: 324,722 | holds (batch 1: no room to lease again while the 503's settle is pending) | — | — |
+| ″ | + host stall, batch 2 | B1 | yes (cex) | (3) **violated** | 11 | **yes**: host stall (N5) |
+| S7 | an answer lost in a crash is none | B1 | yes: 47,452; 2 ids 5,852,001 (149 s) | holds | — | — |
 | ″ | + host stall | B1 | yes (cex) | **violated** ("outlived" though the app answered) | 11 | **yes**: host stall (N3 residual) |
-| S9 | one app | B2q | yes: 1,151,209 / with stall 11,776,826 (227 s) | holds | — | — |
-| S10 | declared queues | B10 | yes: 3,052,952, 68 s | holds | — | — |
+| S9 | one app | B2q | yes: 968,149 / with stall 5,261,443 (560 s) | holds | — | — |
+| S10 | declared queues | B10 | yes: 2,896,166, 90 s | holds | — | — |
 | ″ | + host stall | B10 | **no**: 66.5 M states at 33 min, stopped (disk nearly full) | nothing found | — | — |
-| ″ | ± host stall | B2 | yes: 85,283 / 863,788 | holds | — | — |
+| ″ | ± host stall | B2 | yes: 57,386 / 291,637 | holds | — | — |
 | S10, undeclared queue | `revive` into a queue the current version does not declare | B10 | yes (cex) | the queue grows past the D its old declaration had | 9 | **departure**: the code allows it; the contract has no D for an undeclared queue (and D6 buries it again at the next tick) |
-| L3a | | B1 | yes: 49,162 / with stall 825,617; 2 ids 7,041,618 (184 s) | holds | — | — |
+| L3a | | B1 | yes: 49,162 / with stall 427,192; 2 ids 6,738,428 (183 s) | holds | — | — |
 | L1 | E1 (app enabled), E2–E5, E7, E6 as bounds | L | yes: 8,835 states, 57 s | holds | — | — |
-| ″ | + host stall | L | yes: 72,140, 1007 s | holds | — | — |
+| ″ | + host stall | L | yes: 33,149, 216 s | holds | — | — |
 | ″ | | L2q | yes: 2,038 / with stall 1,171 s | holds | — | — |
 | ″ | every fault once (+ revive, clock back, sendAfter) | L | yes: 35,226 states, 249 s | holds | — | — |
 | ″ | without E7 | L | yes (cex) | **violated**: 503 → give back → lease → 503 for ever | lasso | outside the assumptions (E7) |
@@ -139,7 +303,7 @@ exclusions (crash/shutdown, host stall, power loss) or is a gap.
 
 Traces (all one-worker BFS, shortest; `tools/show.sh <name>`):
 
-- **S6.3 with a stall** (`i2_s6_stall_bfs1`, 11 steps): lease (attempts 1),
+- **S6.3 with a stall** (`i2_s6_stall_b2_bfs1`, batch 2, 11 steps): lease (attempts 1),
   admit; the scheduler answers 503 (the run never started); **the host
   stalls** and the lease runs out before the delivery takes the lock;
   the next tick leases the message again (attempts 2); the 503's

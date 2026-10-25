@@ -58,6 +58,8 @@ safety i2_x_safe_2id I2_SAFE_2ID S1,S2,S4,S8
 safety i2_x_s6_2id   I2_S6_2ID   S6
 safety i2_x_s7_2id   I2_S7_2ID   S7
 safety i2_x_l3a_2id  I2_L3A_2ID  L3a
+# S6.3 with a stall and batch 2 (batch 1 leaves no room to lease again)
+safety i2_s6_stall_b2 I2_S6_STALL_B2 S6
 # S10 with a stall on B10 did not finish; on B2
 safety i2_s10b2       I2_S10_B2       S10
 safety i2_s10b2_stall I2_S10_B2_STALL S10

@@ -18,6 +18,7 @@
 
     "impl2": "tools/impl2.sh",
     "reach": "tools/reach.sh",
+    "traces": "tools/traces.sh",
     "safety": "tools/safety.sh",
     "liveness": "tools/liveness.sh",
 
