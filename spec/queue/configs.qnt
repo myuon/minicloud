@@ -235,4 +235,15 @@ module configs {
       TRACK: Set("invoc", "net", "gap", "life", "valid", "acked", "legit", "counts") }, 0), MBT: true }
   // The same with one queue and one id, for the reachability witnesses.
   pure val MBT_ONE: Cfg = { ...MBT_MIN, NQ: 1, NID: 1, INIT_POL: POL1, REDEPLOY_POLS: Set(POL1) }
+  // The second slice: as MBT_MIN, and at most two redeploys (either queue
+  // removed or not, its M and D 1 or 2), two revives, two clock set backs
+  // and one host stall; sendAfter (one delay) and scheduler timeouts.
+  pure val MBT_POLS: Set[Pol] =
+    Set(true, false).map(da => Set(true, false).map(db => Set(1, 2).map(ma => Set(1, 2).map(mb =>
+    Set(1, 2).map(xa => Set(1, 2).map(xb =>
+      { ...MBT_POL, decl: Map(0 -> da, 1 -> db), m: Map(0 -> ma, 1 -> mb), d: Map(0 -> xa, 1 -> xb) }))))))
+    .flatten().flatten().flatten().flatten().flatten()
+  pure val MBT_FULL: Cfg = { ...MBT_MIN, REDEPLOY_POLS: MBT_POLS, MAX_REDEPLOY: 2, MAX_REVIVE: 2,
+                             MAX_CLOCKBACK: 2, MAX_STALL: 1, ENV_TIMEOUT: true, ENV_SEND_AFTER: true }
+  pure val MBT_FULL_ONE: Cfg = { ...MBT_FULL, NQ: 1, NID: 1, INIT_POL: POL1, REDEPLOY_POLS: POLS1 }
 }

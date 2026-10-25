@@ -76,14 +76,21 @@ so the same model gives the same bytes.
   with batch 2, b with batch 1; M = 2, D = 2 each), four message ids, at
   most two crashes, admission refused, failing settle writes, answers
   2xx–4xx / 5xx / none; `MBT_ONE`, the same with one queue and one id.
-- **Actions** (`mbtStep`): send, the tick (`bury_undeclared`,
-  `bury_spent`, room and `lease`, the flush of held settles), admission
-  accepted or refused, the run's start, its answer, the settle's write (ok
-  or failing), a crash, and time passing. No redeploy, revive, prune,
-  `sendAfter`, scheduler timeout, stall or clock set back yet.
-- **Corpus**: 200 runs of 100 steps on `MBT_MIN` (`min_NNN`), and one
-  witness for each reachability invariant the slice can break
-  (`witness_*`, below): 207 files, about 1.1 MB.
+  `MBT_FULL` (and `MBT_FULL_ONE`) adds at most two redeploys (either
+  queue removed or kept, its M and D 1 or 2), two revives, two clock set
+  backs and one host stall, `sendAfter` and scheduler timeouts.
+- **Actions** (`mbtStep`): send and `sendAfter`, a send the depth refuses,
+  the tick (`bury_undeclared`, `bury_spent`, room and `lease`, the flush
+  of held settles), admission accepted or refused, the run's start, its
+  answer, the scheduler's 503, the settle's write (ok or failing), a
+  crash, time passing (a lease running out under a live delivery is the
+  stall), the clock set back, a redeploy, a revive and a revive the depth
+  refuses. Not prune (the admin prunes by age, not one id), cancelled runs
+  (unreachable for a delivery), nor sends from a previous version (not in
+  the code any more).
+- **Corpus**: 200 runs of 100 steps on `MBT_MIN` (`min_NNN`), 150 on
+  `MBT_FULL` (`full_NNN`), and one witness for each reachability
+  invariant (`witness_*`, below): 360 files, about 1.8 MB.
 
 ### What the model needed for it
 
@@ -115,7 +122,18 @@ corrects IMPL2.
 4. **Witness invariants** `NeverHeldPastLease` (F3's setting on the code:
    a held settle whose lease has run out) and `NeverAllQueuesBusy` (F6's:
    both queues with a delivery in flight).
-5. **IMPL2's in-flight count comes down at the settle** (a fix of the
+5. **Clock set back, oldest first** (`MBT`). `clockBackTo(t)` sets `clk`
+   back to `t`, and a message is due again only if its `dueAt` is at or
+   before `t`; so a sent or revived message has `dueAt` too (when it was
+   sent), and `sendAfter` is one unit. `lease` takes the oldest first by
+   the time sent and then id (`older`), as the code's `ORDER BY sent, id`
+   does: with the clock set back a later id can be older. Without `MBT`
+   it is by id, as before.
+6. **Refusals in the trace** (`sendRefused`, `reviveRefused`): a send or
+   revive the queue's depth refuses changes nothing, so the model had no
+   step for it and the replay never asked the code. Each is a step that
+   changes nothing, so that the code is asked and must refuse too.
+7. **IMPL2's in-flight count comes down at the settle** (a fix of the
    model, found by the replay). The model lowered `inflight` when the run
    ended; the code lowers it in `Deliveries::settle`, when the delivery's
    task takes the reply. Between the two a tick has less room in the code
@@ -130,7 +148,7 @@ below (`i2_safe` 34,412; `i2_s5` 34,330; `i2_s3` 85,283; `i2_s6` 48,738;
 `i2_s7` 47,452; `i2_s9` 1,151,209; `i2_s10` 3,052,952; `i2_l3a` 49,162;
 with a stall `i2_safe` 550,870, `i2_s5` 579,960, `i2_s3` 863,788) and the
 same counterexamples (`i2_s10u` 9 steps, `i2_s6_stall` and `i2_s7_stall`
-11). With 5 as well, `npm run sanity` and `npm run reach` end as before
+11). With 7 as well, `npm run sanity` and `npm run reach` end as before
 (every check `ok`), and every IMPL2 check of `tools/impl2.sh` but S10 with
 a stall on B10 (which did not finish before either) was run again; the
 table below has the new counts. Every verdict is the one before, but one:
@@ -141,7 +159,9 @@ in-flight count waits for the settle. With batch 2 (`I2_S6_STALL_B2`) it
 fails as before, in 11 steps: the residual (N5 under a stall) stands. The
 safety searches are smaller (fewer interleavings of a run's end and its
 settle with a tick); the liveness ones are as before but L1 with a stall
-(33,149 states, was 72,140).
+(33,149 states, was 72,140). 5 and 6 are behind `MBT`; the IMPL2 safety
+checks on B1/B2/B2q/B10 (with and without a stall), L1, L2 on two queues
+and L3b were run once more after them, to the same counts.
 
 ### The replay
 
@@ -162,20 +182,24 @@ from the trace; the comparison is of states, not of either side's rules.
   (the harness's ghost facts against the model's `invoc`, `net`, `gap`).
 - **Names**: model ids and (id, token) are bound to the store's ids and
   lease ids as they appear. An id or lease id the store gives twice fails
-  the replay (S3, S4).
+  the replay (S3, S4). A delivery is driven by its lease, since after a
+  stall a message has two.
+- **Lives**: the model's ghosts start again at a revive; the harness's
+  facts are per message, so the replay counts them from the revive on
+  (by the leases issued since, and the runs and losses of those leases).
 - **Time**: "message m becomes due" moves the clock to m's due time in the
   store; that the model has m not due before, and that every other
   message is due or not as the model says after, is checked.
 - **The tick** is replayed as one call. The model's picks inside it are
-  set up first (which held settle's write fails, which admission is
-  refused and whether its give-back is written); after it, the writes the
+  set up first (which held settle's write fails, by its lease, which
+  admission is refused and whether its give-back is written); after it, the writes the
   model made must all have been tried, the admissions asked in the model's
   order, and the leases issued exactly the model's.
 - Not compared: states inside a tick (the code has none to show), a
   delivery's answer before its settle (inside the run's channel), the
   `valid` ghost, the M of a held settle.
 
-**What the replay found.** Besides the in-flight count (5 above, the
+**What the replay found.** Besides the in-flight count (7 above, the
 model's), the harness's ghost facts did not count a give-back held over a
 failed write as an unstarted delivery lost when the process crashes,
 which the model (and S6.3) does; `Harness::crash` now does.
@@ -185,13 +209,15 @@ which the model (and S6.3) does; `Harness::crash` now does.
 names. The reachability invariants of `npm run reach` that the slice can
 break were checked again on the MBT configurations with TLC, for their
 shortest witnesses, and the simulator drew a witness of each, checked
-only between ticks: `NeverHeld` (TLC: 5 steps; corpus: 10), `NeverHeldPastLease`
-(6; 8), `NeverDone` (8; 16), `NeverSecondAttempt` (10; 18), `NeverFail`
-(14; 21), `NeverOutlived` (15; 27), `NeverAllQueuesBusy` (`MBT_MIN`, 9;
-11). `NeverLowered`, `NeverUndeclared` and `NeverStall` need a redeploy or
-a stall. The round-1 counterexamples are on the code before the fixes;
-those inside the slice are F3 on `done` and on `give_back`, whose setting
-on the fixed code the `NeverHeld*` witnesses are.
+only between ticks (TLC's length; the corpus's): on `MBT_ONE`
+`NeverHeld` (5; 7), `NeverHeldPastLease` (6; 11), `NeverDone` (8; 13),
+`NeverSecondAttempt` (10; 18), `NeverFail` (14; 24), `NeverOutlived` (15;
+24); on `MBT_MIN` `NeverAllQueuesBusy` (9; 16); on `MBT_FULL_ONE`
+`NeverLowered` (12; 25), `NeverUndeclared` (3; 5), `NeverStall` (6; 9).
+The round-1 counterexamples are on the code before the fixes, and not
+traces of this model; their settings on the fixed code are what the
+witnesses are: F3 on `done` and `give_back` (`NeverHeld*`), F1 (`NeverLowered`),
+F7 (`NeverUndeclared`), F6 (`NeverAllQueuesBusy`), N5 and N3 (`NeverStall`).
 
 ## Round 2: the code on `fix/queue-contract`
 

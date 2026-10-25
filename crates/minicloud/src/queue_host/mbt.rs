@@ -20,7 +20,14 @@
 //!   lease binds (id, token) to the lease id the store gave. A lease id
 //!   given twice, or an id the model has never sent, fails the replay: it
 //!   would be S3 or S4 broken. A model token is a name reused once nothing
-//!   holds it, so a lease rebinds it.
+//!   holds it, so a lease rebinds it. A delivery is driven by its lease:
+//!   after a stall a message has two.
+//! - **Lives.** The model's ghost counts start again at a revive; the
+//!   harness's facts are per message, so they are counted from the last
+//!   revive on (`Life`).
+//! - **Refusals.** A send or revive the queue's depth refuses is a step of
+//!   the trace that changes nothing; the code is asked as well and must
+//!   refuse.
 //! - **Time.** The model counts time in delays (`clk`, a message's
 //!   `dueAt`), and every lease and retry here is one delay, [`DELAY_MS`].
 //!   "Message m becomes due" moves the clock to m's due time in the store;
@@ -47,10 +54,10 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
-use super::harness::{policy, Harness, Stage};
+use super::harness::{policy, Harness, Op, Stage};
 use super::Store;
 use crate::config::QueuePolicy;
-use crate::queue::{Settle, OUTLIVED};
+use crate::queue::{Revived, Settle, OUTLIVED};
 
 /// [`Harness::new`]'s clock, the model's time 0.
 const BASE_MS: i64 = 1_000_000_000;
@@ -371,16 +378,22 @@ fn why(why: &str) -> String {
     }
 }
 
+/// Where a message's life began in the harness's ghost facts: how many
+/// leases and written settles it had had when it was last revived.
+#[derive(Clone, Copy, Default)]
+struct Life {
+    leases: usize,
+    written: usize,
+}
+
 /// The implementation's state, from what it shows: the store's file, the
 /// settles it holds, its counters, the deliveries in flight and the
-/// harness's ghost facts.
-fn real(h: &Harness, rows: &Connection, names: &Names, queues: &[QueuePolicy]) -> Abs {
+/// harness's ghost facts (per life: since the message was last revived).
+fn real(r: &Replay) -> Abs {
+    let (h, rows, names) = (&r.h, &r.rows, &r.names);
     let mut abs = Abs::new();
     let now = h.now_ms();
-    let index = |name: &str| match queues.iter().position(|q| q.name == name) {
-        Some(q) => queue_name(q as i64),
-        None => format!("? ({name})"),
-    };
+    let index = |name: &str| name.to_string();
     abs.insert("clock".into(), format!("{} ms", now - BASE_MS));
     let mut select = rows
         .prepare("SELECT id, queue, attempts, due, lease_id FROM message")
@@ -439,10 +452,10 @@ fn real(h: &Harness, rows: &Connection, names: &Names, queues: &[QueuePolicy]) -
         );
     }
     let counters = h.counters();
-    for queue in queues {
+    for queue in &r.all_queues {
         abs.insert(
-            format!("in flight {}", index(&queue.name)),
-            counters.queue_in_flight_of(&queue.name).to_string(),
+            format!("in flight {queue}"),
+            counters.queue_in_flight_of(queue).to_string(),
         );
     }
     for pending in &h.pending {
@@ -508,13 +521,20 @@ fn real(h: &Harness, rows: &Connection, names: &Names, queues: &[QueuePolicy]) -
     );
     for (&id, &rid) in &names.ids {
         let facts = h.facts(rid);
+        let life = r.lives.get(&rid).copied().unwrap_or_default();
+        let leases = &facts.leases[life.leases..];
+        let given_back = facts.written[life.written..]
+            .iter()
+            .filter(|&&(op, matched)| op == Op::GiveBack && matched)
+            .count();
+        let of_life = |of: &[i64]| of.iter().filter(|lease| leases.contains(lease)).count();
         abs.insert(
             format!("ghost {id}"),
             format!(
                 "invocations {}, leases less give-backs {}, unstarted lost to a crash {}",
-                facts.invocations,
-                facts.leases.len() as i64 - i64::from(facts.given_back()),
-                facts.crashed_unstarted
+                of_life(&facts.started),
+                leases.len() as i64 - given_back as i64,
+                of_life(&facts.lost_unstarted)
             ),
         );
     }
@@ -551,7 +571,10 @@ struct Replay {
     h: Harness,
     rows: Connection,
     names: Names,
-    queues: Vec<QueuePolicy>,
+    /// Every queue of the model, declared or not.
+    all_queues: Vec<String>,
+    /// Per store id, where its current life began.
+    lives: BTreeMap<i64, Life>,
     admissions: Rc<RefCell<Admissions>>,
 }
 
@@ -580,8 +603,7 @@ fn queues_of(state: &Value) -> Vec<QueuePolicy> {
 
 impl Replay {
     fn new(name: &str, init: &Value) -> Replay {
-        let queues = queues_of(init);
-        let mut h = Harness::new(name, queues.clone());
+        let mut h = Harness::new(name, queues_of(init));
         assert_eq!(h.now_ms(), BASE_MS);
         let admissions = Rc::new(RefCell::new(Admissions::default()));
         let plan = Rc::clone(&admissions);
@@ -601,17 +623,33 @@ impl Replay {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .unwrap();
+        let all_queues = entries(&var(init, "pol")["decl"])
+            .map(|(q, _)| queue_name(int(q)))
+            .collect();
         Replay {
             h,
             rows,
             names: Names::default(),
-            queues,
+            all_queues,
+            lives: BTreeMap::new(),
             admissions,
         }
     }
 
     fn real_of(&self, d: &Value) -> Result<i64, String> {
         self.names.real(int(&d["id"]))
+    }
+
+    /// The store id and lease id of a delivery the model picked.
+    fn delivery_of(&self, d: &Value) -> Result<(i64, i64), String> {
+        let (id, tok) = (int(&d["id"]), int(&d["tok"]));
+        let lease = self
+            .names
+            .toks
+            .get(&(id, tok))
+            .copied()
+            .ok_or_else(|| format!("message {id}'s {} was never leased", token(tok)))?;
+        Ok((self.names.real(id)?, lease))
     }
 
     /// Whether the code tried every settle write the model made.
@@ -625,10 +663,17 @@ impl Replay {
     }
 
     /// The model's next settle write for the delivery picked: written
-    /// (`ok`) or failing.
+    /// (`ok`) or failing. A delivery leased in the tick being set up has no
+    /// lease id yet: its message's next write is planned instead.
     fn plan_write(&mut self, after: &Value) -> Result<(), String> {
-        let rid = self.real_of(picked(after, "d"))?;
-        self.h.plan_settles(rid, &[flag(picked(after, "ok"))]);
+        let ok = flag(picked(after, "ok"));
+        let d = picked(after, "d");
+        match self.delivery_of(d) {
+            Ok((rid, lease)) if text(&d["stage"]) != "leased" => {
+                self.h.plan_settles_of(rid, lease, &[ok])
+            }
+            _ => self.h.plan_settles(self.real_of(d)?, &[ok]),
+        }
         Ok(())
     }
 
@@ -638,27 +683,77 @@ impl Replay {
             "send" => {
                 let q = int(picked(after, "q"));
                 let id = int(var(before, "nextId"));
-                let rid = self.h.send(&queue_name(q), &format!("m{id}"));
+                // sendAfter is one delay
+                let later = pick(after, "l").is_some_and(flag);
+                let delay = if later { DELAY_MS / 1000 } else { 0 };
+                let rid = self.h.send_after(&queue_name(q), &format!("m{id}"), delay);
                 self.names.bind_id(id, rid)?;
             }
             "runStart" => {
-                let rid = self.real_of(picked(after, "d"))?;
-                self.h.start_run(rid);
+                let (rid, lease) = self.delivery_of(picked(after, "d"))?;
+                self.h.start_run_of(rid, lease);
             }
             "runAnswer" => {
-                let rid = self.real_of(picked(after, "d"))?;
+                let (rid, lease) = self.delivery_of(picked(after, "d"))?;
                 match text(picked(after, "o")) {
-                    "ok" => self.h.answer(rid, 200),
-                    "fail" => self.h.answer(rid, 500),
-                    "none" => self.h.drop_answer(rid),
+                    "ok" => self.h.answer_of(rid, Some(lease), 200),
+                    "fail" => self.h.answer_of(rid, Some(lease), 500),
+                    "none" => self.h.drop_answer_of(rid, Some(lease)),
                     other => return Err(format!("no answer `{other}` to drive")),
                 }
             }
+            "runTimeout" => {
+                let (rid, lease) = self.delivery_of(picked(after, "d"))?;
+                self.h.time_out_of(rid, Some(lease));
+            }
             "settle" => {
-                let rid = self.real_of(picked(after, "d"))?;
+                let (rid, lease) = self.delivery_of(picked(after, "d"))?;
                 self.plan_write(after)?;
-                self.h.settle_one(rid);
+                self.h.settle_one(rid, Some(lease));
                 self.writes_done("the settle")?;
+            }
+            "redeploy" => {
+                self.h.queues = queues_of(after);
+            }
+            "revive" => {
+                let rid = self.names.real(int(picked(after, "i")))?;
+                let facts = self.h.facts(rid);
+                let life = Life {
+                    leases: facts.leases.len(),
+                    written: facts.written.len(),
+                };
+                match self.h.revive(rid) {
+                    Revived::Back => {
+                        self.lives.insert(rid, life);
+                    }
+                    other => return Err(format!("the store's revive answered {other:?}")),
+                }
+            }
+            // The model's refusals: the store must refuse as well, and
+            // change nothing (the comparison after says so).
+            "sendRefused" => {
+                let q = int(picked(after, "q"));
+                if let Ok(rid) = self.h.try_send_after(&queue_name(q), "refused", 0) {
+                    return Err(format!(
+                        "the store took a send to the full queue {} (store id {rid})",
+                        queue_name(q)
+                    ));
+                }
+            }
+            "reviveRefused" => {
+                let rid = self.names.real(int(picked(after, "i")))?;
+                match self.h.revive(rid) {
+                    Revived::Full { .. } => {}
+                    other => {
+                        return Err(format!(
+                            "the store's revive answered {other:?}; the model refused it"
+                        ))
+                    }
+                }
+            }
+            "clockBackTo" => {
+                let t = int(picked(after, "t"));
+                self.h.set_ms(BASE_MS + t * DELAY_MS);
             }
             "timePasses" => {
                 let i = int(picked(after, "i"));
@@ -776,7 +871,7 @@ impl Replay {
     }
 
     fn compare(&self, state: &Value) -> Result<(), String> {
-        let real = real(&self.h, &self.rows, &self.names, &self.queues);
+        let real = real(self);
         let model = model(state);
         if real == model {
             Ok(())

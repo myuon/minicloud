@@ -50,6 +50,8 @@ pub struct Facts {
     pub refused: u32,
     /// Runs whose entry started.
     pub invocations: u32,
+    /// The lease ids of those runs.
+    pub started: Vec<i64>,
     /// Settles that reached the store, and whether the lease still
     /// matched (`true`: the write changed the message).
     pub written: Vec<(Op, bool)>,
@@ -57,6 +59,8 @@ pub struct Facts {
     pub failed: Vec<Op>,
     /// Deliveries a crash took before the app's entry started.
     pub crashed_unstarted: u32,
+    /// Their lease ids.
+    pub lost_unstarted: Vec<i64>,
     /// Deliveries a crash took after it started.
     pub crashed_started: u32,
     /// The `x-minicloud-attempts` each admitted delivery carried.
@@ -77,7 +81,9 @@ type Ghost = Arc<Mutex<BTreeMap<i64, Facts>>>;
 
 /// How the next settles of each message are to go, in order: `false`
 /// fails one, `true` lets one be written. Past the plan, each is written.
-type FailPlan = Arc<Mutex<BTreeMap<i64, VecDeque<bool>>>>;
+/// Keyed by message and, for a plan of one delivery's settles, its lease;
+/// a delivery's own plan comes before its message's.
+type FailPlan = Arc<Mutex<BTreeMap<(i64, Option<i64>), VecDeque<bool>>>>;
 
 /// Every `lease` the loop asked for, as (tick, queue, room).
 type LeasesAsked = Arc<Mutex<Vec<(u32, String, usize)>>>;
@@ -102,11 +108,15 @@ impl Faulty {
     fn settle(
         &self,
         id: i64,
+        lease_id: i64,
         op: Op,
         write: impl FnOnce(&Queues) -> Result<bool, String>,
     ) -> Result<bool, String> {
         let mut fail = self.fail.lock().unwrap();
-        let takes = fail.get_mut(&id).and_then(VecDeque::pop_front);
+        let takes = fail
+            .get_mut(&(id, Some(lease_id)))
+            .and_then(VecDeque::pop_front)
+            .or_else(|| fail.get_mut(&(id, None)).and_then(VecDeque::pop_front));
         if takes == Some(false) {
             self.ghost
                 .lock()
@@ -172,10 +182,12 @@ impl Store for Faulty {
             .lease(queue, now_ms, limit, lease_ms, max_attempts)
     }
     fn done(&self, id: i64, lease_id: i64) -> Result<bool, String> {
-        self.settle(id, Op::Done, |q| q.done(id, lease_id))
+        self.settle(id, lease_id, Op::Done, |q| q.done(id, lease_id))
     }
     fn retry(&self, id: i64, lease_id: i64, now_ms: i64, delay_ms: i64) -> Result<bool, String> {
-        self.settle(id, Op::Retry, |q| q.retry(id, lease_id, now_ms, delay_ms))
+        self.settle(id, lease_id, Op::Retry, |q| {
+            q.retry(id, lease_id, now_ms, delay_ms)
+        })
     }
     fn give_back(
         &self,
@@ -184,12 +196,14 @@ impl Store for Faulty {
         now_ms: i64,
         delay_ms: i64,
     ) -> Result<bool, String> {
-        self.settle(id, Op::GiveBack, |q| {
+        self.settle(id, lease_id, Op::GiveBack, |q| {
             q.give_back(id, lease_id, now_ms, delay_ms)
         })
     }
     fn bury(&self, id: i64, lease_id: i64, now_ms: i64, why: &str) -> Result<bool, String> {
-        self.settle(id, Op::Bury, |q| q.bury(id, lease_id, now_ms, why))
+        self.settle(id, lease_id, Op::Bury, |q| {
+            q.bury(id, lease_id, now_ms, why)
+        })
     }
     fn hold(&mut self, id: i64, lease_id: i64, unwritten: Unwritten) {
         self.inner.hold(id, lease_id, unwritten)
@@ -371,6 +385,12 @@ impl Harness {
     /// `queue.sendAfter`, as [`super::QueueHost`] makes it: sent at the
     /// host's `now()`, due `delay` seconds after that.
     pub fn send_after(&mut self, queue: &str, body: &str, delay: i64) -> i64 {
+        self.try_send_after(queue, body, delay).unwrap()
+    }
+
+    /// [`Harness::send_after`], answering the store's refusal (the queue
+    /// is full) rather than panicking.
+    pub fn try_send_after(&mut self, queue: &str, body: &str, delay: i64) -> Result<i64, String> {
         let policy = self
             .queues
             .iter()
@@ -379,16 +399,31 @@ impl Harness {
             .clone();
         let at = self.now_ms();
         let store = self.deliveries.store.lock().unwrap();
+        store.inner.send(
+            queue,
+            body,
+            at,
+            at.saturating_add(delay.max(0) * 1000),
+            policy.max_body_bytes as usize,
+            policy.max_depth,
+        )
+    }
+
+    /// The admin's revive of dead letter `id`, as `admin.rs` makes it: at
+    /// the host's clock, bounded by the `max_depth` the current version
+    /// gives its queue, unbounded for a queue it does not declare.
+    pub fn revive(&mut self, id: i64) -> crate::queue::Revived {
+        let now = self.now_ms();
+        let queues = self.queues.clone();
+        let store = self.deliveries.store.lock().unwrap();
         store
             .inner
-            .send(
-                queue,
-                body,
-                at,
-                at.saturating_add(delay.max(0) * 1000),
-                policy.max_body_bytes as usize,
-                policy.max_depth,
-            )
+            .revive(id, now, |queue| {
+                queues
+                    .iter()
+                    .find(|policy| policy.name == queue)
+                    .map(|policy| policy.max_depth)
+            })
             .unwrap()
     }
 
@@ -481,30 +516,60 @@ impl Harness {
         self.check();
     }
 
-    fn find(&mut self, id: i64) -> &mut Pending {
+    /// Message `id`'s delivery in flight: the one under `lease`, or (for
+    /// `None`) the first.
+    fn at(&self, id: i64, lease: Option<i64>) -> usize {
         self.pending
-            .iter_mut()
-            .find(|pending| pending.message.id == id)
-            .unwrap_or_else(|| panic!("message {id} has no delivery in flight"))
+            .iter()
+            .position(|pending| {
+                pending.message.id == id
+                    && lease.is_none_or(|l| pending.message.lease_id == Some(l))
+            })
+            .unwrap_or_else(|| panic!("message {id} has no delivery in flight under {lease:?}"))
+    }
+
+    fn find(&mut self, id: i64, lease: Option<i64>) -> &mut Pending {
+        let at = self.at(id, lease);
+        &mut self.pending[at]
     }
 
     /// The app's entry starts for message `id`'s delivery.
     pub fn start_run(&mut self, id: i64) {
-        let Stage::Admitted { started, reply, .. } = &mut self.find(id).stage else {
+        self.start(id, None);
+    }
+
+    /// The app's entry starts for the delivery of message `id` under
+    /// `lease`, where a message whose lease ran out has several.
+    pub fn start_run_of(&mut self, id: i64, lease: i64) {
+        self.start(id, Some(lease));
+    }
+
+    fn start(&mut self, id: i64, lease: Option<i64>) {
+        let pending = self.find(id, lease);
+        let token = pending.message.lease_id;
+        let Stage::Admitted { started, reply, .. } = &mut pending.stage else {
             panic!("message {id}'s delivery is not admitted");
         };
         assert!(!*started && reply.is_some(), "it starts once");
         *started = true;
-        self.ghost
-            .lock()
-            .unwrap()
-            .entry(id)
-            .or_default()
-            .invocations += 1;
+        let mut ghost = self.ghost.lock().unwrap();
+        let facts = ghost.entry(id).or_default();
+        facts.invocations += 1;
+        facts.started.extend(token);
     }
 
     fn reply(&mut self, id: i64, must_have_started: bool, with: Option<Reply>) {
-        let Stage::Admitted { started, reply, .. } = &mut self.find(id).stage else {
+        self.reply_of(id, None, must_have_started, with)
+    }
+
+    fn reply_of(
+        &mut self,
+        id: i64,
+        lease: Option<i64>,
+        must_have_started: bool,
+        with: Option<Reply>,
+    ) {
+        let Stage::Admitted { started, reply, .. } = &mut self.find(id, lease).stage else {
             panic!("message {id}'s delivery is not admitted");
         };
         assert_eq!(*started, must_have_started, "message {id}'s run");
@@ -517,8 +582,14 @@ impl Harness {
     /// The app answers `status` to message `id`'s delivery. The settle is
     /// written at the next [`Harness::poll`].
     pub fn answer(&mut self, id: i64, status: u16) {
-        self.reply(
+        self.answer_of(id, None, status);
+    }
+
+    /// [`Harness::answer`] for the delivery under `lease`, or the first.
+    pub fn answer_of(&mut self, id: i64, lease: Option<i64>, status: u16) {
+        self.reply_of(
             id,
+            lease,
             true,
             Some(Reply::text(status, format!("answered {status}\n"))),
         );
@@ -527,16 +598,28 @@ impl Harness {
     /// The run ends with no answer: the flight is dropped (the host
     /// panicked in it, or the engine closed with it queued).
     pub fn drop_answer(&mut self, id: i64) {
-        let started = match &self.find(id).stage {
+        self.drop_answer_of(id, None);
+    }
+
+    /// [`Harness::drop_answer`] for the delivery under `lease`, or the
+    /// first.
+    pub fn drop_answer_of(&mut self, id: i64, lease: Option<i64>) {
+        let started = match &self.find(id, lease).stage {
             Stage::Admitted { started, .. } => *started,
             Stage::Leased => panic!("not admitted"),
         };
-        self.reply(id, started, None);
+        self.reply_of(id, lease, started, None);
     }
 
     /// The run waited for a worker past its deadline and was never
     /// started: the scheduler's own 503 (`sched.rs`, `QueueTimeout`).
     pub fn time_out_in_scheduler(&mut self, id: i64) {
+        self.time_out_of(id, None);
+    }
+
+    /// [`Harness::time_out_in_scheduler`] for the delivery under `lease`,
+    /// or the first.
+    pub fn time_out_of(&mut self, id: i64, lease: Option<i64>) {
         let reply = Reply::text(
             503,
             "app `post`: the request waited 1200 ms for a worker, longer than its 1000 ms \
@@ -544,7 +627,7 @@ impl Harness {
         )
         .with_header("retry-after", "1")
         .made_by(Origin::NotStarted);
-        self.reply(id, false, Some(reply));
+        self.reply_of(id, lease, false, Some(reply));
     }
 
     /// The run was cancelled while it waited, and never started: the
@@ -591,15 +674,12 @@ impl Harness {
         self.check();
     }
 
-    /// Settles message `id`'s delivery alone, as its task would once its
-    /// run has answered or gone; the others are left as they are.
-    pub fn settle_one(&mut self, id: i64) {
+    /// Settles message `id`'s delivery under `lease` (or its first) alone,
+    /// as its task would once its run has answered or gone; the others are
+    /// left as they are.
+    pub fn settle_one(&mut self, id: i64, lease: Option<i64>) {
         let deliveries = self.deliveries.clone();
-        let at = self
-            .pending
-            .iter()
-            .position(|pending| pending.message.id == id)
-            .unwrap_or_else(|| panic!("message {id} has no delivery in flight"));
+        let at = self.at(id, lease);
         let mut delivery = self.pending.remove(at);
         let Stage::Admitted { answer, .. } = &mut delivery.stage else {
             panic!("message {id}'s delivery is not admitted");
@@ -629,12 +709,12 @@ impl Harness {
         let lost: Vec<_> = std::mem::take(&mut self.pending);
         // A give-back held because its write failed is a delivery that
         // never started, lost with the process like those in flight.
-        let held: Vec<i64> = self
+        let held: Vec<(i64, i64)> = self
             .store()
             .unwritten()
             .into_iter()
             .filter(|(_, _, unwritten)| matches!(unwritten.settle, Settle::GiveBack { .. }))
-            .map(|(id, _, _)| id)
+            .map(|(id, lease, _)| (id, lease))
             .collect();
         {
             let mut ghost = self.ghost.lock().unwrap();
@@ -642,11 +722,16 @@ impl Harness {
                 let facts = ghost.entry(pending.message.id).or_default();
                 match &pending.stage {
                     Stage::Admitted { started: true, .. } => facts.crashed_started += 1,
-                    _ => facts.crashed_unstarted += 1,
+                    _ => {
+                        facts.crashed_unstarted += 1;
+                        facts.lost_unstarted.extend(pending.message.lease_id);
+                    }
                 }
             }
-            for id in held {
-                ghost.entry(id).or_default().crashed_unstarted += 1;
+            for (id, lease) in held {
+                let facts = ghost.entry(id).or_default();
+                facts.crashed_unstarted += 1;
+                facts.lost_unstarted.push(lease);
             }
         }
         let taken = lost
@@ -700,7 +785,10 @@ impl Harness {
                     let facts = ghost.entry(delivery.message.id).or_default();
                     match started {
                         true => facts.crashed_started += 1,
-                        false => facts.crashed_unstarted += 1,
+                        false => {
+                            facts.crashed_unstarted += 1;
+                            facts.lost_unstarted.extend(delivery.message.lease_id);
+                        }
                     }
                 }
             }
@@ -718,10 +806,20 @@ impl Harness {
     /// The next settles of message `id`, after those already planned: each
     /// `false` fails, each `true` is written.
     pub fn plan_settles(&mut self, id: i64, outcomes: &[bool]) {
+        self.plan(id, None, outcomes);
+    }
+
+    /// [`Harness::plan_settles`] for the settles of the delivery under
+    /// `lease` alone, where a message has several.
+    pub fn plan_settles_of(&mut self, id: i64, lease: i64, outcomes: &[bool]) {
+        self.plan(id, Some(lease), outcomes);
+    }
+
+    fn plan(&mut self, id: i64, lease: Option<i64>, outcomes: &[bool]) {
         self.fail
             .lock()
             .unwrap()
-            .entry(id)
+            .entry((id, lease))
             .or_default()
             .extend(outcomes);
     }

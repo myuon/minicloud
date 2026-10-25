@@ -101,8 +101,9 @@ module queue {
 
   type Pol = { decl: int -> bool, m: int -> int, d: int -> int, batch: int -> int }
   // `message` row: `tok` 0 is lease_id NULL.
-  // `dueAt` (MBT): the time it is due at, while it is not due.
-  type Msg = { on: bool, q: int, att: int, due: bool, tok: int, dueAt: int }
+  // MBT: `dueAt`, the time it is due at (or was, once due); `sent`, the
+  // time it was sent, which `lease` takes the oldest of first.
+  type Msg = { on: bool, q: int, att: int, due: bool, tok: int, dueAt: int, sent: int }
   // `dead` row; `why` is "fail" (a settle's bury), "outlived" (bury_spent),
   // "lowered" (the S5 fix's burial of a message M was lowered under).
   type Dead = { on: bool, q: int, att: int, why: str }
@@ -168,7 +169,7 @@ module queue {
   val QS = 0.to(NQ - 1)
   val IDS = 1.to(NID)
   val TOKS = 1.to(NTOK)
-  pure val NOMSG: Msg = { on: false, q: 0, att: 0, due: false, tok: 0, dueAt: 0 }
+  pure val NOMSG: Msg = { on: false, q: 0, att: 0, due: false, tok: 0, dueAt: 0, sent: 0 }
   pure val NODEAD: Dead = { on: false, q: 0, att: 0, why: "" }
   pure val NOCOUNT: Counts = { delivered: 0, retried: 0, buried: 0 }
   pure val G0: Ghost = { life: 0, net: 0, invoc: 0, gap: 0, invAll: 0, broken: false,
@@ -213,8 +214,13 @@ module queue {
     used: if (tr("used")) g.used else false,
   }
   def maskAll(m: int -> Ghost): int -> Ghost = IDS.mapBy(i => mask(m.get(i)))
+  // Oldest first: by id (sends are in id order), or with MBT, where the
+  // clock may be set back, by the time sent and then id, as the code does.
+  def older(j: int, i: int): bool =
+    if (MBT) msg.get(j).sent < msg.get(i).sent or (msg.get(j).sent == msg.get(i).sent and j < i)
+    else j < i
   def isNextLeased(d: Del): bool =
-    d.stage == "leased" and dels.forall(e => e.stage == "leased" implies e.id >= d.id)
+    d.stage == "leased" and dels.forall(e => e.stage == "leased" implies not(older(e.id, d.id)))
 
   // ------------------------------------------------- unchanged groups
   action keepStore = all { msg' = msg, dead' = dead, nextId' = nextId, counts' = counts }
@@ -414,7 +420,7 @@ module queue {
                                and (not(FIX_S5) or msg.get(i).att < p.m.get(q))
                                and not(IMPL2 and answerHeld(i)))
     // oldest first: ids are sent in order (see README on clock set back)
-    val taken = cand.filter(i => cand.filter(j => j < i).size() < room)
+    val taken = cand.filter(i => cand.filter(j => older(j, i)).size() < room)
     val tokOf = IDS.mapBy(i => freshTok(i))
     val over = taken.exists(i => tokOf.get(i) == 0 or msg.get(i).att + 1 > MAXATT)
     val b5 = if (taken.exists(i => msg.get(i).att >= p.m.get(q))) Set("S5") else Set()
@@ -574,6 +580,18 @@ module queue {
     dead' = dead, nextId' = nextId, counts' = counts, inflight' = inflight, dels' = dels, keepTick, keepApp,
     crashes' = crashes, redeploys' = redeploys, revives' = revives, mmax' = mmax, bad' = bad,
   }
+  // MBT: the clock is set back to time `t`; a message is due again only if
+  // its due time is at or before `t`.
+  action clockBackTo(t: int): bool = all {
+    MBT, under(clockbacks, MAX_CLOCKBACK), 0 <= t, t < clk,
+    clk' = t,
+    msg' = IDS.mapBy(i => if (msg.get(i).on) { ...msg.get(i), due: msg.get(i).dueAt <= t }
+                          else msg.get(i)),
+    gh' = maskAll(breakFor(gh, liveIds)),
+    clockbacks' = bump(clockbacks, MAX_CLOCKBACK), races' = races, stalls' = stalls,
+    dead' = dead, nextId' = nextId, counts' = counts, inflight' = inflight, dels' = dels, keepTick, keepApp,
+    crashes' = crashes, redeploys' = redeploys, revives' = revives, mmax' = mmax, bad' = bad,
+  }
   // S6.3's gap: the unstarted deliveries of this life a crash takes away.
   def crashGhost(i: int): Ghost =
     val g = gh.get(i)
@@ -629,7 +647,9 @@ module queue {
       p.decl.get(q), not(old) or (ENV_OLD_SENDS and oldRuns), not(later) or ENV_SEND_AFTER,
       if (RECYCLE) free.contains(i) else nextId <= NID,
       depth(q) < p.d.get(q),
-      msg' = msg.set(i, { on: true, q: q, att: 0, due: not(later), tok: 0, dueAt: 0 }),
+      msg' = msg.set(i, { on: true, q: q, att: 0, due: not(later), tok: 0,
+                          dueAt: if (not(MBT)) 0 else if (later) clk + 1 else clk,
+                          sent: if (MBT) clk else 0 }),
       nextId' = if (RECYCLE) nextId else nextId + 1,
       dead' = dead, counts' = counts,
       gh' = maskAll(gh.set(i, { ...G0, life: g.life, acked: true, early: later, used: true })),
@@ -652,13 +672,27 @@ module queue {
       under(revives, MAX_REVIVE), dl.on,
       not(FIX_S10) or depth(dl.q) < pol.d.get(dl.q) or (IMPL2 and not(declared)),
       revives' = bump(revives, MAX_REVIVE),
-      msg' = msg.set(i, { on: true, q: dl.q, att: 0, due: true, tok: 0, dueAt: 0 }),
+      msg' = msg.set(i, { on: true, q: dl.q, att: 0, due: true, tok: 0,
+                          dueAt: if (MBT) clk else 0, sent: msg.get(i).sent }),
       dead' = dead.set(i, NODEAD),
       gh' = maskAll(gh.set(i, { ...G0, life: g.life + 1, acked: g.acked, used: g.used, broken: true })),
       bad' = bad.union(b10),
       nextId' = nextId, counts' = counts, inflight' = inflight, dels' = dels, keepTick, keepApp,
       crashes' = crashes, redeploys' = redeploys, clockbacks' = clockbacks, races' = races, stalls' = stalls, clk' = clk, mmax' = mmax,
     }
+  }
+  // MBT: a send and a revive the queue's depth refuses: no step but in the
+  // trace, so that the replay asks the code too.
+  action unchanged = all {
+    msg' = msg, dead' = dead, nextId' = nextId, counts' = counts, inflight' = inflight, dels' = dels,
+    keepTick, keepApp, keepEnv, gh' = gh, mmax' = mmax, bad' = bad,
+  }
+  action sendRefused(q: int): bool = all {
+    MBT, pol.decl.get(q), nextId <= NID, depth(q) >= pol.d.get(q), unchanged,
+  }
+  action reviveRefused(i: int): bool = all {
+    MBT, FIX_S10, under(revives, MAX_REVIVE), dead.get(i).on,
+    pol.decl.get(dead.get(i).q), depth(dead.get(i).q) >= pol.d.get(dead.get(i).q), unchanged,
   }
   // Admin: prune a dead letter.
   action prune(i: int): bool = all {
@@ -694,8 +728,12 @@ module queue {
   // --step mbtStep`). The same actions as `step`, each named, with each
   // nondet drawn from where its action is enabled; a tick, once begun, runs
   // to its end before anything else happens. Only the actions the replay
-  // drives: sends now, the tick, admission, the run's start and answer,
-  // the settle's write, a crash and time.
+  // drives: send and sendAfter, the tick, admission, the run's start,
+  // answer and scheduler timeout, the settle's write, a crash, time (and
+  // a stall, within it), the clock set back, a redeploy and a revive; the
+  // configuration's bounds and ENV_* say which of them may happen. Not
+  // prune (the admin prunes by age, not by id) nor sends from a previous
+  // version (not in the code).
   action mbtTick = any {
     tickBeginSettle,
     { nondet d = dels.filter(e => e.stage == "pending" and not(e.tried)).oneOf()
@@ -713,11 +751,17 @@ module queue {
     { nondet d = dels.filter(e => e.stage == "queued").oneOf() runStart(d) },
     { nondet d = dels.filter(e => e.stage == "running").oneOf()
       nondet o = ENV_OUTCOMES.oneOf() runAnswer(d, o) },
+    { nondet d = dels.filter(e => e.stage == "queued").oneOf() runTimeout(d) },
     { nondet d = dels.filter(e => e.stage == "answered").oneOf()
       nondet ok = Set(true, false).oneOf() settle(d, ok) },
     { nondet i = IDS.filter(j => msg.get(j).on and not(msg.get(j).due)).oneOf() timePasses(i) },
     crash,
-    { nondet q = QS.oneOf() send(q, false, false) },
+    { nondet q = QS.oneOf() nondet l = Set(false, true).oneOf() send(q, l, false) },
+    { nondet t = 0.to(clk - 1).oneOf() clockBackTo(t) },
+    { nondet p = REDEPLOY_POLS.oneOf() redeploy(p) },
+    { nondet i = IDS.filter(j => dead.get(j).on).oneOf() revive(i) },
+    { nondet q = QS.oneOf() sendRefused(q) },
+    { nondet i = IDS.filter(j => dead.get(j).on).oneOf() reviveRefused(i) },
   }
 
   // ------------------------------------------------ safety properties

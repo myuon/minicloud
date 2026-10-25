@@ -4,7 +4,10 @@
 # crates/minicloud/tests/queue_traces, which is emptied first:
 #
 # - min_NNN: 200 random runs of `mbtStep` on MBT_MIN, 100 steps each;
-# - witness_<invariant>: one run of `mbtStep` on MBT_ONE (or MBT_MIN) that
+# - full_NNN: 150 on MBT_FULL (redeploy, revive, stall, clock set back,
+#   sendAfter, scheduler timeouts as well);
+# - witness_<invariant>: one run of `mbtStep` on MBT_ONE (or MBT_MIN,
+#   MBT_FULL_ONE) that
 #   breaks a reachability invariant, so that the behaviour it names is in
 #   the corpus for certain. The invariant is only checked between ticks,
 #   so a witness ends where the replay can compare.
@@ -34,13 +37,17 @@ run() { # name invariant traces samples steps seed
     --verbosity=1 --out-itf="out/$1/{seq}.itf.json" "out/$1.qnt"
 }
 
-module traces_min MBT_MIN
-run traces_min NoOverflow 200 200 100 20261025 || exit 1
-for f in out/traces_min/*.itf.json; do
-  n=$(basename "$f" .itf.json)
-  python3 -I tools/itf-pack.py "$f" "$dest/min_$(printf '%03d' "$n").itf.json.gz" || exit 1
-done
-rm -rf out/traces_min
+runs() { # prefix config traces steps seed
+  module "traces_$1" "$2"
+  run "traces_$1" NoOverflow "$3" "$3" "$4" "$5" || exit 1
+  for f in "out/traces_$1"/*.itf.json; do
+    n=$(basename "$f" .itf.json)
+    python3 -I tools/itf-pack.py "$f" "$dest/$1_$(printf '%03d' "$n").itf.json.gz" || exit 1
+  done
+  rm -rf "out/traces_$1"
+}
+runs min MBT_MIN 200 100 20261025
+runs full MBT_FULL 150 100 20261026
 
 witness() { # invariant config steps
   module "witness_$1" "$2"
@@ -59,5 +66,8 @@ witness NeverSecondAttempt MBT_ONE 20
 witness NeverFail MBT_ONE 28
 witness NeverOutlived MBT_ONE 30
 witness NeverAllQueuesBusy MBT_MIN 18
+witness NeverLowered MBT_FULL_ONE 30
+witness NeverUndeclared MBT_FULL_ONE 12
+witness NeverStall MBT_FULL_ONE 16
 
 echo "$(ls "$dest" | wc -l | tr -d ' ') traces, $(cat "$dest"/* | wc -c | tr -d ' ') bytes"
