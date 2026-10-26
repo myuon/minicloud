@@ -23,6 +23,9 @@ with TLC against the contract in [`docs/queue-properties.md`](../../docs/queue-p
   with (below, "Traces for the implementation"); `tools/itf-pack.py`
   packs each one.
 - `sanity/toy.qnt` — the backend's sanity checks.
+- `store.qnt` — the store alone, for inductive invariants checked with
+  Apalache (`tools/inductive.sh`, `tools/inductive-all.sh`,
+  `tools/store-tlc.sh`; below, "Inductive invariants").
 
 ## Running
 
@@ -349,6 +352,160 @@ Traces (all one-worker BFS, shortest; `tools/show.sh <name>`):
   themselves (one or two message ids, one or two queues, M ≤ 2, each fault
   at most once) are the limit of what is checked; the larger behaviours
   are not covered.
+
+## Inductive invariants (the store alone)
+
+An experiment: can the store's safety properties be proved **without
+bounds** by an inductive invariant that Apalache checks, rather than by a
+bounded TLC search? Kept short on purpose (a timeboxed trial).
+
+`store.qnt` is the store alone, as `queue.rs` is at `main`: `send` (with D),
+`lease` (with M: due and `attempts < M`), `done` / `retry` / `give_back` /
+`bury` (each with a token), `bury_spent` (with M), `revive` (with D),
+`prune_dead`, time passing, and a redeploy changing M or D. One queue.
+Deliveries are not modelled: **any caller may settle any id with any token
+ever issued**, stale ones included, at any time. Each action's comment
+quotes the SQL it models. Short faithfulness note:
+
+- `lease`, `bury_spent` and `prune_dead` touch several rows in one
+  transaction; the model takes one row per step. A transaction is then a
+  run of steps with nothing in between, so every committed state of the
+  code is a state of the model (more interleavings, never fewer).
+- The held-settle guard (`answered`) of `lease` and `bury_spent` is left
+  out: it only removes rows from their choice, so leaving it out adds
+  behaviours.
+- Tokens come from a counter, as `next_lease_id()` does within a process.
+  Across a restart the code relies on the clock (nanoseconds since the
+  epoch) being past the last process's ids; that is an assumption here.
+- Compared with `queue.qnt`: there, a token is the smallest one no live
+  reference to the message has (`freshTok`: tokens recur, up to renaming),
+  settles come only from modelled deliveries, and S4.3 is a `valid` flag
+  on each delivery. Here tokens are globally fresh and the caller is
+  arbitrary.
+
+### What is checked, and how
+
+Properties (`Props`): **S4.1** (by the schema a row has one token; checked:
+a token is the current token of at most one row), **S4.2** (monitor
+`s4ok`: a settle changed the store iff its token was the row's), **S4.3**
+(a token once replaced or removed is never current again), **S5** (monitor
+`s5ok`: every lease was of a row with `attempts < M`, M the one passed to
+that `lease`; and `S5state`: a row holding a token has `attempts <=` its
+lease's M). S2 (no id on both tables) and S3 (monitor: `send` never gives
+an id ever used) came along at no extra cost and are in `Props` too.
+
+S4.3 and S3 talk about *every* token and id ever seen. A ghost set of them
+cannot be given an arbitrary pre-state (below), so each uses an
+**observer**: `obsTok` (`obsId`) is an arbitrary integer fixed at the start,
+`obsRetired` (`obsUsed`) says whether it has been retired (used). Proving
+the property for an unconstrained `obsTok` proves it for every token.
+
+The three obligations are run as plain `quint verify` calls
+(`tools/inductive.sh`):
+
+| obligation | run | K = 3 |
+|---|---|---|
+| (a) Init ⇒ IndInv | `--init=init --invariant=IndInv --max-steps=0` | holds, 14 s |
+| (b) IndInv ∧ step ⇒ IndInv′ | `--init=indInit --invariant=IndInv --max-steps=1` | holds, 17 s |
+| (c) IndInv ⇒ Props | `--init=indInit --invariant=Props --max-steps=0` | holds, 15 s |
+
+`indInit` (`anyState`) builds an **arbitrary** pre-state: K slots with
+arbitrary integer ids, any subsets of them on `message` and `dead`, every
+column an arbitrary integer (or boolean), arbitrary counters, M, D and
+observers, constrained only by `IndInv`. Times are wall clock on the
+checking machine, including Apalache's start-up of about 4 s.
+
+`npm run inductive` runs (a)–(c) and the planted bugs; `inductive:sizes`,
+`inductive:iters`, `inductive:drops` the rest of the table below;
+`inductive:tlc` and `inductive:tlc-bugs` the TLC cross-checks.
+
+### What "unbounded" means here — strictly
+
+- **Unbounded, checked by Apalache:** the number of steps (it is an
+  induction), and every integer: ids, tokens, attempts, M, D, the counters
+  (SMT integers, no overflow; the code's are `i64`).
+- **Bounded, checked by Apalache:** the number of rows in the pre-state of
+  (b) and (c), K. Checked for K = 2, 3, 4, 6.
+- **For all sizes, by a hand argument, not by Apalache:** every conjunct of
+  `IndInv` is universal over rows (∀ i, or ∀ i, j), and every step reads or
+  changes at most one existing row, plus a fresh one for `send`. The only
+  global reads are `live.size() < D` in `send` and `revive`, which only get
+  more permissive when rows are dropped. So a counterexample to induction
+  with n rows restricts to one with at most 3 (the row the step touches and
+  the two a violated conjunct names), and K = 3 covers every n. This
+  argument is ours and is not machine-checked.
+- **Not proved:** anything about the delivery loop, the held settles,
+  `bury_undeclared`, several queues, crashes (beyond the token counter
+  assumption above), time arithmetic, and all liveness.
+
+### The lemmas
+
+The properties alone are not inductive. Each iteration ran (b) at K = 2,
+read the counterexample to induction (CTI), and added one lemma (`ORDER` in
+`store.qnt`; `Iter0`..`Iter6` replay them):
+
+| # | lemma added | the CTI that forced it |
+|---|---|---|
+| 1 | `idsBelow`: every id on a table is `< nextId` | `send` gives `nextId`, which is already on `dead` (S2) |
+| 2 | `obsIdBelow`: `obsUsed ⇒ obsId < nextId` | `obsId` used and `= nextId`: `send` hands it out again (S3) |
+| 3 | `obsTokPos`: `obsTok >= 1` | `obsTok = 0` (NULL) "retired"; `send` makes a row whose NULL token "is" it (S4.3) |
+| 4 | `toksBelow`: every live row's token `< nextTok` | a row already holds token `nextTok`; `lease` gives it to a second row (S4.1) |
+| 5 | `nextTokPos`: `nextTok >= 1` | `nextTok = 0`: `send` adds a row with NULL (0), which is not `< nextTok` (lemma 4) |
+| 6 | `obsTokBelow`: `obsRetired ⇒ obsTok < nextTok` | a retired `obsTok = nextTok`: `lease` issues it again (S4.3) |
+| — | `domLive`, `domDead`: every row has its columns | not forced by a CTI: `anyState` assumes it of the pre-state, and asking it of the post-state makes that assumption inductive |
+
+With all six (plus the two shape lemmas) (b) holds. Each of the six is
+needed: removing any one gives a CTI (`Drop0`..`Drop5`, all fail at K = 2).
+S4.1, S4.2, S5 and `S5state` needed no lemma of their own beyond these;
+the S4 work is lemmas 3–6, S2/S3 lemmas 1–2.
+
+**Not vacuous.** The model: TLC on `storeTlc` (ids 1..2, tokens 1..4,
+M, D ∈ 1..2, any observer) explores 125,792 distinct states (depth 14,
+23 s) and `IndInv` holds in all of them, so no lemma is stronger than the
+truth there. The planted bugs are caught by both: `done` without
+`AND lease_id = ?` (`BUG_DONE_NO_TOKEN`) — TLC breaks S4.2 at depth 5
+(645 states), Apalache's (b) gives a CTI (a `done` with another row's token
+deletes the row); `lease` without `attempts < M` (`BUG_LEASE_NO_M`, the code
+before `818e6fc`) — TLC breaks S5 at depth 5, Apalache's (b) gives a CTI.
+The arbitrary pre-state: `NoRichStart` fails from `indInit` at K = 3, so
+it does produce two live rows holding tokens, a dead row, a retired
+`obsTok` and a used `obsId` together; the guarded parts of the lemmas are
+exercised.
+
+**A trap found on the way.** A ghost *set* of tokens cannot be given an
+arbitrary pre-state: `nondet R = Int.powerset().oneOf()` is accepted by
+Quint and Apalache without a word, and yields **only the empty set** (an
+invariant `R == Set()` "holds" from it). An inductive check built on it
+would be vacuous. Hence the observers. Quint's own
+`--inductive-invariant` cannot be used either: it takes the invariant as the
+initial predicate, which needs every variable given a finite shape by the
+invariant itself (`x.in(S)`), and a set-valued variable of unbounded size
+has no such shape; the three obligations are therefore separate
+`quint verify` runs with `indInit`.
+
+### Timings
+
+| check | result | wall time |
+|---|---|---|
+| (b) K = 2 / 3 / 4 / 6 | holds | 16 / 18 / 25 / 135 s |
+| (a), (c) | hold | 14 s, 15 s |
+| each CTI iteration, each `Drop`n | CTI | 13–21 s |
+| planted bugs, (b) | CTI | 16 s each |
+| TLC, `storeTlc`, `IndInv` | holds, 125,792 states | 23 s |
+
+For comparison, the bounded TLC runs of the whole model (above): S4 (with
+S1, S2, S8) on B1, one message id, 34,412 states, 10 s (round 2) and
+17.0 M states, 813 s (round 1); S5 on B1-S5, `FIX_S5`, 4.1 M states,
+147 s. Those cover the delivery loop and its faults, which this does not;
+this covers the store against any caller, any number of steps, any
+integers and (by the argument above) any number of rows.
+
+### Effort
+
+Seven runs of (b) to reach an inductive invariant (six CTIs, one lemma
+each, all mechanical to read off the CTI), about 15 s per run; most of the
+time went into the model's shape (`anyState`, observers instead of ghost
+sets) and the vacuity trap above, not into the lemmas.
 
 # Round 1: the code at `e39f40e`
 
